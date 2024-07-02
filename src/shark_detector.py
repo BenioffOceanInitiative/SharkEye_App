@@ -38,8 +38,15 @@ class SharkDetector(QObject):
     def load_model(self, model_path: str):
         try:
             self.model = YOLO(model_path)
-            self.model.to(self.device).half()
-            logging.info(f"Model loaded successfully from {model_path}")
+            if self.device == 'cpu':
+                # Use full precision for CPU or older GPUs
+                self.model.to(self.device).float()
+                logging.info("Model loaded in full precision (float32) mode")
+            else:
+                # Use half precision only on CUDA devices with compute capability 7.0 or higher
+                self.model.to(self.device).half()
+                logging.info("Model loaded in half precision (float16) mode")
+
         except Exception as e:
             error_msg = f"Error loading model: {str(e)}"
             logging.error(error_msg)
@@ -75,7 +82,7 @@ class SharkDetector(QObject):
             logging.info(f"Starting to process video: {video_path}")
             self.unique_track_ids = set()
             
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H-%M-%S")
             result_dir = os.path.join(output_dir, timestamp)
             frames_dir = os.path.join(result_dir, "frames")
             bounding_boxes_dir = os.path.join(result_dir, "bounding_boxes")
@@ -146,8 +153,6 @@ class SharkDetector(QObject):
                     x, y, w, h = box.xywh[0].cpu().numpy()
                     conf = box.conf.item()
                     detections.append(np.array([x, y, w, h, conf]))
-        print(f"Raw detections: {detections}")
-        print(f"Processed image shape: {result.orig_img.shape}")
         return detections
 
     def _update_tracks(self, detections: List[np.ndarray], frame: np.ndarray, frame_with_boxes: np.ndarray):
@@ -180,8 +185,6 @@ class SharkDetector(QObject):
 
     def _draw_tracks(self, frame: np.ndarray, current_detections: List[np.ndarray]) -> np.ndarray:
         frame_height, frame_width = frame.shape[:2]
-        print(f"Frame size: {frame_width}x{frame_height}")
-        print(f"Adding bounding boxes and information for {len(current_detections)} detections")
 
         for detection in current_detections:
             x, y, w, h, confidence = detection
@@ -205,14 +208,8 @@ class SharkDetector(QObject):
             track = next((t for t in self.shark_trackers if np.allclose(t.last_detection[:4], detection[:4])), None)
             
             if track:
-                # Draw ID
-                cv2.putText(frame, f"ID: {track.id}", (x, max(0, y-30)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                cv2.putText(frame, f"ID: {track.id}, Conf: {confidence:.2f}", (x, max(0, y-30)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
             
-            # Draw confidence
-            cv2.putText(frame, f"Conf: {confidence:.2f}", (x, min(frame_height, y+h+30)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            print(f"Added bounding box and info for detection at ({x}, {y}, {w}, {h}) with confidence {confidence:.2f}")
-
         return frame
     
     def _save_best_frames(self, result_dir: str, video_name: str):
@@ -222,8 +219,6 @@ class SharkDetector(QObject):
         :param result_dir: Directory to save the output images
         :param video_name: Name of the processed video file
         """
-        print(f"Saving best frames. Total tracks: {len(self.shark_trackers)}")
-        print(f"Unique track IDs: {self.unique_track_ids}")
 
         saved_count = 0
         for track in self.shark_trackers:
@@ -238,12 +233,7 @@ class SharkDetector(QObject):
                 bbox_path = os.path.join(result_dir, "bounding_boxes", base_filename)
                 cv2.imwrite(bbox_path, track.best_frame_with_box)
 
-                print(f"Saved frames for track {track.id}. Frame: {frame_path}, Bbox: {bbox_path}")
                 saved_count += 1
-            else:
-                print(f"Skipping track {track.id}. Is valid: {track.is_valid}, Has best frame: {track.best_frame_with_box is not None}")
-
-        print(f"Total frames saved: {saved_count}")
         
     def _update_ui(self, frame, frame_number, total_processed_frames):
         height, width, channel = frame.shape
