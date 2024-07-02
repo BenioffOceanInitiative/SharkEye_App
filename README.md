@@ -16,7 +16,7 @@ pip install -r requirements.txt
 
 Start App
 ```
-python src/sharkeye.py
+python src/main.py
 ```
 
 # PyInstaller app
