@@ -29,7 +29,6 @@ class SharkTracker:
             self.detected_frames += 1
             if frame is not None and frame_with_box is not None:
                 if self.best_frame_with_box is None or confidence > self.best_confidence:
-                    print(f"Updating best frame for track {self.id}. Best confidence: {self.best_confidence}, Detected confidence: {confidence}")
                     self.best_confidence = confidence
                     self.best_frame = frame.copy()
                     self.best_frame_with_box = frame_with_box.copy()
@@ -38,7 +37,6 @@ class SharkTracker:
 
         self.is_active = self.missed_detections <= self.max_missed_detections
         self.is_valid = self.detected_frames >= self.min_detected_frames
-        print(f"Track {self.id} update - Conf: {self.best_confidence}, Is active: {self.is_active}, Is valid: {self.is_valid}, Detected frames: {self.detected_frames}, Missed detections: {self.missed_detections}")
 
     def predict_next_position(self) -> np.ndarray:
         """
