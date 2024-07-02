@@ -151,7 +151,7 @@ class SharkDetector(QObject):
             for box in result.boxes:
                 if box.cls.cpu().numpy()[0] == 0:  # Assuming 0 is the class for sharks
                     x, y, w, h = box.xywh[0].cpu().numpy()
-                    conf = box.conf.item()  
+                    conf = box.conf.item()
                     detections.append(np.array([x, y, w, h, conf]))
         return detections
 
