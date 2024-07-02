@@ -38,8 +38,15 @@ class SharkDetector(QObject):
     def load_model(self, model_path: str):
         try:
             self.model = YOLO(model_path)
-            self.model.to(self.device).half()
-            logging.info(f"Model loaded successfully from {model_path}")
+            if self.device == 'cpu':
+                # Use full precision for CPU or older GPUs
+                self.model.to(self.device).float()
+                logging.info("Model loaded in full precision (float32) mode")
+            else:
+                # Use half precision only on CUDA devices with compute capability 7.0 or higher
+                self.model.to(self.device).half()
+                logging.info("Model loaded in half precision (float16) mode")
+
         except Exception as e:
             error_msg = f"Error loading model: {str(e)}"
             logging.error(error_msg)
@@ -75,7 +82,7 @@ class SharkDetector(QObject):
             logging.info(f"Starting to process video: {video_path}")
             self.unique_track_ids = set()
             
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H-%M-%S")
             result_dir = os.path.join(output_dir, timestamp)
             frames_dir = os.path.join(result_dir, "frames")
             bounding_boxes_dir = os.path.join(result_dir, "bounding_boxes")
