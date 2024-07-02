@@ -71,7 +71,6 @@ class SharkTracker:
     def __init__(self, altitude, desired_frame_rate, high_conf_threshold=.69):
         self.tracks = []
         self.altitude = altitude
-        # the multiplier can be adjusted
         limit = round(1/2 * desired_frame_rate)
         if limit < 2:
             self.high_conf_det_limit = 2
@@ -80,9 +79,7 @@ class SharkTracker:
         self.high_conf_threshold = high_conf_threshold
 
 
-    def update_tracker(self, detections_list, frame, original_fw, timestamp): #detection list in format [[id, xywh, conf], ...]
-        #if it exists update, if it is new make a new one for it
-
+    def update_tracker(self, detections_list, frame, original_fw, timestamp):
         existing_track_ids = [x.id for x in self.tracks]
         for det in detections_list:
             if det[0] in existing_track_ids:
