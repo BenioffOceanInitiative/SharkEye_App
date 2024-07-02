@@ -2,9 +2,9 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
-                             QSizePolicy, QDialog, QDialogButtonBox)
+                             QSizePolicy, QDialog, QDialogButtonBox, QSlider)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QResizeEvent, QIcon
+from PyQt6.QtGui import QResizeEvent, QIcon, QPixmap
 
 from shark_detector import SharkDetector
 
@@ -30,7 +30,7 @@ class SharkEyeApp(QMainWindow):
             print("Creating SharkDetector Instance")
             self.shark_detector = SharkDetector()
             print("Loading Model")
-            self.shark_detector.load_model('./model_weights/train6-weights-best.pt')
+            self.shark_detector.load_model('../model_weights/train6-weights-best.pt')
         except Exception as e:
             print(f"Error initializing SharkEye: {str(e)}")
             self.show_error_message(f"Error initializing SharkEye: {str(e)}")
@@ -257,6 +257,8 @@ class ResultsDialog(QDialog):
     def verify_detections(self):
         # Implement detection verification logic here
         print("Verifying detections")
+        self.review_window = ReviewWindow()
+        self.review_window.show()
         self.accept()
 
 class VideoProcessingThread(QThread):
@@ -276,6 +278,102 @@ class VideoProcessingThread(QThread):
             print(f"Error in Video Processing Thread: {str(e)}")
             self.error_occurred.emit(str(e))
 
+class ReviewWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle("Tracking Results")
+        self.disply_width = 1024
+        self.display_height = 768
+        
+        self.initial_width = 1024
+        self.initial_height = 768
+        
+        self.resize(self.initial_width, self.initial_height)
+        
+        experiments = os.listdir("./results/")
+        experiments.sort()
+
+        self.false_flags = []
+
+        # does this need logic to handle no experiments?
+
+        last_run = experiments[-1]
+
+        self.frames = f"./results/{last_run}/frames"
+
+        # Slider
+        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_slider.setMinimum(0)
+        self.frame_slider.setMaximum(len(self.frames) - 1)
+
+        # Display Frame
+        self.frame_display = QLabel()
+        self.frame_display.resize(self.disply_width, self.display_height)
+        
+        self.file_path = QLabel()
+        self.file_path.setStyleSheet("color: white")
+
+        if len(self.frames) > 0:
+            self.frame_display.setPixmap(QPixmap(self.frames[0]).scaled(self.disply_width, self.display_height, Qt.KeepAspectRatio))
+            self.file_path.setText(self.frames[0])
+            self.current_frame = self.frames[0]
+
+        # Bbox Info
+        self.bbox_list = QListWidget()
+        self.bbox_list.setStyleSheet("background-color: black; color: white")
+        self.bbox_list.setMaximumHeight(100)
+
+        # buttons to add
+        add_remove_layout = QHBoxLayout()
+
+        self.add_frame_button = QPushButton("Flag as false positive")
+        self.add_frame_button.setStyleSheet("background-color: #082f54; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.add_frame_button.clicked.connect(self.flag_false_positive)
+
+        self.remove_frame_button = QPushButton("Remove flag")
+        self.remove_frame_button.setStyleSheet("background-color: #f22613; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.remove_frame_button.clicked.connect(self.remove_false_positive) 
+
+        add_remove_layout.addWidget(self.add_frame_button)
+        add_remove_layout.addWidget(self.remove_frame_button)      
+
+        frame_review_layout = QVBoxLayout()      
+
+        # self.delete_annotation
+        
+        # Layout 
+        tracker_layout = QVBoxLayout()
+        tracker_layout.addWidget(self.file_path)
+        tracker_layout.addWidget(self.frame_display)        
+        tracker_layout.addWidget(self.frame_slider)
+        tracker_layout.addLayout(add_remove_layout)
+        tracker_layout.addWidget(self.bbox_list)
+        self.frame_slider.valueChanged.connect(self.valuechange)
+        self.setLayout(tracker_layout)
+        
+    def flag_false_positive(self):
+        if self.current_frame not in self.false_flags:
+            self.bbox_list.addItem(self.current_frame)
+            self.false_flags.append(self.current_frame)
+
+    def remove_false_positive(self):
+        if self.current_frame in self.false_flags:
+            print(self.bbox_list.selectedItems())
+            self.bbox_list.takeItem(self.bbox_list.row(self.current_frame))
+            self.false_flags.remove(self.current_frame)
+
+    def valuechange(self):
+        index = self.frame_slider.value()
+        frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.KeepAspectRatio)
+        
+        self.current_frame = self.frames[index]
+
+        self.frame_display.setPixmap(frame)
+        self.file_path.setText(self.frames[index])
+
 if __name__ == "__main__":
     try:
         print("Starting Application")
@@ -286,3 +384,4 @@ if __name__ == "__main__":
         sys.exit(app.exec())
     except Exception as e:
         print(f"Unhandled exception: {str(e)}")
+
