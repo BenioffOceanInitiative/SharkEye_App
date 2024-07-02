@@ -1,7 +1,7 @@
-PyQt5
 ultralytics
 torch
 torchvision
 lapx
 Cython
 pyinstaller
+PyQt6
