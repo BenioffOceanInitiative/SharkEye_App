@@ -26,16 +26,16 @@ class SharkEyeApp(QMainWindow):
 
         self.video_paths = []
         self.processing_thread = None
+        
+        print("SharkEyeApp Initialization Complete")
+    
+    def init_shark_detector(self):
         try:
-            print("Creating SharkDetector Instance")
             self.shark_detector = SharkDetector()
-            print("Loading Model")
-            self.shark_detector.load_model('../model_weights/train6-weights-best.pt')
+            self.shark_detector.load_model('./model_weights/train6-weights-best.pt')
         except Exception as e:
             print(f"Error initializing SharkEye: {str(e)}")
             self.show_error_message(f"Error initializing SharkEye: {str(e)}")
-
-        print("SharkEyeApp Initialization Complete")
 
     def handle_error(self, error_message):
         print(f"Error occurred: {error_message}")
@@ -54,7 +54,16 @@ class SharkEyeApp(QMainWindow):
         Set up the user interface components of the application.
         This method creates and arranges all the widgets in the main window.
         """
-        
+        self.logo_label = QLabel()
+        logo_pixmap = self.create_logo()
+        if logo_pixmap:
+            self.logo_label.setPixmap(logo_pixmap)
+            self.logo_label.setStyleSheet("background-color: #1d2633;")
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            self.logo_label.setText("SharkEye")
+        self.layout.addWidget(self.logo_label)
+
         # Select Videos button (spans across)
         self.select_button = QPushButton("Select Videos")
         self.select_button.clicked.connect(self.select_videos)
@@ -102,12 +111,28 @@ class SharkEyeApp(QMainWindow):
         self.frame_label = QLabel()
         self.frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frame_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.frame_label.setMinimumSize(640, 480)
         self.frame_label.setText("Select video(s) and Start Tracking!")
         self.layout.addWidget(self.frame_label)
 
         # Results label
         self.results_label = QLabel()
         self.layout.addWidget(self.results_label)
+        
+    def create_logo(self):
+        logo_path = './assets/images/logo-white.png'
+        original_pixmap = QPixmap(logo_path)
+        if not original_pixmap.isNull():
+            # Define the desired width, and scale height proportionally
+            desired_width = 200
+            aspect_ratio = original_pixmap.width() / original_pixmap.height()
+            desired_height = int(desired_width / aspect_ratio)
+
+            scaled_pixmap = original_pixmap.scaled(desired_width, desired_height, 
+                                                Qt.AspectRatioMode.KeepAspectRatio, 
+                                                Qt.TransformationMode.SmoothTransformation)
+            return scaled_pixmap
+        return None
 
     def select_videos(self):
         """
@@ -170,6 +195,7 @@ class SharkEyeApp(QMainWindow):
 
         try:
             print("Creating VideoProcessingThread")
+            self.init_shark_detector()
             self.processing_thread = VideoProcessingThread(self.shark_detector, self.video_paths, output_dir)
             self.shark_detector.update_progress.connect(self.update_progress)
             self.shark_detector.update_frame.connect(self.update_frame)
