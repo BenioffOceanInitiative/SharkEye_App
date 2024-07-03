@@ -2,3 +2,4 @@ CONFIDENCE_THRESHOLD = 0.3
 MAX_MISSED_DETECTIONS = 5 # frames
 MIN_DETECTED_FRAMES = 2 
 VIDEO_STRIDE = 30
+MODEL_PATH = './model_weights/train6-weights-best.pt'
