@@ -40,7 +40,7 @@ class SharkEyeApp(QMainWindow):
         # Content layout with margins
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(20, 20, 20, 20)  # Set margins for content
+        self.content_layout.setContentsMargins(20, 20, 20, 20)
         
         self.main_layout.addWidget(self.content_widget)
         
