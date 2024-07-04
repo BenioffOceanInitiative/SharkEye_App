@@ -74,6 +74,36 @@ class SharkEyeApp(QMainWindow):
         logo_layout = QVBoxLayout(self.logo_widget)
         logo_layout.setContentsMargins(0, 0, 0, 0)  # Set zero margins
         
+<<<<<<< HEAD
+=======
+        print("SharkEyeApp Initialization Complete")
+    
+    def init_shark_detector(self):
+        try:
+            self.shark_detector = SharkDetector()
+            self.shark_detector.load_model('../model_weights/train6-weights-best.pt')
+        except Exception as e:
+            print(f"Error initializing SharkEye: {str(e)}")
+            self.show_error_message(f"Error initializing SharkEye: {str(e)}")
+
+    def handle_error(self, error_message):
+        print(f"Error occurred: {error_message}")
+        self.show_error_message(error_message)
+        if self.processing_thread:
+            self.processing_thread.quit()
+            self.processing_thread.wait()
+        self.start_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+
+    def show_error_message(self, message):
+        QMessageBox.critical(self, "Error", message)
+
+    def setup_ui(self):
+        """
+        Set up the user interface components of the application.
+        This method creates and arranges all the widgets in the main window.
+        """
+>>>>>>> df74907 (implemented QT5 verification window)
         self.logo_label = QLabel()
         logo_pixmap = self.load_logo()
         if logo_pixmap:
@@ -358,11 +388,19 @@ class SharkEyeApp(QMainWindow):
     
     def run_additional_inference(self):
         # Implement additional inference logic here
+<<<<<<< HEAD
         logging.info("Running additional inference")
 
     def verify_detections(self):
         # Implement detection verification logic here
         logging.info("Verifying detections")
+=======
+        print("Running additional inference")
+
+    def verify_detections(self):
+        # Implement detection verification logic here
+        print("Verifying detections")
+>>>>>>> df74907 (implemented QT5 verification window)
         self.verification_window = VerificationWindow()
         self.verification_window.show()
 
@@ -384,7 +422,11 @@ class ResultsDialog(QDialog):
         run_additional = self.button_box.addButton("Run Additional Inference", QDialogButtonBox.ButtonRole.ActionRole)
         verify_detections = self.button_box.addButton("Verify Detections", QDialogButtonBox.ButtonRole.ActionRole)
 
+<<<<<<< HEAD
         run_additional.clicked.connect(self.reject)
+=======
+        run_additional.clicked.connect(self.reject)  
+>>>>>>> df74907 (implemented QT5 verification window)
         verify_detections.clicked.connect(self.accept)
 
         layout.addWidget(self.button_box)
@@ -392,6 +434,7 @@ class ResultsDialog(QDialog):
 
         self.accepted.connect(self.parent().verify_detections)
         self.rejected.connect(self.parent().run_additional_inference)
+<<<<<<< HEAD
         
     def format_time(self, seconds: float) -> str:
         """
@@ -409,6 +452,8 @@ class ResultsDialog(QDialog):
             remaining_seconds = int(seconds % 60)
             return f"{minutes} minutes {remaining_seconds} seconds"
 
+=======
+>>>>>>> df74907 (implemented QT5 verification window)
 
 class VideoProcessingThread(QThread):
     error_occurred = pyqtSignal(str)
@@ -446,10 +491,19 @@ class VerificationWindow(QWidget):
         experiments.sort()
 
         self.false_flags = []
+<<<<<<< HEAD
         
         if len(experiments) > 0:
           last_run = experiments[-1]
           self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
+=======
+
+        # does this need logic to handle no experiments?
+
+        last_run = experiments[-1]
+
+        self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
+>>>>>>> df74907 (implemented QT5 verification window)
 
         # Slider
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -478,10 +532,18 @@ class VerificationWindow(QWidget):
 
         self.add_frame_button = QPushButton("Shark")
         self.add_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+<<<<<<< HEAD
+=======
+        #self.add_frame_button.setStyleSheet("background-color: #082f54; color: white; border-radius: 4px; width: 100px;height: 30px;")
+>>>>>>> df74907 (implemented QT5 verification window)
         self.add_frame_button.clicked.connect(self.flag_false_positive)
 
         self.remove_frame_button = QPushButton("No Shark")
         self.remove_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+<<<<<<< HEAD
+=======
+        #self.remove_frame_button.setStyleSheet("background-color: #f22613; color: white; border-radius: 4px; width: 100px;height: 30px;")
+>>>>>>> df74907 (implemented QT5 verification window)
         self.remove_frame_button.clicked.connect(self.remove_false_positive) 
 
         add_remove_layout.addWidget(self.add_frame_button)
