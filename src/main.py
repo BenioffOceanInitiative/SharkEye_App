@@ -81,7 +81,7 @@ class SharkEyeApp(QMainWindow):
     def init_shark_detector(self):
         try:
             self.shark_detector = SharkDetector()
-            self.shark_detector.load_model('../model_weights/train6-weights-best.pt')
+            self.shark_detector.load_model('./model_weights/train6-weights-best.pt')
         except Exception as e:
             print(f"Error initializing SharkEye: {str(e)}")
             self.show_error_message(f"Error initializing SharkEye: {str(e)}")
