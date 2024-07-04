@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
-                             QSizePolicy, QDialog, QDialogButtonBox)
+                             QSizePolicy, QDialog, QDialogButtonBox, QSlider)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QResizeEvent, QPixmap
 import logging
@@ -364,8 +364,8 @@ class ResultsDialog(QDialog):
         run_additional = self.button_box.addButton("Run Additional Inference", QDialogButtonBox.ButtonRole.ActionRole)
         verify_detections = self.button_box.addButton("Verify Detections", QDialogButtonBox.ButtonRole.ActionRole)
 
-        run_additional.clicked.connect(self.run_additional_inference)
-        verify_detections.clicked.connect(self.verify_detections)
+        run_additional.clicked.connect(self.reject)
+        verify_detections.clicked.connect(self.accept)
 
         layout.addWidget(self.button_box)
         self.setLayout(layout)
