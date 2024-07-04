@@ -32,7 +32,7 @@ class SharkEyeApp(QMainWindow):
     def init_shark_detector(self):
         try:
             self.shark_detector = SharkDetector()
-            self.shark_detector.load_model('./model_weights/train6-weights-best.pt')
+            self.shark_detector.load_model('../model_weights/train6-weights-best.pt')
         except Exception as e:
             print(f"Error initializing SharkEye: {str(e)}")
             self.show_error_message(f"Error initializing SharkEye: {str(e)}")
@@ -255,6 +255,16 @@ class SharkEyeApp(QMainWindow):
         self.cancel_button.setEnabled(False)
         dialog = ResultsDialog(total_detections, total_time, self)
         dialog.exec()
+    
+    def run_additional_inference(self):
+        # Implement additional inference logic here
+        print("Running additional inference")
+
+    def verify_detections(self):
+        # Implement detection verification logic here
+        print("Verifying detections")
+        self.verification_window = VerificationWindow()
+        self.verification_window.show()
 
 class ResultsDialog(QDialog):
     def __init__(self, total_detections, total_time, parent=None):
@@ -265,27 +275,18 @@ class ResultsDialog(QDialog):
         results_label = QLabel(f"Total Detections: {total_detections}\nTotal Time: {total_time:.2f} seconds")
         layout.addWidget(results_label)
 
-        button_box = QDialogButtonBox()
-        run_additional = button_box.addButton("Run Additional Inference", QDialogButtonBox.ButtonRole.ActionRole)
-        verify_detections = button_box.addButton("Verify Detections", QDialogButtonBox.ButtonRole.ActionRole)
+        self.button_box = QDialogButtonBox()
+        run_additional = self.button_box.addButton("Run Additional Inference", QDialogButtonBox.ButtonRole.ActionRole)
+        verify_detections = self.button_box.addButton("Verify Detections", QDialogButtonBox.ButtonRole.ActionRole)
 
-        run_additional.clicked.connect(self.run_additional_inference)
-        verify_detections.clicked.connect(self.verify_detections)
+        run_additional.clicked.connect(self.reject)  
+        verify_detections.clicked.connect(self.accept)
 
-        layout.addWidget(button_box)
+        layout.addWidget(self.button_box)
         self.setLayout(layout)
 
-    def run_additional_inference(self):
-        # Implement additional inference logic here
-        print("Running additional inference")
-        self.accept()
-
-    def verify_detections(self):
-        # Implement detection verification logic here
-        print("Verifying detections")
-        self.review_window = ReviewWindow()
-        self.review_window.show()
-        self.accept()
+        self.accepted.connect(self.parent().verify_detections)
+        self.rejected.connect(self.parent().run_additional_inference)
 
 class VideoProcessingThread(QThread):
     error_occurred = pyqtSignal(str)
@@ -304,7 +305,7 @@ class VideoProcessingThread(QThread):
             print(f"Error in Video Processing Thread: {str(e)}")
             self.error_occurred.emit(str(e))
 
-class ReviewWindow(QWidget):
+class VerificationWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.initUI()
@@ -328,7 +329,7 @@ class ReviewWindow(QWidget):
 
         last_run = experiments[-1]
 
-        self.frames = f"./results/{last_run}/frames"
+        self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
 
         # Slider
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -340,27 +341,29 @@ class ReviewWindow(QWidget):
         self.frame_display.resize(self.disply_width, self.display_height)
         
         self.file_path = QLabel()
-        self.file_path.setStyleSheet("color: white")
+        self.file_path.setStyleSheet("color: black;background-color: white; border-radius: 4px")
 
         if len(self.frames) > 0:
-            self.frame_display.setPixmap(QPixmap(self.frames[0]).scaled(self.disply_width, self.display_height, Qt.KeepAspectRatio))
+            self.frame_display.setPixmap(QPixmap(self.frames[0]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio))
             self.file_path.setText(self.frames[0])
             self.current_frame = self.frames[0]
 
         # Bbox Info
         self.bbox_list = QListWidget()
-        self.bbox_list.setStyleSheet("background-color: black; color: white")
+        self.bbox_list.setStyleSheet("background-color: black")
         self.bbox_list.setMaximumHeight(100)
 
         # buttons to add
         add_remove_layout = QHBoxLayout()
 
-        self.add_frame_button = QPushButton("Flag as false positive")
-        self.add_frame_button.setStyleSheet("background-color: #082f54; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.add_frame_button = QPushButton("Shark")
+        self.add_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+        #self.add_frame_button.setStyleSheet("background-color: #082f54; color: white; border-radius: 4px; width: 100px;height: 30px;")
         self.add_frame_button.clicked.connect(self.flag_false_positive)
 
-        self.remove_frame_button = QPushButton("Remove flag")
-        self.remove_frame_button.setStyleSheet("background-color: #f22613; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.remove_frame_button = QPushButton("No Shark")
+        self.remove_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+        #self.remove_frame_button.setStyleSheet("background-color: #f22613; color: white; border-radius: 4px; width: 100px;height: 30px;")
         self.remove_frame_button.clicked.connect(self.remove_false_positive) 
 
         add_remove_layout.addWidget(self.add_frame_button)
@@ -393,7 +396,7 @@ class ReviewWindow(QWidget):
 
     def valuechange(self):
         index = self.frame_slider.value()
-        frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.KeepAspectRatio)
+        frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
         
         self.current_frame = self.frames[index]
 
