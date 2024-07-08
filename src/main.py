@@ -329,8 +329,7 @@ class SharkEyeApp(QMainWindow):
 
         :param total_detections: Total number of shark detections across all videos
         :param total_time: Total processing time in seconds
-        """
-        
+        """ 
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         dialog = ResultsDialog(total_detections, total_time, self)
@@ -426,12 +425,10 @@ class VerificationWindow(QWidget):
         experiments.sort()
 
         self.false_flags = []
-
-        # does this need logic to handle no experiments?
-
-        last_run = experiments[-1]
-
-        self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
+        
+        if len(experiments) > 0:
+          last_run = experiments[-1]
+          self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
 
         # Slider
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
@@ -460,12 +457,10 @@ class VerificationWindow(QWidget):
 
         self.add_frame_button = QPushButton("Shark")
         self.add_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        #self.add_frame_button.setStyleSheet("background-color: #082f54; color: white; border-radius: 4px; width: 100px;height: 30px;")
         self.add_frame_button.clicked.connect(self.flag_false_positive)
 
         self.remove_frame_button = QPushButton("No Shark")
         self.remove_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        #self.remove_frame_button.setStyleSheet("background-color: #f22613; color: white; border-radius: 4px; width: 100px;height: 30px;")
         self.remove_frame_button.clicked.connect(self.remove_false_positive) 
 
         add_remove_layout.addWidget(self.add_frame_button)
@@ -473,8 +468,6 @@ class VerificationWindow(QWidget):
 
         frame_review_layout = QVBoxLayout()      
 
-        # self.delete_annotation
-        
         # Layout 
         tracker_layout = QVBoxLayout()
         tracker_layout.addWidget(self.file_path)
@@ -482,7 +475,7 @@ class VerificationWindow(QWidget):
         tracker_layout.addWidget(self.frame_slider)
         tracker_layout.addLayout(add_remove_layout)
         tracker_layout.addWidget(self.bbox_list)
-        self.frame_slider.valueChanged.connect(self.valuechange)
+        self.frame_slider.value_changed.connect(self.value_change)
         self.setLayout(tracker_layout)
         
     def flag_false_positive(self):
@@ -496,7 +489,7 @@ class VerificationWindow(QWidget):
             self.bbox_list.takeItem(self.bbox_list.row(self.current_frame))
             self.false_flags.remove(self.current_frame)
 
-    def valuechange(self):
+    def value_change(self):
         index = self.frame_slider.value()
         frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
         
