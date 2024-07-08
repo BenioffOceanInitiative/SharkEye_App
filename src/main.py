@@ -475,7 +475,7 @@ class VerificationWindow(QWidget):
         tracker_layout.addWidget(self.frame_slider)
         tracker_layout.addLayout(add_remove_layout)
         tracker_layout.addWidget(self.bbox_list)
-        self.frame_slider.value_changed.connect(self.value_change)
+        self.frame_slider.valueChanged.connect(self.value_change)
         self.setLayout(tracker_layout)
         
     def flag_false_positive(self):
