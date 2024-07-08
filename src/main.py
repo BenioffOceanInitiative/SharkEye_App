@@ -16,7 +16,7 @@ class SharkEyeApp(QMainWindow):
         self.init_ui()
         self.init_variables()
         logging.info("SharkEyeApp Initialization Complete")
-
+    
     # Initialization methods
     def setup_logging(self):
         """Set up logging configuration."""
@@ -40,7 +40,7 @@ class SharkEyeApp(QMainWindow):
         # Content layout with margins
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
-        self.content_layout.setContentsMargins(20, 20, 20, 20)
+        self.content_layout.setContentsMargins(100, 20, 100, 20)
         
         self.main_layout.addWidget(self.content_widget)
         
@@ -394,7 +394,7 @@ class VideoProcessingThread(QThread):
         except Exception as e:
             logging.error(f"Error in Video Processing Thread: {str(e)}")
             self.error_occurred.emit(str(e))
-
+    
 if __name__ == "__main__":
     try:
         logging.info("Starting Application")
