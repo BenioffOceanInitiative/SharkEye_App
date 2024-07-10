@@ -18,7 +18,7 @@ from shark_tracker import SharkTracker
 from config import CONFIDENCE_THRESHOLD, VIDEO_STRIDE, MAX_MISSED_DETECTIONS, MIN_DETECTED_FRAMES, MODEL_PATH
 
 class SharkDetector(QObject):
-    update_progress = pyqtSignal(int)
+    update_progress_bar = pyqtSignal(int)
     update_frame = pyqtSignal(QPixmap)
     processing_finished = pyqtSignal(int, float)
     error_occurred = pyqtSignal(str)
@@ -88,7 +88,7 @@ class SharkDetector(QObject):
                 continue
 
             self._clear_gpu_memory()
-            self.update_progress.emit(int((i + 1) / len(video_paths) * 100))
+            self.update_progress_bar.emit(int((i + 1) / len(video_paths) * 100))
 
         self.processing_finished.emit(total_unique_detections, total_processing_time)
         
@@ -134,7 +134,7 @@ class SharkDetector(QObject):
                     logging.error(f"Error processing video {video_path} on frame {i}: {str(e)}")
                     continue
                 
-                self.update_progress.emit(int((i + 1) / total_processed_frames * 100))
+                self.update_progress_bar.emit(int((i + 1) / total_processed_frames * 100))
             
             self._save_best_frames(run_dir, os.path.basename(video_path))
             
