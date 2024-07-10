@@ -2,7 +2,8 @@
 /results/
 /videos/
 /build/
-
+/dist/
+/model_weights/
 /src/__pycache__/
 
 .DS_Store
