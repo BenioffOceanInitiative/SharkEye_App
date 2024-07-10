@@ -1,6 +1,1 @@
-model_weights filter=lfs diff=lfs merge=lfs -text
-model_weights/train6-weights-best.pt filter=lfs diff=lfs merge=lfs -text
-model_weights/train7-weights-best.pt filter=lfs diff=lfs merge=lfs -text
-dist filter=lfs diff=lfs merge=lfs -text
-dist/SharkEye filter=lfs diff=lfs merge=lfs -text
-dist/SharkEye.app filter=lfs diff=lfs merge=lfs -text
+dist/SharkEye.app/Contents/Frameworks/torch/lib/libtorch_cpu.dylib filter=lfs diff=lfs merge=lfs -text
