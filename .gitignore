@@ -2,7 +2,7 @@
 /results/
 /videos/
 /build/
-
+/dist/
 /src/__pycache__/
 
 .DS_Store
