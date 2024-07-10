@@ -531,9 +531,6 @@ class VerificationWindow(QWidget):
         self.frame_slider.hide()
         
         self.frame_display.setText("Select an experiment to start verifying detections")
-        # self.placeholder_pixmap = QPixmap(self.disply_width, self.display_height).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
-        # self.placeholder_pixmap.fill(Qt.GlobalColor.transparent)
-        # self.frame_display.setPixmap(self.placeholder_pixmap)
         
         self.mark_shark_button.setDisabled(True)
         self.unmark_shark_button.setDisabled(True)
