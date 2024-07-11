@@ -475,6 +475,7 @@ class VerificationWindow(QWidget):
         tracker_layout.addWidget(self.frame_slider)
         tracker_layout.addLayout(marking_layout)
         tracker_layout.addWidget(self.finish_verification_button)
+
         self.frame_slider.valueChanged.connect(self.value_change)
         self.setLayout(tracker_layout)
         self.select_experiment(0)
