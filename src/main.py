@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
-                             QSizePolicy, QDialog, QDialogButtonBox, QSlider)
+                             QSizePolicy, QDialog, QDialogButtonBox, QSlider, QStackedWidget, QComboBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QResizeEvent, QPixmap
 import logging
@@ -28,7 +28,9 @@ class SharkEyeApp(QMainWindow):
         self.setWindowTitle("SharkEye")
         self.setGeometry(100, 100, 1280, 720)
         self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.central_widget)         
+        self.setCentralWidget(self.stack)
         
         # Main layout with zero margins
         self.main_layout = QVBoxLayout(self.central_widget)
@@ -340,10 +342,11 @@ class SharkEyeApp(QMainWindow):
         logging.info("Running additional inference")
 
     def verify_detections(self):
-        # Implement detection verification logic here
+        """Opens Verification Window Widget"""
         logging.info("Verifying detections")
         self.verification_window = VerificationWindow()
-        self.verification_window.show()
+        self.stack.addWidget(self.verification_window)
+        self.stack.setCurrentWidget(self.verification_window)
 
 class ResultsDialog(QDialog):
     def __init__(self, total_detections, total_time, parent=None):
@@ -388,7 +391,6 @@ class ResultsDialog(QDialog):
             remaining_seconds = int(seconds % 60)
             return f"{minutes} minutes {remaining_seconds} seconds"
 
-
 class VideoProcessingThread(QThread):
     error_occurred = pyqtSignal(str)
 
@@ -412,7 +414,7 @@ class VerificationWindow(QWidget):
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle("Tracking Results")
+        self.setWindowTitle("Detection Verification")
         self.disply_width = 1024
         self.display_height = 768
         
@@ -421,82 +423,154 @@ class VerificationWindow(QWidget):
         
         self.resize(self.initial_width, self.initial_height)
         
-        experiments = os.listdir("./results/")
-        experiments.sort()
+        self.experiments = os.listdir("./results/")
+        self.experiments.sort()
+        self.experiments.reverse()
+    
+        # Shark Buttons 
+        marking_layout = QHBoxLayout()
 
-        self.false_flags = []
+        self.mark_shark_button = QPushButton("Shark")
+        self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.mark_shark_button.clicked.connect(self.mark_as_shark)
+
+        self.unmark_shark_button = QPushButton("No Shark")
+        self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+        self.unmark_shark_button.clicked.connect(self.unmark_shark) 
+
+        marking_layout.addWidget(self.mark_shark_button)
+        marking_layout.addWidget(self.unmark_shark_button)      
+
+        self.finish_verification_button = QPushButton("Finish Verification")
+        self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.finish_verification_button.clicked.connect(self.finish_verifications)
         
-        if len(experiments) > 0:
-          last_run = experiments[-1]
-          self.frames = ["/".join((f"./results/{last_run}/frames", f)) for f in os.listdir(f"./results/{last_run}/frames")]
-
+        self.load_experiment_frames(0)
+        
         # Slider
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(len(self.frames) - 1)
 
+        # Experiment Selection
+        self.experiment_label = QComboBox()
+        self.experiment_label.addItems(self.experiments)
+        self.experiment_label.currentIndexChanged.connect(self.select_experiment)
+
         # Display Frame
         self.frame_display = QLabel()
+        self.frame_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.frame_display.setMinimumSize(640, 480)
         self.frame_display.resize(self.disply_width, self.display_height)
         
         self.file_path = QLabel()
         self.file_path.setStyleSheet("color: black;background-color: white; border-radius: 4px")
+            
+        self.verified_sharks = [True for x in range(len(self.frames))]
 
-        if len(self.frames) > 0:
-            self.frame_display.setPixmap(QPixmap(self.frames[0]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio))
-            self.file_path.setText(self.frames[0])
-            self.current_frame = self.frames[0]
-
-        # Bbox Info
-        self.bbox_list = QListWidget()
-        self.bbox_list.setStyleSheet("background-color: black")
-        self.bbox_list.setMaximumHeight(100)
-
-        # buttons to add
-        add_remove_layout = QHBoxLayout()
-
-        self.add_frame_button = QPushButton("Shark")
-        self.add_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        self.add_frame_button.clicked.connect(self.flag_false_positive)
-
-        self.remove_frame_button = QPushButton("No Shark")
-        self.remove_frame_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        self.remove_frame_button.clicked.connect(self.remove_false_positive) 
-
-        add_remove_layout.addWidget(self.add_frame_button)
-        add_remove_layout.addWidget(self.remove_frame_button)      
-
-        frame_review_layout = QVBoxLayout()      
-
-        # Layout 
+        # Main Layout 
         tracker_layout = QVBoxLayout()
-        tracker_layout.addWidget(self.file_path)
+        tracker_layout.addWidget(self.experiment_label)
         tracker_layout.addWidget(self.frame_display)        
         tracker_layout.addWidget(self.frame_slider)
-        tracker_layout.addLayout(add_remove_layout)
-        tracker_layout.addWidget(self.bbox_list)
+        tracker_layout.addLayout(marking_layout)
+        tracker_layout.addWidget(self.finish_verification_button)
         self.frame_slider.valueChanged.connect(self.value_change)
         self.setLayout(tracker_layout)
-        
-    def flag_false_positive(self):
-        if self.current_frame not in self.false_flags:
-            self.bbox_list.addItem(self.current_frame)
-            self.false_flags.append(self.current_frame)
+        self.select_experiment(0)
+    
+    def load_experiment_frames(self, index):
+        self.last_run = self.experiments[index]
+        self.frames = ["/".join((f"./results/{self.last_run}/bounding_boxes", f)) for f in os.listdir(f"./results/{self.last_run}/bounding_boxes")]
 
-    def remove_false_positive(self):
-        if self.current_frame in self.false_flags:
-            print(self.bbox_list.selectedItems())
-            self.bbox_list.takeItem(self.bbox_list.row(self.current_frame))
-            self.false_flags.remove(self.current_frame)
+    def finish_verifications(self):
+        """Deletes images from 'frames' and 'bounding_boxes' folders marked as having no sharks"""
+        for index, x in enumerate(self.verified_sharks):
+            if x == False:
+                os.remove(self.frames[index])
+                os.remove(self.frames[index].replace("bounding_boxes", "frames"))
+        self.parent().setCurrentWidget(self.parent().parent().central_widget)
+        self.parent().removeWidget(self.parent().parent().verification_window)
+    
+    def mark_as_shark(self):
+        """Marks frame as having a shark."""
+        if self.verified_sharks[self.current_frame] != True:
+            self.verified_sharks[self.current_frame] = True
+            self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
+            self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+
+    def unmark_shark(self):
+        """Marks frame as having no shark. Frame will be deleted with finish_verification call"""
+        if self.verified_sharks[self.current_frame] == True:
+            self.verified_sharks[self.current_frame] = False
+            self.mark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+            self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px;height: 30px;")
 
     def value_change(self):
+        """Handles display of frames and colors of verification buttons"""
         index = self.frame_slider.value()
         frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
-        
-        self.current_frame = self.frames[index]
+        self.current_frame = index
 
         self.frame_display.setPixmap(frame)
         self.file_path.setText(self.frames[index])
+        self.update_button_styles()
+
+    def update_button_styles(self):
+        """Changes colors of marking buttons based on selection"""
+        if len(self.verified_sharks) > 0:
+            if self.verified_sharks[self.current_frame] == True:
+                self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px; height: 30px;")
+                self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px; height: 30px;")
+            else:
+                self.mark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px; height: 30px;")
+                self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px; height: 30px;")
+
+    def hide_ui_elements(self):
+        """Makes display frame, verification buttons and slider disappear"""
+        self.frame_slider.hide()
+        
+        self.frame_display.setText("Select an experiment to start verifying detections")
+        
+        self.mark_shark_button.setDisabled(True)
+        self.unmark_shark_button.setDisabled(True)
+        self.finish_verification_button.setDisabled(True)
+
+        self.mark_shark_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
+        self.unmark_shark_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
+        self.finish_verification_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
+
+    def show_ui_elements(self):
+        """Makes display frame, verification buttons and slider appear"""
+        self.frame_slider.show()
+        self.frame_display.show()
+        
+        self.mark_shark_button.setEnabled(True)
+        self.unmark_shark_button.setEnabled(True)
+        self.finish_verification_button.setEnabled(True)
+        
+        self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
+        self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
+        self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; width: 100px;height: 30px;")
+
+    def select_experiment(self, index):
+        """Selects experiment to run verification on""" 
+        self.load_experiment_frames(index)
+
+        if len(self.frames) > 0: 
+            self.current_frame = 0
+            self.frame_slider.setValue(0)
+            frame = QPixmap(self.frames[self.current_frame]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
+            self.frame_display.setPixmap(frame)
+
+            self.frame_slider.setMinimum(0)
+            self.frame_slider.setMaximum(len(self.frames) - 1)
+
+            self.verified_sharks = [True for x in range(len(self.frames))]
+
+            self.show_ui_elements()
+        else:
+            self.hide_ui_elements()
 
 if __name__ == "__main__":
     try:
