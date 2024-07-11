@@ -1,5 +1,6 @@
 import sys
 import os
+from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
                              QSizePolicy, QDialog, QDialogButtonBox, QSlider, QStackedWidget, QComboBox)
@@ -9,19 +10,69 @@ import logging
 
 from shark_detector import SharkDetector
 
+def setup_logging():
+    try:
+        log_file = os.path.join(os.getcwd(), "sharkeye_log.txt")
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, mode='w'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        logging.info("Logging initialized")
+    except Exception as e:
+        print(f"Error setting up logging: {str(e)}")
+
+setup_logging()
+logging.info(f"Python version: {sys.version}")
+logging.info(f"Current working directory: {os.getcwd()}")
+logging.info(f"sys.executable: {sys.executable}")
+logging.info(f"sys._MEIPASS: {getattr(sys, '_MEIPASS', 'Not running from PyInstaller')}")
+logging.info(f"sys.argv: {sys.argv}")
+
+def get_base_dir():
+    if getattr(sys, 'frozen', False):
+        # If the application is run as a bundle, use the sys._MEIPASS
+        return sys._MEIPASS
+    else:
+        # If running in development, use the directory of the script
+        return os.path.dirname(os.path.abspath(__file__))
+
+def get_writable_dir():
+    if getattr(sys, 'frozen', False):
+        # We are running in a bundle
+        app_dir = Path(sys.executable).parent.parent.parent.parent if sys.platform == 'darwin' else Path(sys.executable).parent
+    else:
+        # We are running in a normal Python environment
+        app_dir = Path(__file__).parent
+
+    results_dir = app_dir / "results"
+    
+    try:
+        results_dir.mkdir(exist_ok=True)
+        # Test if we can write to this directory
+        test_file = results_dir / 'test_write.txt'
+        test_file.write_text('test')
+        test_file.unlink()
+    except (PermissionError, OSError):
+        # If we can't write to the app directory, fall back to a user-writable location
+        fallback_dir = Path.home() / "results"
+        fallback_dir.mkdir(exist_ok=True)
+        results_dir = fallback_dir
+        print(f"Warning: Could not write to {app_dir}. Using {fallback_dir} instead.")
+
+    return str(results_dir)
+
 class SharkEyeApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setup_logging()
         self.init_ui()
         self.init_variables()
         logging.info("SharkEyeApp Initialization Complete")
 
     # Initialization methods
-    def setup_logging(self):
-        """Set up logging configuration."""
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
     def init_ui(self):
         """Initialize the user interface."""
         logging.info("Initializing SharkEyeApp UI")
@@ -81,9 +132,19 @@ class SharkEyeApp(QMainWindow):
         logo_layout.addWidget(self.logo_label)
         self.main_layout.addWidget(self.logo_widget)
 
+    def resource_path(self, relative_path):
+        """ Get absolute path to resource, works for dev and for PyInstaller """
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+
+        return os.path.join(base_path, relative_path)
+
     def load_logo(self):
         """Load and scale the logo image."""
-        logo_path = './assets/images/logo-white.png'
+        logo_path = self.resource_path('assets/images/logo-white.png')
         original_pixmap = QPixmap(logo_path)
         if not original_pixmap.isNull():
             desired_width = 300
@@ -190,30 +251,47 @@ class SharkEyeApp(QMainWindow):
         self.update_file_list()
 
     def start_detection(self):
-        """Initiate the shark detection process for the selected videos."""
+        logging.info("Start Detection button clicked")
         if not self.video_paths:
+            logging.warning("No video paths selected")
             return
 
-        self.start_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-
-        self.create_progress_area()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setRange(0, 100)
-        self.video_name_label.setText("Preparing...")
-
-        output_dir = './results'
-        os.makedirs(output_dir, exist_ok=True)
-
         try:
-            logging.info("Creating VideoProcessingThread")
+            logging.info("Disabling start button and enabling cancel button")
+            self.start_button.setEnabled(False)
+            self.cancel_button.setEnabled(True)
+
+            logging.info("Creating progress area")
+            self.create_progress_area()
+            self.progress_bar.setValue(0)
+            self.progress_bar.setRange(0, 100)
+            self.video_name_label.setText("Preparing...")
+
+            output_dir = get_writable_dir()
+            logging.info(f"Attempting to create output directory: {output_dir}")
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+                logging.info(f"Output directory created successfully: {output_dir}")
+            except Exception as e:
+                logging.exception(f"Error creating output directory: {str(e)}")
+                raise
+
+            logging.info("Initializing SharkDetector")
             self.init_shark_detector()
+
+            logging.info("Creating VideoProcessingThread")
             self.processing_thread = VideoProcessingThread(self.shark_detector, self.video_paths, output_dir)
+
+            logging.info("Connecting signals")
             self.connect_signals()
+
+            logging.info("Starting processing thread")
             self.processing_thread.start()
+
         except Exception as e:
-            logging.error(f"Error Starting Detection: {str(e)}")
+            logging.exception(f"Error in start_detection: {str(e)}")
             self.show_error_message(f"Error Starting Detection: {str(e)}")
+            self.reset_ui()
 
     def cancel_detection(self):
         """Cancel the ongoing detection process."""
@@ -221,7 +299,6 @@ class SharkEyeApp(QMainWindow):
             self.shark_detector.cancel()
             self.processing_thread.quit()
             self.processing_thread.wait()
-            self.remove_progress_area()
             self.reset_ui()
             logging.info("Detection cancelled by user")
 
@@ -252,24 +329,15 @@ class SharkEyeApp(QMainWindow):
         """Update the video name label with the current video being processed."""
         self.video_name_label.setText(f"Processing: {os.path.basename(video_name)}")
 
-    def processing_finished(self, total_detections, total_time):
-        """Handle the completion of the video processing."""
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-        
-        self.remove_progress_area()
-
-        dialog = ResultsDialog(total_detections, total_time, self)
-        dialog.exec()
-
     # Helper methods
     def init_shark_detector(self):
-        """Initialize the SharkDetector object and load the model."""
         try:
+            logging.info("Creating SharkDetector instance")
             self.shark_detector = SharkDetector()
+            logging.info("SharkDetector instance created successfully")
         except Exception as e:
-            logging.error(f"Error initializing SharkEye: {str(e)}")
-            self.show_error_message(f"Error initializing SharkEye: {str(e)}")
+            logging.exception(f"Error initializing SharkDetector: {str(e)}")
+            raise  # Re-raise the exception to be caught in start_detection
 
     def connect_signals(self):
         """Connect signals from SharkDetector and processing thread."""
@@ -297,6 +365,7 @@ class SharkEyeApp(QMainWindow):
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.frame_label.setText("Select video(s) and Start Tracking!")
+        self.remove_progress_area()
 
     def handle_error(self, error_message):
         """Handle errors that occur during processing."""
@@ -334,12 +403,16 @@ class SharkEyeApp(QMainWindow):
         """ 
         self.start_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        
+        self.reset_ui()
+        
         dialog = ResultsDialog(total_detections, total_time, self)
         dialog.exec()
     
     def run_additional_inference(self):
         # Implement additional inference logic here
         logging.info("Running additional inference")
+        self.reset_ui()
 
     def verify_detections(self):
         """Opens Verification Window Widget"""
@@ -399,13 +472,17 @@ class VideoProcessingThread(QThread):
         self.shark_detector = shark_detector
         self.video_paths = video_paths
         self.output_dir = output_dir
+        logging.info(f"VideoProcessingThread initialized with {len(video_paths)} videos")
 
     def run(self):
         try:
-            logging.info("Starting VideoProcessingThread")
-            self.shark_detector.process_videos(self.video_paths, self.output_dir)
+            logging.info("Starting video processing")
+            for i, video_path in enumerate(self.video_paths):
+                logging.info(f"Processing video {i+1}/{len(self.video_paths)}: {video_path}")
+                self.shark_detector.process_videos([video_path], self.output_dir)
+            logging.info("Video processing completed successfully")
         except Exception as e:
-            logging.error(f"Error in Video Processing Thread: {str(e)}")
+            logging.exception(f"Error in Video Processing Thread: {str(e)}")
             self.error_occurred.emit(str(e))
 
 class VerificationWindow(QWidget):
@@ -423,7 +500,8 @@ class VerificationWindow(QWidget):
         
         self.resize(self.initial_width, self.initial_height)
         
-        self.experiments = os.listdir("./results/")
+        results_dir = get_writable_dir()
+        self.experiments = os.listdir(results_dir)
         self.experiments.sort()
         self.experiments.reverse()
     
@@ -480,18 +558,22 @@ class VerificationWindow(QWidget):
         self.select_experiment(0)
     
     def load_experiment_frames(self, index):
+        results_dir = get_writable_dir()
         self.last_run = self.experiments[index]
-        self.frames = ["/".join((f"./results/{self.last_run}/bounding_boxes", f)) for f in os.listdir(f"./results/{self.last_run}/bounding_boxes")]
-
+        bounding_boxes_dir = os.path.join(results_dir, self.last_run, "bounding_boxes")
+        self.frames = [os.path.join(bounding_boxes_dir, f) for f in os.listdir(bounding_boxes_dir)]
+        
     def finish_verifications(self):
         """Deletes images from 'frames' and 'bounding_boxes' folders marked as having no sharks"""
+        results_dir = get_writable_dir()
         for index, x in enumerate(self.verified_sharks):
             if x == False:
                 os.remove(self.frames[index])
-                os.remove(self.frames[index].replace("bounding_boxes", "frames"))
+                frames_path = self.frames[index].replace("bounding_boxes", "frames")
+                os.remove(frames_path)
         self.parent().setCurrentWidget(self.parent().parent().central_widget)
         self.parent().removeWidget(self.parent().parent().verification_window)
-    
+        
     def mark_as_shark(self):
         """Marks frame as having a shark."""
         if self.verified_sharks[self.current_frame] != True:
@@ -579,6 +661,9 @@ if __name__ == "__main__":
         window = SharkEyeApp()
         logging.info("Showing Main Window")
         window.show()
-        sys.exit(app.exec())
+        exit_code = app.exec()
+        logging.info(f"Application exiting with code {exit_code}")
+        sys.exit(exit_code)
     except Exception as e:
-        logging.error(f"Unhandled exception: {str(e)}")
+        logging.exception(f"Unhandled exception: {str(e)}")
+        sys.exit(1)

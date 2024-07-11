@@ -11,7 +11,7 @@ from scipy.optimize import linear_sum_assignment
 import torch
 from ultralytics import YOLO
 
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
 from shark_tracker import SharkTracker
@@ -26,6 +26,7 @@ class SharkDetector(QObject):
 
     def __init__(self):
         super().__init__()
+        logging.info("Initializing SharkDetector Class")
         self.model = None
         self.device = self._get_device()
         self.is_cancelled = False
@@ -47,7 +48,9 @@ class SharkDetector(QObject):
     def _load_model(self):
         """Load the YOLO model and configure it based on the available device."""
         try:
+            logging.info("Model loading...")
             self.model = YOLO(MODEL_PATH)
+            logging.info(f"Model is for device: {self.device}")
             if self.device == 'cpu':
                 self.model.to(self.device).float()
                 logging.info("Model loaded in full precision (float32) mode")
@@ -58,6 +61,7 @@ class SharkDetector(QObject):
             error_msg = f"Error loading model: {str(e)}"
             logging.error(error_msg)
             self.error_occurred.emit(error_msg)
+            raise
 
     def process_videos(self, video_paths: List[str], output_dir: str):
         """Process multiple videos for shark detection."""
@@ -81,6 +85,7 @@ class SharkDetector(QObject):
                 unique_detections, processing_time = self.process_single_video(video_file, run_dir)
                 total_unique_detections += unique_detections
                 total_processing_time += processing_time
+                logging.info(f"Video processed: {unique_detections} detections in {processing_time:.2f} seconds")
             except Exception as e:
                 logging.error(f"Error processing video {video_file}: {str(e)}")
                 traceback.print_exc()
