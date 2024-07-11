@@ -1,8 +1,10 @@
 /ocean/
 /results/
 /videos/
-
+/build/
+/dist/
 /src/__pycache__/
 
+sharkeye_log.txt
 .DS_Store
 app.log

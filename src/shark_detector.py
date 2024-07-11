@@ -11,7 +11,7 @@ from scipy.optimize import linear_sum_assignment
 import torch
 from ultralytics import YOLO
 
-from PyQt6.QtCore import QObject, pyqtSignal, Qt
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
 from shark_tracker import SharkTracker
