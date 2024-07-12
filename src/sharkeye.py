@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
                              QSizePolicy, QStackedWidget)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QResizeEvent, QPixmap
+from PyQt6.QtGui import QResizeEvent, QPixmap, QIcon
 import logging
 
 from video_selection_area import VideoSelectionArea
@@ -69,6 +69,16 @@ def get_writable_dir():
         print(f"Warning: Could not write to {app_dir}. Using {fallback_dir} instead.")
 
     return str(results_dir)
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
 
 class SharkEyeApp(QMainWindow):
     def __init__(self):
@@ -156,19 +166,9 @@ class SharkEyeApp(QMainWindow):
         logo_layout.addWidget(self.logo_label)
         self.main_layout.addWidget(self.logo_widget)
 
-    def resource_path(self, relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        try:
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-
-        return os.path.join(base_path, relative_path)
-
     def load_logo(self):
         """Load and scale the logo image."""
-        logo_path = self.resource_path('assets/images/logo-white.png')
+        logo_path = resource_path('assets/images/logo-white.png')
         original_pixmap = QPixmap(logo_path)
         if not original_pixmap.isNull():
             desired_width = 300
@@ -452,11 +452,24 @@ class SharkEyeApp(QMainWindow):
 if __name__ == "__main__":
     try:
         logging.info("Starting Application")
+        
         app = QApplication(sys.argv)
+        
+        if sys.platform.startswith('win'):
+            app_icon = resource_path('assets/logo/SharkEye.ico')
+        elif sys.platform.startswith('darwin'):
+            app_icon = resource_path('assets/logo/SharkEye.icns')
+        else:
+            app_icon = resource_path('assets/logo/SharkEye.iconset/icon_32x32.png')
+            
+        app.setWindowIcon(QIcon(app_icon))
+        
         window = SharkEyeApp()
         logging.info("Showing Main Window")
         window.show()
         exit_code = app.exec()
+        app = QApplication(sys.argv)
+
         logging.info(f"Application exiting with code {exit_code}")
         sys.exit(exit_code)
     except Exception as e:
