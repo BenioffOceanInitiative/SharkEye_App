@@ -4,6 +4,7 @@
 /build/
 /dist/
 /src/__pycache__/
+/src/results/
 
 sharkeye_log.txt
 .DS_Store

@@ -3,11 +3,16 @@ import os
 from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, 
                              QFileDialog, QListWidget, QLabel, QProgressBar, QListWidgetItem, QMessageBox, 
-                             QSizePolicy, QDialog, QDialogButtonBox, QSlider, QStackedWidget, QComboBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+                             QSizePolicy, QStackedWidget)
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QResizeEvent, QPixmap
 import logging
 
+from video_selection_area import VideoSelectionArea
+from video_processing_thread import VideoProcessingThread
+from action_buttons import ActionButtons
+from results_dialog import ResultsDialog
+from verification_window import VerificationWindow
 from shark_detector import SharkDetector
 
 def setup_logging():
@@ -68,11 +73,20 @@ def get_writable_dir():
 class SharkEyeApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.init_ui()
         self.init_variables()
+        self.init_ui()
         logging.info("SharkEyeApp Initialization Complete")
+        
+    def init_variables(self):
+        """Initialize instance variables."""
+        self.processing_thread = None
+        self.progress_bar = None
+        self.video_name_label = QLabel()
+        self.video_selection_area = None
+        self.action_buttons = None
+        self.frame_label = None
+        self.results_label = None
 
-    # Initialization methods
     def init_ui(self):
         """Initialize the user interface."""
         logging.info("Initializing SharkEyeApp UI")
@@ -83,14 +97,12 @@ class SharkEyeApp(QMainWindow):
         self.stack.addWidget(self.central_widget)         
         self.setCentralWidget(self.stack)
         
-        # Main layout with zero margins
         self.main_layout = QVBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
         self.create_logo()
 
-        # Content layout with margins
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(20, 20, 20, 20)
@@ -99,20 +111,32 @@ class SharkEyeApp(QMainWindow):
         
         self.setup_ui_components()
 
-    def init_variables(self):
-        """Initialize instance variables."""
-        self.video_paths = []
-        self.processing_thread = None
-        self.progress_bar = None
-        self.video_name_label = None
-
     def setup_ui_components(self):
         """Set up individual UI components."""
-        self.create_video_selection_area()
-        self.create_file_list()
-        self.create_action_buttons()
+        self.video_selection_area = VideoSelectionArea()
+        self.content_layout.addWidget(self.video_selection_area)
+
+        self.action_buttons = ActionButtons()
+        self.content_layout.addWidget(self.action_buttons)
+
         self.create_frame_display()
         self.create_results_label()
+
+        # Connect signals
+        self.video_selection_area.videos_selected.connect(self.on_videos_selected)
+        self.video_selection_area.selection_cleared.connect(self.on_selection_cleared)
+        self.action_buttons.start_clicked.connect(self.start_detection)
+        self.action_buttons.cancel_clicked.connect(self.cancel_detection)
+    
+    def on_videos_selected(self, video_paths):
+        self.video_paths = video_paths
+        self.action_buttons.set_start_enabled(bool(video_paths))
+        logging.info(f"Selected videos: {video_paths}")
+
+    def on_selection_cleared(self):
+        self.video_paths = []
+        self.action_buttons.set_start_enabled(False)
+        logging.info("Video selection cleared")
 
     def create_logo(self):
         """Create and add the logo to the layout."""
@@ -215,7 +239,6 @@ class SharkEyeApp(QMainWindow):
 
     def create_progress_area(self):
         """Create and add the video name label and progress bar to the layout."""
-        self.video_name_label = QLabel()
         self.video_name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.content_layout.addWidget(self.video_name_label)
 
@@ -258,14 +281,15 @@ class SharkEyeApp(QMainWindow):
 
         try:
             logging.info("Disabling start button and enabling cancel button")
-            self.start_button.setEnabled(False)
-            self.cancel_button.setEnabled(True)
+            self.action_buttons.set_start_enabled(False)
+            self.action_buttons.set_cancel_enabled(True)
 
             logging.info("Creating progress area")
             self.create_progress_area()
             self.progress_bar.setValue(0)
             self.progress_bar.setRange(0, 100)
             self.video_name_label.setText("Preparing...")
+            self.video_name_label.show()
 
             output_dir = get_writable_dir()
             logging.info(f"Attempting to create output directory: {output_dir}")
@@ -312,7 +336,7 @@ class SharkEyeApp(QMainWindow):
             self.file_list.addItem(item)
         self.remove_button.setEnabled(False)
         self.clear_button.setEnabled(bool(self.video_paths))
-        self.start_button.setEnabled(bool(self.video_paths))
+        self.action_buttons.set_start_enabled(bool(self.video_paths))
 
     def update_progress(self, value):
         """Update the progress bar value if it exists."""
@@ -327,7 +351,10 @@ class SharkEyeApp(QMainWindow):
 
     def update_video_name(self, video_name):
         """Update the video name label with the current video being processed."""
-        self.video_name_label.setText(f"Processing: {os.path.basename(video_name)}")
+        if self.video_name_label and self.video_name_label.isVisible():
+            self.video_name_label.setText(f"Processing: {os.path.basename(video_name)}")
+        else:
+            logging.warning("Video name label is not visible or not initialized")
 
     # Helper methods
     def init_shark_detector(self):
@@ -343,10 +370,27 @@ class SharkEyeApp(QMainWindow):
         """Connect signals from SharkDetector and processing thread."""
         self.shark_detector.update_progress.connect(self.update_progress)
         self.shark_detector.update_frame.connect(self.update_frame)
-        self.shark_detector.processing_finished.connect(self.processing_finished)
+        self.shark_detector.processing_finished.connect(self.on_video_processed)
+        self.shark_detector.all_videos_processed.connect(self.on_all_videos_processed)
         self.shark_detector.error_occurred.connect(self.handle_error)
         self.shark_detector.current_video_changed.connect(self.update_video_name)
         self.processing_thread.error_occurred.connect(self.handle_error)
+        
+    def on_video_processed(self, detections, processing_time):
+        """Handle completion of a single video."""
+        logging.info(f"Video processed with {detections} detections in {processing_time:.2f} seconds")
+
+    def on_all_videos_processed(self, total_detections, total_time):
+        """Handle completion of all videos."""
+        self.action_buttons.set_start_enabled(True)
+        self.action_buttons.set_cancel_enabled(False)
+        
+        self.reset_ui()
+        
+        dialog = ResultsDialog(total_detections, total_time, self)
+        dialog.run_additional_inference.connect(self.run_additional_inference)
+        dialog.verify_detections.connect(self.verify_detections)
+        dialog.exec()
 
     def remove_progress_area(self):
         """Remove the progress bar and video name label from the layout."""
@@ -356,14 +400,13 @@ class SharkEyeApp(QMainWindow):
             self.progress_bar = None
 
         if self.video_name_label:
+            self.video_name_label.hide()
             self.content_layout.removeWidget(self.video_name_label)
-            self.video_name_label.deleteLater()
-            self.video_name_label = None
 
     def reset_ui(self):
         """Reset the UI to its initial state."""
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
+        self.action_buttons.set_start_enabled(True)
+        self.action_buttons.set_cancel_enabled(False)
         self.frame_label.setText("Select video(s) and Start Tracking!")
         self.remove_progress_area()
 
@@ -374,8 +417,8 @@ class SharkEyeApp(QMainWindow):
         if self.processing_thread:
             self.processing_thread.quit()
             self.processing_thread.wait()
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
+        self.action_buttons.set_start_enabled(True)
+        self.action_buttons.set_cancel_enabled(False)
 
     def show_error_message(self, message):
         """Display an error message in a popup dialog."""
@@ -392,22 +435,6 @@ class SharkEyeApp(QMainWindow):
         if self.frame_label.pixmap() and not self.frame_label.pixmap().isNull():
             scaled_pixmap = self.scale_pixmap(self.frame_label.pixmap())
             self.frame_label.setPixmap(scaled_pixmap)
-
-    def processing_finished(self, total_detections, total_time):
-        """
-        Handle the completion of the video processing.
-        This method updates the UI and displays the results dialog.
-
-        :param total_detections: Total number of shark detections across all videos
-        :param total_time: Total processing time in seconds
-        """ 
-        self.start_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
-        
-        self.reset_ui()
-        
-        dialog = ResultsDialog(total_detections, total_time, self)
-        dialog.exec()
     
     def run_additional_inference(self):
         # Implement additional inference logic here
@@ -417,242 +444,10 @@ class SharkEyeApp(QMainWindow):
     def verify_detections(self):
         """Opens Verification Window Widget"""
         logging.info("Verifying detections")
-        self.verification_window = VerificationWindow()
+        results_dir = get_writable_dir()
+        self.verification_window = VerificationWindow(results_dir)
         self.stack.addWidget(self.verification_window)
         self.stack.setCurrentWidget(self.verification_window)
-
-class ResultsDialog(QDialog):
-    def __init__(self, total_detections, total_time, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Detection Results")
-        self.setup_ui(total_detections, total_time)
-
-    def setup_ui(self, total_detections, total_time):
-        """Set up the user interface for the results dialog."""
-        layout = QVBoxLayout()
-
-        formatted_time = self.format_time(total_time)
-        results_label = QLabel(f"Total Detections: {total_detections}\nTotal Time: {formatted_time}")
-        layout.addWidget(results_label)
-
-        self.button_box = QDialogButtonBox()
-        run_additional = self.button_box.addButton("Run Additional Inference", QDialogButtonBox.ButtonRole.ActionRole)
-        verify_detections = self.button_box.addButton("Verify Detections", QDialogButtonBox.ButtonRole.ActionRole)
-
-        run_additional.clicked.connect(self.reject)
-        verify_detections.clicked.connect(self.accept)
-
-        layout.addWidget(self.button_box)
-        self.setLayout(layout)
-
-        self.accepted.connect(self.parent().verify_detections)
-        self.rejected.connect(self.parent().run_additional_inference)
-        
-    def format_time(self, seconds: float) -> str:
-        """
-        Format the given number of seconds into a human-readable string.
-
-        :param seconds: Number of seconds to format
-        :return: Formatted time string
-        """
-        if seconds < 60:
-            return f"{seconds:.2f} seconds"
-        elif seconds < 120:
-            return f"1 minute {seconds % 60:.0f} seconds"
-        else:
-            minutes = int(seconds // 60)
-            remaining_seconds = int(seconds % 60)
-            return f"{minutes} minutes {remaining_seconds} seconds"
-
-class VideoProcessingThread(QThread):
-    error_occurred = pyqtSignal(str)
-
-    def __init__(self, shark_detector, video_paths, output_dir):
-        super().__init__()
-        self.shark_detector = shark_detector
-        self.video_paths = video_paths
-        self.output_dir = output_dir
-        logging.info(f"VideoProcessingThread initialized with {len(video_paths)} videos")
-
-    def run(self):
-        try:
-            logging.info("Starting video processing")
-            for i, video_path in enumerate(self.video_paths):
-                logging.info(f"Processing video {i+1}/{len(self.video_paths)}: {video_path}")
-                self.shark_detector.process_videos([video_path], self.output_dir)
-            logging.info("Video processing completed successfully")
-        except Exception as e:
-            logging.exception(f"Error in Video Processing Thread: {str(e)}")
-            self.error_occurred.emit(str(e))
-
-class VerificationWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.initUI()
-
-    def initUI(self):
-        self.setWindowTitle("Detection Verification")
-        self.disply_width = 1024
-        self.display_height = 768
-        
-        self.initial_width = 1024
-        self.initial_height = 768
-        
-        self.resize(self.initial_width, self.initial_height)
-        
-        results_dir = get_writable_dir()
-        self.experiments = os.listdir(results_dir)
-        self.experiments.sort()
-        self.experiments.reverse()
-    
-        # Shark Buttons 
-        marking_layout = QHBoxLayout()
-
-        self.mark_shark_button = QPushButton("Shark")
-        self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
-        self.mark_shark_button.clicked.connect(self.mark_as_shark)
-
-        self.unmark_shark_button = QPushButton("No Shark")
-        self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        self.unmark_shark_button.clicked.connect(self.unmark_shark) 
-
-        marking_layout.addWidget(self.mark_shark_button)
-        marking_layout.addWidget(self.unmark_shark_button)      
-
-        self.finish_verification_button = QPushButton("Finish Verification")
-        self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; width: 100px;height: 30px;")
-        self.finish_verification_button.clicked.connect(self.finish_verifications)
-        
-        self.load_experiment_frames(0)
-        
-        # Slider
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(len(self.frames) - 1)
-
-        # Experiment Selection
-        self.experiment_label = QComboBox()
-        self.experiment_label.addItems(self.experiments)
-        self.experiment_label.currentIndexChanged.connect(self.select_experiment)
-
-        # Display Frame
-        self.frame_display = QLabel()
-        self.frame_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frame_display.setMinimumSize(640, 480)
-        self.frame_display.resize(self.disply_width, self.display_height)
-        
-        self.file_path = QLabel()
-        self.file_path.setStyleSheet("color: black;background-color: white; border-radius: 4px")
-            
-        self.verified_sharks = [True for x in range(len(self.frames))]
-
-        # Main Layout 
-        tracker_layout = QVBoxLayout()
-        tracker_layout.addWidget(self.experiment_label)
-        tracker_layout.addWidget(self.frame_display)        
-        tracker_layout.addWidget(self.frame_slider)
-        tracker_layout.addLayout(marking_layout)
-        tracker_layout.addWidget(self.finish_verification_button)
-        self.frame_slider.valueChanged.connect(self.value_change)
-        self.setLayout(tracker_layout)
-        self.select_experiment(0)
-    
-    def load_experiment_frames(self, index):
-        results_dir = get_writable_dir()
-        self.last_run = self.experiments[index]
-        bounding_boxes_dir = os.path.join(results_dir, self.last_run, "bounding_boxes")
-        self.frames = [os.path.join(bounding_boxes_dir, f) for f in os.listdir(bounding_boxes_dir)]
-        
-    def finish_verifications(self):
-        """Deletes images from 'frames' and 'bounding_boxes' folders marked as having no sharks"""
-        results_dir = get_writable_dir()
-        for index, x in enumerate(self.verified_sharks):
-            if x == False:
-                os.remove(self.frames[index])
-                frames_path = self.frames[index].replace("bounding_boxes", "frames")
-                os.remove(frames_path)
-        self.parent().setCurrentWidget(self.parent().parent().central_widget)
-        self.parent().removeWidget(self.parent().parent().verification_window)
-        
-    def mark_as_shark(self):
-        """Marks frame as having a shark."""
-        if self.verified_sharks[self.current_frame] != True:
-            self.verified_sharks[self.current_frame] = True
-            self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
-            self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-
-    def unmark_shark(self):
-        """Marks frame as having no shark. Frame will be deleted with finish_verification call"""
-        if self.verified_sharks[self.current_frame] == True:
-            self.verified_sharks[self.current_frame] = False
-            self.mark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-            self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px;height: 30px;")
-
-    def value_change(self):
-        """Handles display of frames and colors of verification buttons"""
-        index = self.frame_slider.value()
-        frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
-        self.current_frame = index
-
-        self.frame_display.setPixmap(frame)
-        self.file_path.setText(self.frames[index])
-        self.update_button_styles()
-
-    def update_button_styles(self):
-        """Changes colors of marking buttons based on selection"""
-        if len(self.verified_sharks) > 0:
-            if self.verified_sharks[self.current_frame] == True:
-                self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px; height: 30px;")
-                self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px; height: 30px;")
-            else:
-                self.mark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px; height: 30px;")
-                self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px; height: 30px;")
-
-    def hide_ui_elements(self):
-        """Makes display frame, verification buttons and slider disappear"""
-        self.frame_slider.hide()
-        
-        self.frame_display.setText("Select an experiment to start verifying detections")
-        
-        self.mark_shark_button.setDisabled(True)
-        self.unmark_shark_button.setDisabled(True)
-        self.finish_verification_button.setDisabled(True)
-
-        self.mark_shark_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
-        self.unmark_shark_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
-        self.finish_verification_button.setStyleSheet("background-color: white; color: grey; border-radius: 4px; width: 100px; height: 30px;")
-
-    def show_ui_elements(self):
-        """Makes display frame, verification buttons and slider appear"""
-        self.frame_slider.show()
-        self.frame_display.show()
-        
-        self.mark_shark_button.setEnabled(True)
-        self.unmark_shark_button.setEnabled(True)
-        self.finish_verification_button.setEnabled(True)
-        
-        self.mark_shark_button.setStyleSheet("background-color: blue; color: white; border-radius: 4px; width: 100px;height: 30px;")
-        self.unmark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
-        self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; width: 100px;height: 30px;")
-
-    def select_experiment(self, index):
-        """Selects experiment to run verification on""" 
-        self.load_experiment_frames(index)
-
-        if len(self.frames) > 0: 
-            self.current_frame = 0
-            self.frame_slider.setValue(0)
-            frame = QPixmap(self.frames[self.current_frame]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
-            self.frame_display.setPixmap(frame)
-
-            self.frame_slider.setMinimum(0)
-            self.frame_slider.setMaximum(len(self.frames) - 1)
-
-            self.verified_sharks = [True for x in range(len(self.frames))]
-
-            self.show_ui_elements()
-        else:
-            self.hide_ui_elements()
 
 if __name__ == "__main__":
     try:
