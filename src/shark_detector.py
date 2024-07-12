@@ -21,6 +21,7 @@ class SharkDetector(QObject):
     update_progress = pyqtSignal(int)
     update_frame = pyqtSignal(QPixmap)
     processing_finished = pyqtSignal(int, float)
+    all_videos_processed = pyqtSignal(int, float)
     error_occurred = pyqtSignal(str)
     current_video_changed = pyqtSignal(str)
 
@@ -64,7 +65,6 @@ class SharkDetector(QObject):
             raise
 
     def process_videos(self, video_paths: List[str], output_dir: str):
-        """Process multiple videos for shark detection."""
         logging.info(f"Processing {len(video_paths)} videos")
         total_unique_detections = 0
         total_processing_time = 0
@@ -86,6 +86,7 @@ class SharkDetector(QObject):
                 total_unique_detections += unique_detections
                 total_processing_time += processing_time
                 logging.info(f"Video processed: {unique_detections} detections in {processing_time:.2f} seconds")
+                self.processing_finished.emit(unique_detections, processing_time)  # Emit for each video
             except Exception as e:
                 logging.error(f"Error processing video {video_file}: {str(e)}")
                 traceback.print_exc()
@@ -95,7 +96,7 @@ class SharkDetector(QObject):
             self._clear_gpu_memory()
             self.update_progress.emit(int((i + 1) / len(video_paths) * 100))
 
-        self.processing_finished.emit(total_unique_detections, total_processing_time)
+        self.all_videos_processed.emit(total_unique_detections, total_processing_time)
         
     def process_single_video(self, video_path: str, run_dir: str) -> Tuple[int, float]:
         """Process a single video for shark detection."""

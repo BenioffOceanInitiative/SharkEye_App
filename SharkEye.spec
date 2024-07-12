@@ -50,7 +50,7 @@ hidden_imports.extend(scipy_submodules)
 hidden_imports.extend(ultralytics_submodules)
 
 a = Analysis(
-    ['src/main.py'],
+    ['src/sharkeye.py'],
     pathex=[],
     binaries=[],
     datas=data_files,
