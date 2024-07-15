@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
@@ -49,6 +50,12 @@ hidden_imports = [
 hidden_imports.extend(scipy_submodules)
 hidden_imports.extend(ultralytics_submodules)
 
+if sys.platform.startswith('win'):
+    icon_file = 'assets/logo/SharkEye.ico'
+elif sys.platform.startswith('darwin'):
+    icon_file = 'assets/logo/SharkEye.icns'
+else:
+    icon_file = None
 a = Analysis(
     ['src/sharkeye.py'],
     pathex=[],
@@ -75,26 +82,28 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    icon=icon_file
 )
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='SharkEye',
-)
-
-app = BUNDLE(
-    coll,
-    name='SharkEye.app',
-    icon=None,
-    bundle_identifier=None,
-)
+if sys.platform.startswith('darwin'):
+    app = BUNDLE(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        name='SharkEye.app',
+        icon=icon_file,
+        bundle_identifier=None,
+    )
+else:
+    # For Windows or other platforms
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name='SharkEye'
+    )
