@@ -112,10 +112,15 @@ class VerificationWindow(QWidget):
         self.frame_counter_label.setText(f"Detection {current} of {total}")
     
     def finish_verifications(self):
-        """Deletes images from 'frames' and 'bounding_boxes' folders marked as having no sharks"""
+        """Moves images from 'frames' and 'bounding_boxes' folders marked as having no sharks"""
+        false_positive_path = os.path.join(self.results_dir, self.last_run, "false_positives")
+        if not os.path.isdir(false_positive_path):
+            os.mkdir(false_positive_path)
         for index, x in enumerate(self.verified_sharks):
             if x == False:
-                os.remove(self.frames[index])
+                print(os.path.splitext(self.frames[index])[0] + "TEST.jpg")
+                os.rename(self.frames[index], os.path.join(false_positive_path, os.path.basename(self.frames[index])))
+                
                 frames_path = self.frames[index].replace("bounding_boxes", "frames")
                 os.remove(frames_path)
         self.parent().setCurrentWidget(self.parent().parent().central_widget)
@@ -204,6 +209,8 @@ class VerificationWindow(QWidget):
 
             self.frame_slider.setMinimum(0)
             self.frame_slider.setMaximum(max(0, len(self.frames) - 1))
+
+            self.file_path.setText(self.frames[index])
 
             self.verified_sharks = [True for x in range(len(self.frames))]
 
