@@ -129,7 +129,6 @@ class SharkEyeApp(QMainWindow):
         self.action_buttons.cancel_clicked.connect(self.cancel_detection)
         self.video_selection_area.verify_detections_signal.connect(self.verify_detections)
 
-
     def on_videos_selected(self, video_paths):
         self.video_paths = video_paths
         self.action_buttons.set_start_enabled(bool(video_paths))

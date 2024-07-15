@@ -118,7 +118,6 @@ class VerificationWindow(QWidget):
             os.mkdir(false_positive_path)
         for index, x in enumerate(self.verified_sharks):
             if x == False:
-                print(os.path.splitext(self.frames[index])[0] + "TEST.jpg")
                 os.rename(self.frames[index], os.path.join(false_positive_path, os.path.basename(self.frames[index])))
                 
                 frames_path = self.frames[index].replace("bounding_boxes", "frames")
