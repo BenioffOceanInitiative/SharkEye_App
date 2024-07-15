@@ -5,6 +5,7 @@ import os
 class VideoSelectionArea(QWidget):
     videos_selected = pyqtSignal(list)
     selection_cleared = pyqtSignal()
+    verify_detections_signal = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -14,7 +15,9 @@ class VideoSelectionArea(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         self.select_button = self.create_button("Select Videos", self.select_videos)
+        self.verify_button = self.create_button("Verify Detections", self.verify_detections)
         layout.addWidget(self.select_button)
+        layout.addWidget(self.verify_button)
 
         button_layout = QHBoxLayout()
         self.remove_button = self.create_button("Remove Selected", self.remove_selected_video, enabled=False)
@@ -74,3 +77,6 @@ class VideoSelectionArea(QWidget):
         has_videos = bool(self.video_paths)
         self.clear_button.setEnabled(has_videos)
         self.remove_button.setEnabled(False)
+
+    def verify_detections(self):
+        self.verify_detections_signal.emit()
