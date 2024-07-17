@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QComboBox, QSpacerItem, QSizePolicy, QMessageBox
+from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QSpacerItem, QSizePolicy, QMessageBox
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap, QKeyEvent, QIcon
 import os
@@ -51,49 +51,27 @@ class VerificationWindow(QWidget):
         self.finish_verification_button = QPushButton("Finish Verification")
         self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; min-width: 100px; min-height: 30px;")
         self.finish_verification_button.clicked.connect(self.finish_verifications)
-        
+
         self.return_to_main_button = QPushButton("Return to Main Window")
         self.return_to_main_button.setStyleSheet("background-color: orange; color: white; border-radius: 4px; min-width: 100px; min-height: 30px;")
         self.return_to_main_button.clicked.connect(self.return_to_main_window)
-        self.load_experiment_frames(self.current_experiment_index)
-
-        # Slider
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(0)
-        self.frame_slider.setValue(0)
-        self.frame_slider.setFixedHeight(30)  # Set a fixed height
-        self.frame_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                border: 1px solid #999999;
-                height: 8px;
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #B1B1B1, stop:1 #c4c4c4);
-                margin: 2px 0;
-            }
-            QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #b4b4b4, stop:1 #8f8f8f);
-                border: 1px solid #5c5c5c;
-                width: 18px;
-                margin: -2px 0;
-                border-radius: 3px;
-            }
-    """)
-
+        
         # Experiment Selection
         self.experiment_label = QComboBox()
         self.experiment_label.addItems(self.experiments)
         self.experiment_label.currentIndexChanged.connect(self.select_experiment)
+        self.experiment_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
         # Display Frame
         frame_layout = QHBoxLayout()
         self.next_frame = QPushButton(">")
-        self.next_frame.setMaximumWidth(20)
+        self.next_frame.setMinimumWidth(20)
         self.next_frame.setMaximumHeight(self.display_height)
         self.next_frame.setStyleSheet("border-width: 0px; border-style: solid")                                                                                                                                                                                                                                 
         self.next_frame.clicked.connect(self.display_next_frame)
 
         self.previous_frame = QPushButton("<")
-        self.previous_frame.setMaximumWidth(20)
+        self.previous_frame.setMinimumWidth(20)
         self.previous_frame.setMaximumHeight(self.display_height)
         self.previous_frame.setStyleSheet("border-width: 0px; border-style: solid; color: transparent")
         self.previous_frame.clicked.connect(self.display_previous_frame)
@@ -102,6 +80,8 @@ class VerificationWindow(QWidget):
         self.frame_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frame_display.setMinimumSize(640, 480)
         self.frame_display.resize(self.disply_width, self.display_height)
+        self.frame_display.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  
+        self.frame_display.setFocus()
                                                     
         frame_layout.addWidget(self.previous_frame)
         frame_layout.addWidget(self.frame_display)
@@ -120,7 +100,6 @@ class VerificationWindow(QWidget):
         tracker_layout.addWidget(self.experiment_label)
         tracker_layout.addLayout(frame_layout)        
         tracker_layout.addWidget(self.file_path)
-        tracker_layout.addWidget(self.frame_slider)
         tracker_layout.addWidget(self.frame_counter_label)
         tracker_layout.addLayout(marking_layout)
         tracker_layout.addWidget(self.finish_verification_button)
@@ -129,7 +108,8 @@ class VerificationWindow(QWidget):
         # Add spacer
         tracker_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
         
-        self.frame_slider.valueChanged.connect(self.value_change)
+        self.load_experiment_frames(0)
+        self.frame_display.setFocus()
         
         if self.frames:
             self.select_experiment(self.current_experiment_index)
@@ -153,7 +133,7 @@ class VerificationWindow(QWidget):
             self.verified_sharks = []
     
     def update_frame_counter(self):
-        current = self.frame_slider.value() + 1
+        current = self.current_frame + 1
         total = len(self.frames)
         self.frame_counter_label.setText(f"Detection {current} of {total}")
     
@@ -219,40 +199,36 @@ class VerificationWindow(QWidget):
             self.mark_shark_button.setStyleSheet("background-color: white; color: black; border-radius: 4px; width: 100px;height: 30px;")
             self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px;height: 30px;")
 
-    def update_slider_visibility(self):
-        if len(self.frames) <= 1:
-            self.frame_slider.hide()
-        else:
-            self.frame_slider.show()
-
     def value_change(self):
         """Handles display of frames and colors of verification buttons"""
-        if not self.frames:  # Add this check
+        if not self.frames:
             return
     
-        index = self.frame_slider.value()
-        if 0 <= index < len(self.frames):  # Add this check
+        index = self.current_frame
+        if 0 <= index < len(self.frames):
             frame = QPixmap(self.frames[index]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
-            self.current_frame = index
-
             self.frame_display.setPixmap(frame)
             self.file_path.setText(self.frames[index])
             self.update_button_styles()
             self.update_frame_counter()
-
-            if self.frame_slider.value() == 0:
+            
+            if index == 0:
                 self.previous_frame.setStyleSheet("border-width: 0px; border-style: solid; color: transparent")
                 self.previous_frame.setDisabled(True)
-            elif self.frame_slider.value() == self.frame_slider.maximum():
+            else:
+                self.previous_frame.setStyleSheet("border-width: 0px; border-style: solid")
+                self.previous_frame.setEnabled(True)
+                
+            if index == len(self.frames) - 1:
                 self.next_frame.setStyleSheet("border-width: 0px; border-style: solid; color: transparent")
                 self.next_frame.setDisabled(True)
             else:
                 self.next_frame.setStyleSheet("border-width: 0px; border-style: solid")
-                self.previous_frame.setStyleSheet("border-width: 0px; border-style: solid")
                 self.next_frame.setEnabled(True)
-                self.previous_frame.setEnabled(True)
         else:
             print(f"Invalid index: {index}, total frames: {len(self.frames)}")  # For debugging
+            self.current_frame = 0  # Reset to a valid index
+            self.value_change()  # Recursively call with the corrected index
 
     def update_button_styles(self):
         """Changes colors of marking buttons based on selection"""
@@ -265,8 +241,7 @@ class VerificationWindow(QWidget):
                 self.unmark_shark_button.setStyleSheet("background-color: red; color: white; border-radius: 4px; width: 100px; height: 30px;")
 
     def hide_ui_elements(self):
-        """Makes display frame, verification buttons and slider disappear"""
-        self.frame_slider.hide()
+        """Makes display frame and verification buttons disappear"""
         self.frame_counter_label.hide()
 
         self.frame_display.setText("Select an experiment to start verifying detections")
@@ -283,7 +258,7 @@ class VerificationWindow(QWidget):
         self.previous_frame.hide()
 
     def show_ui_elements(self):
-        """Makes display frame, verification buttons and slider appear"""
+        """Makes display frame and verification buttons appear"""
         self.frame_display.show()
         self.frame_counter_label.show()
         self.file_path.show()
@@ -297,8 +272,6 @@ class VerificationWindow(QWidget):
         self.finish_verification_button.setStyleSheet("background-color: green; color: white; border-radius: 4px; min-width: 100px; min-height: 30px;")
         self.next_frame.show()
         self.previous_frame.show()
-
-        self.update_slider_visibility()
 
     def select_experiment(self, index):
         """Selects experiment to run verification on""" 
@@ -314,15 +287,13 @@ class VerificationWindow(QWidget):
         if len(self.frames) > 0:             
             self.verified_sharks = [True for _ in range(len(self.frames))]
             self.current_frame = 0
-            self.frame_slider.setMaximum(len(self.frames)- 1)
-            self.frame_slider.setValue(0)
             frame = QPixmap(self.frames[self.current_frame]).scaled(self.disply_width, self.display_height, Qt.AspectRatioMode.KeepAspectRatio)
             self.frame_display.setPixmap(frame)
             self.file_path.setText(self.frames[0])
 
             self.show_ui_elements()
             self.update_frame_counter()
-            self.update_slider_visibility()
+            self.value_change()
         else:
             self.hide_ui_elements()
             self.frame_counter_label.setText("No detections found")
@@ -337,20 +308,25 @@ class VerificationWindow(QWidget):
 
     def keyPressEvent(self, event: QKeyEvent):
         if len(self.frames) > 1:
-            if event.key() == Qt.Key.Key_Left:
+            if event.key() == Qt.Key.Key_J:
                 self.display_previous_frame()
-            elif event.key() == Qt.Key.Key_Right:
+            elif event.key() == Qt.Key.Key_L:
                 self.display_next_frame()
-        
-        if event.key() == Qt.Key.Key_S:
-            self.mark_as_shark()
-        elif event.key() == Qt.Key.Key_N:
-            self.unmark_shark()
-        else:
-            super().keyPressEvent(event)
+            elif event.key() == Qt.Key.Key_K:
+                self.toggle_shark_detected()
+            else:
+                super().keyPressEvent(event)
     
     def display_next_frame(self):
-        self.frame_slider.setValue(min(self.frame_slider.maximum(), self.frame_slider.value() + 1))
+        self.current_frame = min(len(self.frames) - 1, self.current_frame + 1)
+        self.value_change()
 
     def display_previous_frame(self):
-        self.frame_slider.setValue(max(0, self.frame_slider.value() - 1))
+        self.current_frame = max(0, self.current_frame - 1)
+        self.value_change()
+    
+    def toggle_shark_detected(self):
+        if self.verified_sharks[self.current_frame] != True:
+            self.mark_as_shark()
+        else:
+            self.unmark_shark()
