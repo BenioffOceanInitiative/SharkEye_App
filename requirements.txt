@@ -1,6 +1,5 @@
 ultralytics
-torch
-torchvision
 lapx
 PyQt6
 pyinstaller
+google-cloud-storage
