@@ -1,6 +1,4 @@
 ultralytics
-torch
-torchvision
 lapx
 PyQt6
 pyinstaller

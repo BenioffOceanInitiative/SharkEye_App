@@ -2,11 +2,12 @@ import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import datetime
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 import logging
 import traceback
 import cv2
 import numpy as np
+import math
 from scipy.optimize import linear_sum_assignment
 import torch
 from ultralytics import YOLO
@@ -24,6 +25,7 @@ class SharkDetector(QObject):
     all_videos_processed = pyqtSignal(int, float)
     error_occurred = pyqtSignal(str)
     current_video_changed = pyqtSignal(str)
+    
 
     def __init__(self):
         super().__init__()
@@ -63,49 +65,62 @@ class SharkDetector(QObject):
             logging.error(error_msg)
             self.error_occurred.emit(error_msg)
             raise
-
-    def process_videos(self, video_paths: List[str], output_dir: str):
+        
+    def _unload_model(self):
+        if self.model is not None:
+            del self.model
+            self.model = None
+            self._clear_gpu_memory()
+            logging.info("Model unloaded and GPU memory cleared")
+            
+    def process_videos(self, video_paths, progress_callback, frame_callback):
         logging.info(f"Processing {len(video_paths)} videos")
         total_unique_detections = 0
         total_processing_time = 0
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H-%M-%S")
-        run_dir = os.path.join(output_dir, timestamp)
-        os.makedirs(run_dir, exist_ok=True)
+        # Create a timestamped folder for this detection run
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results", timestamp)
+        os.makedirs(results_dir, exist_ok=True)
 
-        for i, video_file in enumerate(video_paths):
+        for i, video_path in enumerate(video_paths):
             if self.is_cancelled:
                 break
 
-            logging.info(f"\nProcessing video {i+1}/{len(video_paths)}: {video_file}")
+            current_video = i + 1
+            total_videos = len(video_paths)
+
+            logging.info(f"\nProcessing video {current_video}/{total_videos}: {video_path}")
             try:
                 self._load_model()
-                self.current_video_changed.emit(video_file)
-                self.shark_trackers.clear()
-                unique_detections, processing_time = self.process_single_video(video_file, run_dir)
+                
+                unique_detections, processing_time = self.process_single_video(
+                    video_path, 
+                    results_dir, 
+                    lambda video_progress: progress_callback(current_video, total_videos, video_progress),
+                    frame_callback
+                )
                 total_unique_detections += unique_detections
                 total_processing_time += processing_time
                 logging.info(f"Video processed: {unique_detections} detections in {processing_time:.2f} seconds")
-                self.processing_finished.emit(unique_detections, processing_time)  # Emit for each video
+                self.processing_finished.emit(unique_detections, processing_time)
             except Exception as e:
-                logging.error(f"Error processing video {video_file}: {str(e)}")
-                traceback.print_exc()
-                self.error_occurred.emit(f"Error processing video {video_file}: {str(e)}")
-                continue
-
-            self._clear_gpu_memory()
-            self.update_progress.emit(int((i + 1) / len(video_paths) * 100))
+                logging.error(f"Error processing video {video_path}: {str(e)}")
+                self.error_occurred.emit(f"Error processing video {video_path}: {str(e)}")
+            finally:
+                self._unload_model()
 
         self.all_videos_processed.emit(total_unique_detections, total_processing_time)
-        
-    def process_single_video(self, video_path: str, run_dir: str) -> Tuple[int, float]:
+        return total_unique_detections, total_processing_time, results_dir
+    
+    def process_single_video(self, video_path, results_dir, progress_callback, frame_callback):
         """Process a single video for shark detection."""
         try:
             logging.info(f"Starting to process video: {video_path}")
             self.unique_track_ids = set()
 
-            frames_dir = os.path.join(run_dir, "frames")
-            bounding_boxes_dir = os.path.join(run_dir, "bounding_boxes")
+            frames_dir = os.path.join(results_dir, "frames")
+            bounding_boxes_dir = os.path.join(results_dir, "bounding_boxes")
             os.makedirs(frames_dir, exist_ok=True)
             os.makedirs(bounding_boxes_dir, exist_ok=True)
 
@@ -114,7 +129,7 @@ class SharkDetector(QObject):
             total_frames = self._get_total_frames(video_path)
             total_processed_frames = total_frames // VIDEO_STRIDE
 
-            results = self.model.track(source=video_path, imgsz=1280, conf=CONFIDENCE_THRESHOLD, 
+            results = self.model.track(source=video_path, imgsz=[736,1280], conf=CONFIDENCE_THRESHOLD, 
                                     verbose=False, persist=True, vid_stride=VIDEO_STRIDE, 
                                     stream=True, show=False, classes=[0])
 
@@ -122,8 +137,9 @@ class SharkDetector(QObject):
                 if self.is_cancelled:
                     break
 
-                try:
+                try:                    
                     original_frame = result.orig_img
+                    
                     frame_with_boxes = original_frame.copy()
                     
                     self.max_distance = max(original_frame.shape) * 0.25
@@ -132,7 +148,15 @@ class SharkDetector(QObject):
                     frame_with_boxes = self._draw_tracks(frame_with_boxes, detections)
                     
                     self._update_tracks(detections, original_frame, frame_with_boxes)
-                    self._update_ui(frame_with_boxes)
+                    
+                    # Convert the frame to QPixmap and update the UI
+                    height, width, channel = frame_with_boxes.shape
+                    bytes_per_line = 3 * width
+                    q_img = QImage(frame_with_boxes.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).rgbSwapped()
+                    pixmap = QPixmap.fromImage(q_img)
+                    frame_callback(pixmap)
+                    frame_progress = int((i / total_frames) * 100)
+                    progress_callback(frame_progress)
                     
                     self.unique_track_ids.update(track.id for track in self.shark_trackers if track.is_valid)
                 
@@ -140,9 +164,10 @@ class SharkDetector(QObject):
                     logging.error(f"Error processing video {video_path} on frame {i}: {str(e)}")
                     continue
                 
-                self.update_progress.emit(int((i + 1) / total_processed_frames * 100))
-            
-            self._save_best_frames(run_dir, os.path.basename(video_path))
+                progress = int((i + 1) / total_processed_frames * 100)
+                progress_callback(progress)
+
+            self._save_best_frames(results_dir, os.path.basename(video_path))
             
             processing_time = time.time() - start_time
             return len(self.unique_track_ids), processing_time
@@ -172,28 +197,60 @@ class SharkDetector(QObject):
                 if box.cls.cpu().numpy()[0] == 0:  # Assuming 0 is the class for sharks
                     x, y, w, h = box.xywh[0].cpu().numpy()
                     conf = box.conf.item()
-                    detections.append(np.array([x, y, w, h, conf]))
+                    
+                    # Estimate shark length (assuming altitude of 40m)
+                    length = self.calculate_shark_length(w, h)
+                    
+                    detections.append(np.array([x, y, w, h, conf, length]))
         return detections
-
+    
     def _update_tracks(self, detections: List[np.ndarray], frame: np.ndarray, frame_with_boxes: np.ndarray):
-        """Update existing tracks with new detections and create new tracks for unmatched detections."""
-        predicted_locations = [t.predict_next_position() for t in self.shark_trackers if t.is_active]
-        matched_indices = self._match_detections_to_tracks(detections, predicted_locations)
-        
+        if not self.shark_trackers:
+            self._create_new_tracks(detections)
+            return
+
+        matched_track_indices = set()
         for i, detection in enumerate(detections):
-            if i in matched_indices:
-                track_idx = matched_indices[i]
-                self.shark_trackers[track_idx].update(detection, frame, frame_with_boxes, detection[4])
+            closest_track = self._find_closest_track(detection, matched_track_indices)
+            if closest_track:
+                j, track = closest_track
+                self._update_existing_track(track, detection, frame, frame_with_boxes)
+                matched_track_indices.add(j)
             else:
-                new_track = SharkTracker(len(self.shark_trackers), detection, self.max_missed_detections, self.min_detected_frames)
-                new_track.update(detection, frame, frame_with_boxes, detection[4])
-                self.shark_trackers.append(new_track)
+                self._create_new_track(detection)
 
-        # Update all tracks, incrementing missed_detections for unmatched tracks
-        for track in self.shark_trackers:
-            if track.id not in [self.shark_trackers[idx].id for idx in matched_indices.values()]:
+        self._update_unmatched_tracks(matched_track_indices)
+
+    def _create_new_tracks(self, detections):
+        for detection in detections:
+            new_track = SharkTracker(len(self.shark_trackers), detection, self.max_missed_detections, self.min_detected_frames)
+            self.shark_trackers.append(new_track)
+        print(f"Created {len(self.shark_trackers)} new tracks")
+
+    def _find_closest_track(self, detection, matched_track_indices):
+        closest_track = None
+        min_distance = float('inf')
+        for j, track in enumerate(self.shark_trackers):
+            if j in matched_track_indices:
+                continue
+            distance = np.linalg.norm(detection[:2] - track.last_detection[:2])
+            if distance < min_distance and distance < self.max_distance:
+                min_distance = distance
+                closest_track = (j, track)
+        return closest_track
+
+    def _update_existing_track(self, track, detection, frame, frame_with_boxes):
+        track.update(detection, frame, frame_with_boxes, detection[4], detection[5])
+
+    def _create_new_track(self, detection):
+        new_track = SharkTracker(len(self.shark_trackers), detection, self.max_missed_detections, self.min_detected_frames)
+        self.shark_trackers.append(new_track)
+
+    def _update_unmatched_tracks(self, matched_track_indices):
+        for j, track in enumerate(self.shark_trackers):
+            if j not in matched_track_indices:
                 track.update()
-
+            
     def _match_detections_to_tracks(self, detections: List[np.ndarray], predicted_locations: List[np.ndarray]) -> dict:
         """Match new detections to existing tracks using the Hungarian algorithm."""
         if not detections or not predicted_locations:
@@ -203,33 +260,50 @@ class SharkDetector(QObject):
         rows, cols = linear_sum_assignment(cost_matrix)
         
         return {row: col for row, col in zip(rows, cols) if cost_matrix[row, col] <= self.max_distance}
-
+    
     def _draw_tracks(self, frame: np.ndarray, current_detections: List[np.ndarray]) -> np.ndarray:
         """Draw bounding boxes and track IDs on the frame for current detections."""
         frame_height, frame_width = frame.shape[:2]
 
         for detection in current_detections:
-            x, y, w, h, confidence = detection
+            x, y, w, h = detection[:4]
+            confidence, length = detection[4], detection[5]
             
             x, y, w, h = map(int, (x - w/2, y - h/2, w, h))
             x, y = max(0, min(x, frame_width - 1)), max(0, min(y, frame_height - 1))
             w, h = min(w, frame_width - x), min(h, frame_height - y)
             
             cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                        
+            # Find matching track
+            matching_track = min(self.shark_trackers, key=lambda t: np.linalg.norm(t.last_detection[:2] - detection[:2]), default=None)
             
-            track = next((t for t in self.shark_trackers if np.allclose(t.last_detection[:4], detection[:4])), None)
-            
-            if track:
-                cv2.putText(frame, f"ID: {track.id}, Conf: {confidence:.2f}", (x, max(0, y-30)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-            
+            if matching_track and np.linalg.norm(matching_track.last_detection[:2] - detection[:2]) < self.max_distance:                
+                # Add shark ID and confidence to the bounding box
+                label = f"ID: {matching_track.id}, Conf: {confidence:.2f}"
+                cv2.putText(frame, label, (x, y-25), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
+                
+                # Add length information below the bounding box
+                length_label = f"Max Len: {matching_track.current_length:.2f}ft, Curr Len: {matching_track.last_length:.2f}ft"
+                cv2.putText(frame, length_label, (x, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
+            else:
+                print("No matching track found")
+                # Add confidence to the bounding box for new detections
+                label = f"Conf: {confidence:.2f}"
+                cv2.putText(frame, label, (x, y-25), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
+                
+                # Add length information below the bounding box
+                length_label = f"Curr Len: {length:.2f} ft"
+                cv2.putText(frame, length_label, (x, y+h+30), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 2)
+
         return frame
-    
+
     def _save_best_frames(self, result_dir: str, video_name: str):
         """Save the best frames for each valid shark track."""
         saved_count = 0
         for track in self.shark_trackers:
             if track.is_valid and track.best_frame_with_box is not None:
-                base_filename = f"{os.path.splitext(video_name)[0]}_shark_{track.id}_conf_{track.best_confidence:.2f}.jpg"
+                base_filename = f"{os.path.splitext(video_name)[0]}_shark_{track.id}_conf_{track.best_confidence:.2f}_len_{track.max_length:.2f}.jpg"
                 
                 frame_path = os.path.join(result_dir, "frames", base_filename)
                 cv2.imwrite(frame_path, track.best_frame)
@@ -238,7 +312,53 @@ class SharkDetector(QObject):
                 cv2.imwrite(bbox_path, track.best_frame_with_box)
 
                 saved_count += 1
+
+    def calculate_shark_length(
+        self,
+        bounding_box_width_pixels,
+        bounding_box_height_pixels,
+        altitude_m = 40,
+        sensor_width_mm=13.2,
+        sensor_height_mm=8.8,
+        focal_length_mm=28,
+        image_width_pixels=1280,
+        image_height_pixels=736
+    ):
+        """
+        Calculate the length of a shark in feet based on its bounding box in a drone image.
         
+        Parameters:
+        bounding_box_width_pixels (int): Width of the shark's bounding box in pixels
+        bounding_box_height_pixels (int): Height of the shark's bounding box in pixels
+        altitude_m (float): Altitude of the drone in meters
+        sensor_width_mm (float): Width of the camera sensor in millimeters (default: 13.2)
+        sensor_height_mm (float): Height of the camera sensor in millimeters (default: 8.8)
+        focal_length_mm (float): Focal length of the camera in millimeters (default: 28)
+        image_width_pixels (int): Width of the image in pixels (default: 1280)
+        image_height_pixels (int): Height of the image in pixels (default: 736)
+        
+        Returns:
+        float: Estimated length of the shark in feet
+        """
+        # Calculate GSD (Ground Sampling Distance) in meters per pixel
+        gsd_w = (sensor_width_mm * altitude_m) / (focal_length_mm * image_width_pixels)
+        gsd_h = (sensor_height_mm * altitude_m) / (focal_length_mm * image_height_pixels)
+        
+        # Use average GSD for more accuracy
+        gsd = (gsd_w + gsd_h) / 2
+        
+        # Calculate shark dimensions in meters
+        shark_width_m = bounding_box_width_pixels * gsd
+        shark_height_m = bounding_box_height_pixels * gsd
+        
+        # Calculate diagonal length of the bounding box (assuming this is the shark's length)
+        shark_length_m = math.sqrt(shark_width_m**2 + shark_height_m**2)
+        
+        # Convert meters to feet (1 meter = 3.28084 feet)
+        shark_length_ft = shark_length_m * 3.28084
+        
+        return shark_length_ft
+
     def _update_ui(self, frame):
         """Update the UI with the current frame and progress."""
         height, width, channel = frame.shape
