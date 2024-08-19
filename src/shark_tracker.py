@@ -8,7 +8,7 @@ class SharkTracker:
     detection history, best detected frame, and maximum estimated length.
     """
 
-    def __init__(self, track_id: int, initial_detection: np.ndarray, max_missed_detections: int = 5, min_detected_frames: int = 3):
+    def __init__(self, track_id: int, initial_detection: np.ndarray, max_missed_detections: int = 5, min_detected_frames: int = 3, frame_number: int = 0):
         """
         Initialize a new SharkTracker instance.
 
@@ -30,13 +30,14 @@ class SharkTracker:
         self.best_confidence = 0.0
         self.max_length = initial_detection[5]
         self.last_estimated_length = initial_detection[5]
-        
-    def update(self, detection: np.ndarray = None, frame: np.ndarray = None, frame_with_box: np.ndarray = None, confidence: float = 0.0, length: float = 0.0):
+        self.frame_number = frame_number
+
+    def update(self, detection: np.ndarray = None, frame: np.ndarray = None, frame_with_box: np.ndarray = None, confidence: float = 0.0, length: float = 0.0, frame_number: int = 0):
         if detection is not None:
             self.last_detection = detection
             self.missed_detections = 0
             self.detected_frames += 1
-            self._update_best_frame(frame, frame_with_box, confidence)
+            self._update_best_frame(frame, frame_with_box, confidence, frame_number)
             self._update_max_length(length)
             self.last_estimated_length = length
         else:
@@ -50,7 +51,7 @@ class SharkTracker:
         """
         self.missed_detections += 1
 
-    def _update_best_frame(self, frame: np.ndarray, frame_with_box: np.ndarray, confidence: float):
+    def _update_best_frame(self, frame: np.ndarray, frame_with_box: np.ndarray, confidence: float, frame_number: int):
         """
         Update the best frame if the current detection has higher confidence.
 
@@ -63,6 +64,9 @@ class SharkTracker:
                 self.best_confidence = confidence
                 self.best_frame = frame.copy()
                 self.best_frame_with_box = frame_with_box.copy()
+                self.frame_number = frame_number
+                print("update_best_frame")
+                print(frame_number)
 
     def _update_max_length(self, length: float):
         """
