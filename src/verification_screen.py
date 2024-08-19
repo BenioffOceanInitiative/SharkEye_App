@@ -4,11 +4,12 @@ from datetime import datetime
 import shutil
 import zipfile
 import requests
+import pandas as pd 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QComboBox, QMessageBox, QProgressDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QIcon
-
+from video_player import CustomSlider, VideoPlayer
 
 class VerificationScreen(QMainWindow):
     go_to_video_selection = pyqtSignal()
@@ -23,6 +24,9 @@ class VerificationScreen(QMainWindow):
         self.progress_dialog = None
         self.upload_thread = None
         self.is_uploading = False
+        self.video_paths = []
+        self.result_dict = {}
+        self.current_video = None
         self.init_ui()
 
     def init_ui(self):
@@ -39,10 +43,63 @@ class VerificationScreen(QMainWindow):
         main_layout.addWidget(self.experiment_combo)
 
         # Image display
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(640, 480)
-        main_layout.addWidget(self.image_label)
+        self.prev_video_button = QPushButton("<")
+        self.prev_video_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: grey;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: transparent;
+            }
+            QPushButton:disabled {
+                background-color: transparent;
+                color: transparent;
+            }
+        """)
+        self.prev_video_button.clicked.connect(self.prev_video)
+        self.prev_video_button.setMinimumWidth(55)
+        self.prev_video_button.setMinimumHeight(480)
+        
+        self.image_label = VideoPlayer()
+        
+        self.next_video_button = QPushButton(">") 
+        self.next_video_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: grey;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: transparent;
+            }
+            QPushButton:disabled {
+                background-color: transparent;
+                color: transparent;
+            }
+        """)
+        self.next_video_button.setMinimumWidth(55) 
+        self.next_video_button.setMinimumHeight(480)
+        self.next_video_button.clicked.connect(self.next_video)
+
+        video_layout = QHBoxLayout()
+        video_layout.addWidget(self.prev_video_button)
+        video_layout.addWidget(self.image_label)
+        video_layout.addWidget(self.next_video_button)
+        
+        main_layout.addLayout(video_layout)
+
+        # Place holder image for when no experiments
+        self.empty_frame = QLabel("No experiments found with detections to verify")
+        self.empty_frame.resize(self.image_label.size())
+        self.empty_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_frame.hide()
+        main_layout.addWidget(self.empty_frame)
 
         # Navigation buttons
         nav_layout = QHBoxLayout()
@@ -75,7 +132,6 @@ class VerificationScreen(QMainWindow):
         nav_layout.addWidget(self.prev_button)
         nav_layout.addWidget(self.detection_count_label)
         nav_layout.addWidget(self.next_button)
-        main_layout.addLayout(nav_layout)
 
         # Classification dropdown
         self.classification_combo = QComboBox()
@@ -147,10 +203,8 @@ class VerificationScreen(QMainWindow):
         
     def clear_display(self):
         """Clear the display when no experiments are available."""
-        self.image_label.setText("No experiments found with detections to verify")
-        self.prev_button.setEnabled(False)
-        self.next_button.setEnabled(False)
-        self.detection_count_label.setText("No detections")
+        self.image_label.hide()
+        self.empty_frame.show()
         self.classification_combo.setEnabled(False)
         self.save_button.setEnabled(False)  # Disable the save button when there are no detections
 
@@ -170,10 +224,53 @@ class VerificationScreen(QMainWindow):
             self.current_experiment = self.experiment_map.get(formatted_name)
             if self.current_experiment:
                 self.load_detections()
+                self.separate_video_detections()
                 self.current_detection_index = 0
                 self.show_current_detection()
             else:
                 print(f"Error: No mapping found for {formatted_name}")
+
+    def separate_video_detections(self):
+        if self.current_experiment:
+            experiment_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results", self.current_experiment)
+            bounding_boxes_dir = os.path.join(experiment_dir, "bounding_boxes")
+            if os.path.exists(bounding_boxes_dir):
+                result_data_path = os.path.join(experiment_dir, "results.csv")
+                result_data = pd.read_csv(result_data_path)
+                self.result_dict = result_data.groupby(result_data.columns[3])[result_data.columns[2]].apply(list).to_dict() 
+                self.current_video = list(self.result_dict.keys())[0]
+                self.prev_video_button.setEnabled(False)
+                if len(list(self.result_dict.keys())) > 1:
+                    self.next_video_button.setEnabled(True)
+                else:
+                    self.next_video_button.setEnabled(False)
+                self.empty_frame.hide()
+                self.image_label.show()
+                self.save_button.setEnabled(True)
+
+    def change_video(self):
+        frame_numbers = {int((1000/30) * int(frame.split("frame")[1].strip(".jpg"))):frame for frame in self.result_dict[self.current_video]}
+
+        self.image_label.set_video_dir(self.current_video)
+        self.image_label.set_interesting_points(frame_numbers)
+    
+    def prev_video(self):
+        if self.current_video:
+            self.next_video_button.setEnabled(True)
+            if list(self.result_dict.keys()).index(self.current_video) > 0:
+                self.current_video = list(self.result_dict.keys())[list(self.result_dict.keys()).index(self.current_video) - 1]
+                self.change_video()
+                if list(self.result_dict.keys()).index(self.current_video) <= 0:
+                    self.prev_video_button.setEnabled(False)
+
+    def next_video(self):
+        if self.current_video:
+            self.prev_video_button.setEnabled(True)
+            if list(self.result_dict.keys()).index(self.current_video) + 1 < len(list(self.result_dict.keys())):
+                self.current_video = list(self.result_dict.keys())[list(self.result_dict.keys()).index(self.current_video) + 1]
+                self.change_video()
+                if list(self.result_dict.keys()).index(self.current_video) + 1 >= len(list(self.result_dict.keys())):
+                    self.next_video_button.setEnabled(False)
 
     def load_detections(self):
         if self.current_experiment:
@@ -181,10 +278,12 @@ class VerificationScreen(QMainWindow):
             bounding_boxes_dir = os.path.join(experiment_dir, "bounding_boxes")
             self.detections = []
             if os.path.exists(bounding_boxes_dir):
-                for filename in os.listdir(bounding_boxes_dir):
+                for filename in os.listdir(bounding_boxes_dir): 
                     if filename.endswith(".jpg"):
                         file_path = os.path.join(bounding_boxes_dir, filename)
                         self.detections.append({"path": file_path, "classification": "Shark"})
+                        self.separate_video_detections()
+                        self.change_video()
             print(f"Loaded {len(self.detections)} detections from {bounding_boxes_dir}")
 
     def load_results(self, results_dir):
@@ -217,27 +316,18 @@ class VerificationScreen(QMainWindow):
 
     def show_current_detection(self):
         if not self.detections:
-            self.image_label.setText("No shark detections remaining")
-            self.prev_button.setEnabled(False)
-            self.next_button.setEnabled(False)
-            self.detection_count_label.setText("No detections")
-            self.classification_combo.setEnabled(False)
+            print("Clearing Display")
+            self.clear_display()
             return
 
         detection = self.detections[self.current_detection_index]
         pixmap = QPixmap(detection["path"])
-        self.image_label.setPixmap(pixmap.scaled(self.image_label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.classification_combo.setCurrentText(detection["classification"])
         self.classification_combo.setEnabled(True)
-        
-        # Update navigation button states
-        self.prev_button.setEnabled(self.current_detection_index > 0)
-        self.next_button.setEnabled(self.current_detection_index < len(self.detections) - 1)
         
         # Update detection count label
         total_detections = len(self.detections)
         self.detection_count_label.setText(f"Detection {self.current_detection_index + 1} of {total_detections}")
-
 
     def show_previous_detection(self):
         if self.current_detection_index > 0:
@@ -268,9 +358,11 @@ class VerificationScreen(QMainWindow):
         for detection in self.detections:
             if detection['classification'] != "Shark":
                 filename = os.path.basename(detection['path'])
+                frame_number = int(filename.split("frame")[1].strip(".jpg"))
                 new_path = os.path.join(false_positives_dir, filename)
                 shutil.move(detection['path'], new_path)
                 moved_count += 1
+                self.image_label.remove_indicator(frame_number)
             else:
                 new_detections.append(detection)
 
@@ -280,10 +372,9 @@ class VerificationScreen(QMainWindow):
         if self.detections:
             self.show_current_detection()
         else:
-            self.image_label.setText("No shark detections remaining")
-            self.prev_button.setEnabled(False)
-            self.next_button.setEnabled(False)
-            self.detection_count_label.setText("No detections")
+            self.image_label.hide()
+            self.empty_frame.show()
+            self.save_button.setEnabled(True)
 
         message = ''
         if moved_count > 0:

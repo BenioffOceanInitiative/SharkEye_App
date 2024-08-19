@@ -54,7 +54,7 @@ class SharkEyeApp(QMainWindow):
         self.stacked_widget.addWidget(self.video_selection_screen)
         
         self.detection_screen = None  # Will be created when needed
-        self.verification_screen = None  # Will be created when needed
+        self.verification_screen = None  # Will be created when needed5
 
         # Add video selection screen to stacked widget
         self.stacked_widget.addWidget(self.video_selection_screen)
@@ -107,7 +107,7 @@ class SharkEyeApp(QMainWindow):
         self.verification_screen.refresh_experiments()
 
         if results_dir:
-            self.verification_screen.load_results(results_dir)
+            self.verification_screen.separate_video_detections()
 
         self.stacked_widget.setCurrentWidget(self.verification_screen)
 
