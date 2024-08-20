@@ -284,6 +284,7 @@ class VerificationScreen(QMainWindow):
             self.detections = []
             if os.path.exists(bounding_boxes_dir):
                 for filename in os.listdir(bounding_boxes_dir): 
+                for filename in os.listdir(bounding_boxes_dir): 
                     if filename.endswith(".jpg"):
                         file_path = os.path.join(bounding_boxes_dir, filename)
                         self.detections.append({"path": file_path, "classification": "Shark"})

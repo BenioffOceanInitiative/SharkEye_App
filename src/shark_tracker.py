@@ -56,6 +56,7 @@ class SharkTracker:
         self.missed_detections += 1
 
     def _update_best_frame(self, frame: np.ndarray, frame_with_box: np.ndarray, confidence: float, frame_number: int):
+    def _update_best_frame(self, frame: np.ndarray, frame_with_box: np.ndarray, confidence: float, frame_number: int):
         """
         Update the best frame if the current detection has higher confidence.
 
