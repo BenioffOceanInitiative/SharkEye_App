@@ -54,7 +54,7 @@ class SharkEyeApp(QMainWindow):
         self.stacked_widget.addWidget(self.video_selection_screen)
         
         self.detection_screen = None  # Will be created when needed
-        self.verification_screen = None  # Will be created when needed5
+        self.verification_screen = None  # Will be created when needed
 
         # Add video selection screen to stacked widget
         self.stacked_widget.addWidget(self.video_selection_screen)
