@@ -5,6 +5,7 @@ import shutil
 import zipfile
 import requests
 import pandas as pd 
+import pandas as pd 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QComboBox, QMessageBox, QProgressDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
@@ -24,6 +25,9 @@ class VerificationScreen(QMainWindow):
         self.progress_dialog = None
         self.upload_thread = None
         self.is_uploading = False
+        self.video_paths = []
+        self.result_dict = {}
+        self.current_video = None
         self.video_paths = []
         self.result_dict = {}
         self.current_video = None
@@ -225,6 +229,7 @@ class VerificationScreen(QMainWindow):
             if self.current_experiment:
                 self.load_detections()
                 self.separate_video_detections()
+                self.separate_video_detections()
                 self.current_detection_index = 0
                 self.show_current_detection()
             else:
@@ -282,6 +287,8 @@ class VerificationScreen(QMainWindow):
                     if filename.endswith(".jpg"):
                         file_path = os.path.join(bounding_boxes_dir, filename)
                         self.detections.append({"path": file_path, "classification": "Shark"})
+                        self.separate_video_detections()
+                        self.change_video()
                         self.separate_video_detections()
                         self.change_video()
             print(f"Loaded {len(self.detections)} detections from {bounding_boxes_dir}")
