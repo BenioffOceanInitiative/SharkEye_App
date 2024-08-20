@@ -5,7 +5,6 @@ import shutil
 import zipfile
 import requests
 import pandas as pd 
-import pandas as pd 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QLabel, QComboBox, QMessageBox, QProgressDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
