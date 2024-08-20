@@ -33,14 +33,10 @@ class SharkTracker:
         self.frame_number = frame_number
 
     def update(self, detection: np.ndarray = None, frame: np.ndarray = None, frame_with_box: np.ndarray = None, confidence: float = 0.0, length: float = 0.0, frame_number: int = 0):
-        self.frame_number = frame_number
-
-    def update(self, detection: np.ndarray = None, frame: np.ndarray = None, frame_with_box: np.ndarray = None, confidence: float = 0.0, length: float = 0.0, frame_number: int = 0):
         if detection is not None:
             self.last_detection = detection
             self.missed_detections = 0
             self.detected_frames += 1
-            self._update_best_frame(frame, frame_with_box, confidence, frame_number)
             self._update_best_frame(frame, frame_with_box, confidence, frame_number)
             self._update_max_length(length)
             self.last_estimated_length = length
