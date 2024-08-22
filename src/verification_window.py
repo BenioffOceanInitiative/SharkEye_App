@@ -1,10 +1,10 @@
+import os
+import shutil
+from datetime import datetime
 from PyQt6.QtWidgets import (QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QSpacerItem, QSizePolicy, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QKeyEvent
-import os
-import shutil
-from datetime import datetime
 
 class VerificationWindow(QWidget):
     def __init__(self, results_dir):

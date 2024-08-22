@@ -1,5 +1,4 @@
-import sys
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QProgressBar, QLabel, QDialog, QDialogButtonBox, QMessageBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QIcon, QPixmap
@@ -183,11 +182,3 @@ class ResultsDialog(QDialog):
     def return_clicked(self):
         self.result = "return"
         self.accept()
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    # For testing purposes, you can create a dummy list of video paths
-    dummy_video_paths = ["/path/to/video1.mp4", "/path/to/video2.mp4"]
-    window = DetectionsScreen(dummy_video_paths, "/path/to/output")
-    window.show()
-    sys.exit(app.exec())

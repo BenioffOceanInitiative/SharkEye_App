@@ -2,7 +2,7 @@ import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import datetime
 import time
-from typing import List, Tuple, Callable
+from typing import List
 import logging
 import traceback
 import cv2
@@ -18,6 +18,7 @@ from PyQt6.QtGui import QImage, QPixmap
 
 from shark_tracker import SharkTracker
 from config import CONFIDENCE_THRESHOLD, VIDEO_STRIDE, MAX_MISSED_DETECTIONS, MIN_DETECTED_FRAMES, MODEL_PATH
+from utility import get_results_dir
 
 class SharkDetector(QObject):
     update_progress = pyqtSignal(int)
@@ -81,7 +82,7 @@ class SharkDetector(QObject):
 
         # Create a timestamped folder for this detection run
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results", timestamp)
+        results_dir = os.path.join(get_results_dir(), timestamp)
         os.makedirs(results_dir, exist_ok=True)
         
         self.frame_data = []
@@ -94,7 +95,13 @@ class SharkDetector(QObject):
 
             logging.info(f"\nProcessing video {current_video}/{total_videos}: {video_path}")
             try:
+                # Refresh the model before processing each video
+                self._unload_model()
                 self._load_model()
+                
+                # Reset trackers and unique track IDs for each video
+                self.shark_trackers = []
+                self.unique_track_ids = set()
                 
                 unique_detections, processing_time = self.process_single_video(
                     video_path, 

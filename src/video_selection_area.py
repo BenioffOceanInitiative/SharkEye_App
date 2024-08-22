@@ -1,6 +1,6 @@
+import os
 from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QListWidget, QFileDialog, QListWidgetItem
 from PyQt6.QtCore import pyqtSignal, Qt
-import os
 
 class VideoSelectionArea(QWidget):
     videos_selected = pyqtSignal(list)
