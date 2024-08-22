@@ -1,12 +1,12 @@
 import os
 import sys
-from PyQt6.QtWidgets import QApplication, QStackedWidget, QMainWindow, QVBoxLayout, QWidget, QLabel
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QStackedWidget, QMainWindow, QVBoxLayout, QWidget, QMessageBox
 from PyQt6.QtGui import QIcon
 
 from video_selection_screen import VideoSelectionScreen
 from detections_screen import DetectionsScreen
 from verification_screen import VerificationScreen
+from utility import resource_path
 
 class SharkEyeApp(QMainWindow):
     def __init__(self):
@@ -17,30 +17,14 @@ class SharkEyeApp(QMainWindow):
         self.setWindowTitle("SharkEye")
         self.setGeometry(100, 100, 1000, 700)
         if sys.platform.startswith('win'):
-            app_icon = self.resource_path('assets/logo/SharkEye.ico')
+            app_icon = resource_path('assets/logo/SharkEye.ico')
         elif sys.platform.startswith('darwin'):
-            app_icon = self.resource_path('assets/logo/SharkEye.icns')
+            app_icon = resource_path('assets/logo/SharkEye.icns')
         else:
-            app_icon = self.resource_path('assets/logo/SharkEye.iconset/icon_32x32.png')
+            app_icon = resource_path('assets/logo/SharkEye.iconset/icon_32x32.png')
             
         app.setWindowIcon(QIcon(app_icon))
         
-        # self.logo_widget = QWidget()
-        # self.logo_widget.setStyleSheet("background-color: #1d2633;")
-        # logo_layout = QVBoxLayout(self.logo_widget)
-        # logo_layout.setContentsMargins(0, 0, 0, 0)  # Set zero margins
-        
-        # self.logo_label = QLabel()
-        # logo_pixmap = self.load_logo()
-        # if logo_pixmap:
-        #     self.logo_label.setPixmap(logo_pixmap)
-        #     self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # else:
-        #     self.logo_label.setText("SharkEye")
-        
-        # logo_layout.addWidget(self.logo_label)
-        # self.main_layout.addWidget(self.logo_widget)
-        # Create central widget and layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -62,16 +46,6 @@ class SharkEyeApp(QMainWindow):
         # Connect signals
         self.video_selection_screen.start_detection.connect(self.show_detection_screen)
         self.video_selection_screen.go_to_verification.connect(lambda: self.show_verification_screen())
-        
-    def resource_path(self, relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        try:
-            # PyInstaller creates a temp folder and stores path in _MEIPASS
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-
-        return os.path.join(base_path, relative_path)
 
     def show_detection_screen(self, video_paths):
         if self.detection_screen:
@@ -104,13 +78,23 @@ class SharkEyeApp(QMainWindow):
             self.verification_screen.go_to_video_selection.connect(self.show_video_selection_screen)
 
         # Refresh experiments list
-        self.verification_screen.refresh_experiments()
-
-        if results_dir:
-            self.verification_screen.load_results(results_dir)
-
-        self.stacked_widget.setCurrentWidget(self.verification_screen)
-
+        if self.verification_screen.refresh_experiments():
+            if results_dir:
+                # Load the specific experiment if results_dir is provided
+                self.verification_screen.load_results(results_dir)
+            
+            if self.verification_screen.current_experiment:
+                self.verification_screen.separate_video_detections()
+                self.stacked_widget.setCurrentWidget(self.verification_screen)
+            else:
+                print("No experiment selected after refreshing.")
+                QMessageBox.information(self, "No Experiment", "No experiment is currently selected.")
+                self.show_video_selection_screen()
+        else:
+            # No experiments found, show a message and return to video selection
+            QMessageBox.information(self, "No Experiments", "No experiments found with detections to verify.")
+            self.show_video_selection_screen()
+    
     def closeEvent(self, event):
         # Perform any cleanup or save any settings before closing
         # For example, you might want to save the last used output directory

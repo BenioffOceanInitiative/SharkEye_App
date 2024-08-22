@@ -2,7 +2,7 @@ import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import datetime
 import time
-from typing import List, Tuple, Callable
+from typing import List
 import logging
 import traceback
 import cv2
@@ -10,6 +10,7 @@ import numpy as np
 import math
 from scipy.optimize import linear_sum_assignment
 import torch
+import pandas as pd
 from ultralytics import YOLO
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -17,6 +18,7 @@ from PyQt6.QtGui import QImage, QPixmap
 
 from shark_tracker import SharkTracker
 from config import CONFIDENCE_THRESHOLD, VIDEO_STRIDE, MAX_MISSED_DETECTIONS, MIN_DETECTED_FRAMES, MODEL_PATH
+from utility import get_results_dir
 
 class SharkDetector(QObject):
     update_progress = pyqtSignal(int)
@@ -80,9 +82,10 @@ class SharkDetector(QObject):
 
         # Create a timestamped folder for this detection run
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        results_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "results", timestamp)
+        results_dir = os.path.join(get_results_dir(), timestamp)
         os.makedirs(results_dir, exist_ok=True)
-
+        
+        self.frame_data = []
         for i, video_path in enumerate(video_paths):
             if self.is_cancelled:
                 break
@@ -92,7 +95,13 @@ class SharkDetector(QObject):
 
             logging.info(f"\nProcessing video {current_video}/{total_videos}: {video_path}")
             try:
+                # Refresh the model before processing each video
+                self._unload_model()
                 self._load_model()
+                
+                # Reset trackers and unique track IDs for each video
+                self.shark_trackers = []
+                self.unique_track_ids = set()
                 
                 unique_detections, processing_time = self.process_single_video(
                     video_path, 
@@ -109,6 +118,10 @@ class SharkDetector(QObject):
                 self.error_occurred.emit(f"Error processing video {video_path}: {str(e)}")
             finally:
                 self._unload_model()
+         
+        self.frame_data = pd.DataFrame(self.frame_data)
+        frame_data_path = os.path.join(results_dir, "results.csv")
+        self.frame_data.to_csv(frame_data_path, mode='a')
 
         self.all_videos_processed.emit(total_unique_detections, total_processing_time)
         return total_unique_detections, total_processing_time, results_dir
@@ -132,7 +145,7 @@ class SharkDetector(QObject):
             results = self.model.track(source=video_path, imgsz=[736,1280], conf=CONFIDENCE_THRESHOLD, 
                                     verbose=False, persist=True, vid_stride=VIDEO_STRIDE, 
                                     stream=True, show=False, classes=[0])
-
+            
             for i, result in enumerate(results):
                 if self.is_cancelled:
                     break
@@ -147,7 +160,7 @@ class SharkDetector(QObject):
                     
                     frame_with_boxes = self._draw_tracks(frame_with_boxes, detections)
                     
-                    self._update_tracks(detections, original_frame, frame_with_boxes)
+                    self._update_tracks(detections, original_frame, frame_with_boxes, frame_number = (i + 1) * VIDEO_STRIDE)
                     
                     # Convert the frame to QPixmap and update the UI
                     height, width, channel = frame_with_boxes.shape
@@ -167,8 +180,8 @@ class SharkDetector(QObject):
                 progress = int((i + 1) / total_processed_frames * 100)
                 progress_callback(progress)
 
-            self._save_best_frames(results_dir, os.path.basename(video_path))
-            
+            self._save_best_frames(results_dir, video_path)
+
             processing_time = time.time() - start_time
             return len(self.unique_track_ids), processing_time
         
@@ -204,7 +217,7 @@ class SharkDetector(QObject):
                     detections.append(np.array([x, y, w, h, conf, length]))
         return detections
     
-    def _update_tracks(self, detections: List[np.ndarray], frame: np.ndarray, frame_with_boxes: np.ndarray):
+    def _update_tracks(self, detections: List[np.ndarray], frame: np.ndarray, frame_with_boxes: np.ndarray, frame_number: int):
         if not self.shark_trackers:
             self._create_new_tracks(detections)
             return
@@ -214,7 +227,7 @@ class SharkDetector(QObject):
             closest_track = self._find_closest_track(detection, matched_track_indices)
             if closest_track:
                 j, track = closest_track
-                self._update_existing_track(track, detection, frame, frame_with_boxes)
+                self._update_existing_track(track, detection, frame, frame_with_boxes, frame_number)
                 matched_track_indices.add(j)
             else:
                 self._create_new_track(detection)
@@ -239,8 +252,8 @@ class SharkDetector(QObject):
                 closest_track = (j, track)
         return closest_track
 
-    def _update_existing_track(self, track, detection, frame, frame_with_boxes):
-        track.update(detection, frame, frame_with_boxes, detection[4], detection[5])
+    def _update_existing_track(self, track, detection, frame, frame_with_boxes, frame_number):
+        track.update(detection, frame, frame_with_boxes, detection[4], detection[5], frame_number)
 
     def _create_new_track(self, detection):
         new_track = SharkTracker(len(self.shark_trackers), detection, self.max_missed_detections, self.min_detected_frames)
@@ -298,18 +311,21 @@ class SharkDetector(QObject):
 
         return frame
 
-    def _save_best_frames(self, result_dir: str, video_name: str):
+    def _save_best_frames(self, result_dir: str, video_path: str):
         """Save the best frames for each valid shark track."""
         saved_count = 0
+        video_name = os.path.basename(video_path)
         for track in self.shark_trackers:
             if track.is_valid and track.best_frame_with_box is not None:
-                base_filename = f"{os.path.splitext(video_name)[0]}_shark_{track.id}_conf_{track.best_confidence:.2f}_len_{track.max_length:.2f}.jpg"
+                base_filename = f"{os.path.splitext(video_name)[0]}_shark_{track.id}_conf_{track.best_confidence:.2f}_len_{track.max_length:.2f}_frame{track.frame_number}.jpg"
                 
                 frame_path = os.path.join(result_dir, "frames", base_filename)
                 cv2.imwrite(frame_path, track.best_frame)
                 
                 bbox_path = os.path.join(result_dir, "bounding_boxes", base_filename)
                 cv2.imwrite(bbox_path, track.best_frame_with_box)
+
+                self.frame_data.append([base_filename, bbox_path, video_path])
 
                 saved_count += 1
 

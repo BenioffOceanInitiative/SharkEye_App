@@ -2,3 +2,4 @@ ultralytics
 lapx
 PyQt6
 pyinstaller
+appdirs

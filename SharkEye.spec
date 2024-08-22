@@ -26,8 +26,8 @@ ultralytics_path = os.path.dirname(ultralytics.__file__)
 
 # Update data files
 data_files = [
-    ('assets/images/logo-white.png', 'assets/images'),
-    ('model_weights/train6-weights-best.pt', 'model_weights'),
+    ('assets/images', 'assets/images'),
+    ('model_weights/train8-weights-best.pt', 'model_weights'),
     (scipy_path, 'scipy'),
     (ultralytics_path, 'ultralytics')
 ]
@@ -57,7 +57,7 @@ elif sys.platform.startswith('darwin'):
 else:
     icon_file = None
 a = Analysis(
-    ['src/sharkeye.py'],
+    ['src/sharkeye_app.py'],
     pathex=[],
     binaries=[],
     datas=data_files,
