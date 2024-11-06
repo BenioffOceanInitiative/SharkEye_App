@@ -3,3 +3,4 @@ lapx
 PyQt6
 pyinstaller
 appdirs
+pefile>=2023.2.7,<2024.8.26
