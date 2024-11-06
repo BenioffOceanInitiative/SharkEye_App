@@ -1,9 +1,11 @@
 import os
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, 
-                             QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QSpacerItem, QSizePolicy)
+                             QListWidget, QListWidgetItem, QFileDialog, QMessageBox, QSpacerItem, QSizePolicy,
+                             QLabel, QHBoxLayout)
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QIcon, QDragEnterEvent, QDropEvent, QPixmap
+from utility import resource_path
 
 class VideoSelectionScreen(QMainWindow):
     start_detection = pyqtSignal(list)
@@ -22,33 +24,53 @@ class VideoSelectionScreen(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Banner
+        banner = QWidget()
+        banner.setStyleSheet("background-color: #1d2633;")
+        banner.setFixedHeight(60)
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(0, 0, 0, 0)
+        logo = QLabel()
+        logo_pixmap = QPixmap(resource_path("assets/images/logo-white.png")).scaledToHeight(40, Qt.TransformationMode.SmoothTransformation)
+        logo.setPixmap(logo_pixmap)
+        banner_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(banner)
+
+        # Content layout with padding
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(10, 10, 10, 10)  # Add padding for the content
 
         # Select Videos button
-        self.select_button = self.create_button("Select Videos", self.select_videos, "icons/select_video.png", custom_color=True)
-        main_layout.addWidget(self.select_button)
+        self.select_button = self.create_button("Select Video", self.select_videos, "icons/select_video.png", custom_color=True)
+        content_layout.addWidget(self.select_button)
 
         self.remove_button = self.create_button("Remove Selected", self.remove_selected_video, "icons/remove.png")
         self.remove_button.hide()
         self.remove_button.setEnabled(False)
-        main_layout.addWidget(self.remove_button)
+        content_layout.addWidget(self.remove_button)
 
         # File list
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.file_list.itemSelectionChanged.connect(self.update_ui_state)
-        main_layout.addWidget(self.file_list)
+        content_layout.addWidget(self.file_list)
 
         # Start Detection button (initially hidden)
         self.start_button = self.create_button("Start Detection", self.start_detection_process, "icons/start.png")
         self.start_button.hide()
-        main_layout.addWidget(self.start_button)
+        content_layout.addWidget(self.start_button)
 
         # Spacing
-        main_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
+        content_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
         # Go to Verification button
         self.verify_button = self.create_button("Go to Verification", self.go_to_verification.emit, "icons/verify.png", custom_color=True)
-        main_layout.addWidget(self.verify_button)
+        content_layout.addWidget(self.verify_button)
+
+        # Add content layout to main layout
+        main_layout.addLayout(content_layout)
 
     def create_button(self, text, slot, icon_path=None, custom_color=False):
         button = QPushButton(text)

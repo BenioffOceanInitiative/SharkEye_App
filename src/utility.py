@@ -13,6 +13,8 @@ def get_results_dir():
     else:
         # We are running in a normal Python environment
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        # Move back one directory to reach the project root
+        base_dir = os.path.abspath(os.path.join(base_dir, '..'))
     
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)

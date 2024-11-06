@@ -22,5 +22,5 @@ python src/sharkeye.py
 # PyInstaller app
 Create an Executable App
 ```
-pyinstaller src/sharkeye.py --noconfirm
+pyinstaller SharkEye.spec --noconfirm
 ```

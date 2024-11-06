@@ -27,7 +27,8 @@ ultralytics_path = os.path.dirname(ultralytics.__file__)
 # Update data files
 data_files = [
     ('assets/images', 'assets/images'),
-    ('model_weights/train8-weights-best.pt', 'model_weights'),
+    ('assets/logo', 'assets/logo'),  # Add this line to include logo files
+    ('model_weights/runs-detect-train-weights-best.pt', 'model_weights'),
     (scipy_path, 'scipy'),
     (ultralytics_path, 'ultralytics')
 ]
@@ -94,6 +95,17 @@ if sys.platform.startswith('darwin'):
         name='SharkEye.app',
         icon=icon_file,
         bundle_identifier=None,
+        info_plist={
+            'NSHighResolutionCapable': 'True',
+            'NSPrincipalClass': 'NSApplication',
+            'NSAppleScriptEnabled': False,
+            'CFBundleShortVersionString': '1.0.0',
+            'CFBundleVersion': '1.0.0',
+            'LSBackgroundOnly': False,
+            'CFBundleDocumentTypes': [],
+            'NSCameraUsageDescription': 'This app requires camera access to process video files.',
+            'NSPhotoLibraryUsageDescription': 'This app requires access to the photo library to process video files.',
+        },
     )
 else:
     # For Windows or other platforms

@@ -1,7 +1,10 @@
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QProgressBar, QLabel, QDialog, QDialogButtonBox, QMessageBox)
+                             QProgressBar, QLabel, QDialog, QDialogButtonBox, QMessageBox, QFileDialog)
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QIcon, QPixmap
+import os
+import sys
+import tempfile
 
 from shark_detector import SharkDetector
 
@@ -122,12 +125,30 @@ class DetectionsScreen(QMainWindow):
             self.go_to_video_selection.emit()
 
     def show_results(self, total_detections, total_time, results_dir):
+        if not os.access(results_dir, os.W_OK):
+            QMessageBox.warning(self, "Read-Only File System", "The default results directory is read-only. Please choose a writable location.")
+            new_results_dir = self.get_writable_directory()
+            if not new_results_dir:
+                self.go_to_video_selection.emit()
+                return
+            results_dir = new_results_dir
+
         dialog = ResultsDialog(total_detections, total_time, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if dialog.result == "verify":
                 self.go_to_verification.emit(results_dir)
             else:
                 self.go_to_video_selection.emit()
+
+    def get_writable_directory(self):
+        while True:
+            directory = QFileDialog.getExistingDirectory(self, "Select Directory for Results")
+            if not directory:  # User cancelled
+                return None
+            if os.access(directory, os.W_OK):
+                return directory
+            else:
+                QMessageBox.warning(self, "Invalid Directory", "Selected directory is not writable. Please choose another.")
 
     def handle_error(self, error_message):
         QMessageBox.critical(self, "Error", f"An error occurred during detection: {error_message}")
