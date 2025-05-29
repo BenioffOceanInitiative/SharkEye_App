@@ -5,6 +5,13 @@
 /dist/
 /src/__pycache__/
 /src/results/
+/src/segmentation/data
+/src/segmentation/__pycache__
+/src/segmentation/sam_vit_b_01ec64.pth
+/src/segmentation/sam_vit_h_4b8939.pth
+/2020/
+/venv/
+/DJI_0091_Trim_1/
 
 sharkeye_log.txt
 .DS_Store

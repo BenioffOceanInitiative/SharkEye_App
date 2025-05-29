@@ -27,13 +27,18 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import shutil
 import tempfile
 import io
+import math
+from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
+from segment_anything import sam_model_registry, SamPredictor 
 
 # Add these constants for length calculation
-DRONE_ALTITUDE_M = 30
+DRONE_ALTITUDE_M = 40
 SENSOR_WIDTH_MM = 13.2
 FOCAL_LENGTH_MM = 28
 MODEL_WIDTH = MODEL_HEIGHT = 640
-ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 3840, 2160
+# ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 3840, 2160
+ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 2688, 1512
+ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 
 # Use a constant for the model path
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
@@ -52,7 +57,47 @@ def calculate_shark_length(bbox):
     _, _, _, height = bbox
     adjusted_height = height * (MODEL_HEIGHT / MODEL_WIDTH)
     length_m = adjusted_height * GSD
-    return length_m * 3.28084  # Convert meters to feet
+    # depth_correction_factor = (1 + DRONE_ALTITUDE_M) / DRONE_ALTITUDE_M
+    return length_m * 3.28084 # * depth_correction_factor  # Convert meters to feet
+
+def calculate_bbox_area(bbox):
+    """Calculate area of bbox detection"""
+    _, _, width, height = bbox
+    return width * height
+
+# def calculate_shark_length(bbox):
+#     """Calculate shark length in feet based on bounding box"""
+#     ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 2688, 1512
+#     ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
+#     DRONE_ALTITUDE_M = 40
+#     FOV_RADIANS = 1.274090354 # From estimate of 73 degrees 
+
+#     long_side = (2 * ASPECT_RATIO * DRONE_ALTITUDE_M * math.tan(FOV_RADIANS / 2))/ np.sqrt(1 + ASPECT_RATIO ** 2) 
+#     pixel_size_m = long_side / ORIGINAL_WIDTH
+
+#     _, _, width, height = bbox
+
+#     shark_ratio = 1.5
+#     side_a = min(width, height)
+#     side_b = max(width, height)
+
+#     print(f'Short side: {side_a}')
+#     print(f'Long side: {side_b}')
+#     print(f'Long to short {(side_b / side_a)}')
+#     if (side_b / side_a) < shark_ratio:
+#         shark_pixel_length = np.sqrt((side_a ** 2) + (side_b ** 2))
+#     else:
+#         shark_pixel_length = side_a
+
+#     length_m = shark_pixel_length * pixel_size_m 
+#     return length_m * 3.28084  # Convert meters to feet
+
+def calculate_adjusted_shark_length(length_raw):
+    """Calculate adjusted shark length in feet using correction factors"""
+    asl_correction_factor = 1
+    depth_correction_factor = (1 + DRONE_ALTITUDE_M)/DRONE_ALTITUDE_M
+    length_adj = length_raw * asl_correction_factor * depth_correction_factor
+    return length_adj
 
 class CustomTracker:
     def __init__(self, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
@@ -114,7 +159,7 @@ class CustomTracker:
 
     def _create_new_track(self, detection, frame, timestamp):
         x, y, w, h, confidence = detection
-        length = calculate_shark_length((x, y, w, h))
+        length = (calculate_shark_length((x, y, w, h)))
         self.tracks[self.next_id] = {
             'id': self.next_id,
             'unique_id': self.next_id,
@@ -127,6 +172,10 @@ class CustomTracker:
             'best_conf': confidence,
             'best_timestamp': timestamp,
             'best_length': length,
+            'longest_frame': frame.copy(),
+            'longest_conf': confidence, 
+            'longest_timestamp': timestamp,
+            'longest_length': length,            
             'frames_since_last_detection': 0,
             'velocity': np.array([0, 0]),
             'label': 'Shark',
@@ -136,7 +185,7 @@ class CustomTracker:
 
     def _update_track(self, track_id, detection, frame, timestamp):
         x, y, w, h, confidence = detection
-        length = calculate_shark_length((x, y, w, h))
+        length = (calculate_shark_length((x, y, w, h)))
         track = self.tracks[track_id]
         
         # Store frame with bounding box
@@ -158,6 +207,12 @@ class CustomTracker:
             track['best_frame'] = frame.copy()
             track['best_timestamp'] = timestamp
             track['best_length'] = length
+
+        if confidence > .8 and length > track['longest_length']:
+            track['longest_conf'] = confidence
+            track['longest_frame'] = frame.copy()
+            track['longest_timestamp'] = timestamp
+            track['longest_length'] = length
 
         if len(track['positions']) > 1:
             prev_pos = np.array(track['positions'][-2][:2])
@@ -185,30 +240,41 @@ class CustomTracker:
             avg_confidence = np.mean(track['confidences'])
             
             if num_frames >= self.min_frames and avg_confidence > self.confidence_threshold:
-                best_frame = track['best_frame']
-                best_timestamp = track['best_timestamp']
-                best_confidence = track['best_conf']
-                best_length = track['best_length']
+                longest_frame = track['longest_frame']
+                longest_timestamp = track['longest_timestamp']
+                longest_confidence = track['longest_conf']
+                longest_length = track['longest_length']
                 
-                if best_frame is not None:
-                    timestamp_str = self._format_timestamp_filename(best_timestamp)
+                if longest_frame is not None:
+                    timestamp_str = self._format_timestamp_filename(longest_timestamp)
                     
-                    feet, inches = divmod(best_length, 1)
+                    x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
+                    
+                    # Use segmentation model to generate lengths
+                    mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                    pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
+                    segmentation_length = calculate_shark_length_from_pixel(pixel_length)
+                    track['longest_length'] = segmentation_length
+                    longest_length = track['longest_length']
+
+                    mask_overlay = draw_mask(mask, longest_frame)
+                    track['mask_overlay'] = mask_overlay
+
+                    feet, inches = divmod(longest_length, 1)
                     length_str = f"{int(feet)}ft{int(inches * 12)}in"
                     
                     avg_conf_int = int(avg_confidence * 100)
-                    best_conf_int = int(best_confidence * 100)
+                    longest_conf_int = int(longest_confidence * 100)
                     
-                    filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{best_conf_int}_len{length_str}.jpg"
+                    filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
                     
                     # Save original frame
-                    cv2.imwrite(os.path.join(output_dir, 'frames', filename), best_frame)
+                    cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
                     
                     # Save frame with bounding box
-                    boxed_frame = best_frame.copy()
-                    x, y, w, h = track['positions'][track['confidences'].index(best_confidence)]
+                    boxed_frame = longest_frame.copy()
                     cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-                    label = f"ID: {track_id}, Conf: {best_confidence:.2f}, Length: {length_str}"
+                    label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
                     cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
                     bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
                     cv2.imwrite(bounding_box_path, boxed_frame)
@@ -871,7 +937,7 @@ class MainWindow(QMainWindow):
                 timestamp = track['timestamps'][0]  # Get first timestamp
                 time_str = datetime.utcfromtimestamp(timestamp / 1000).strftime("%M%S")
                 formatted_time = f"{time_str[:2]}:{time_str[2:]}"
-                item_text = f"Video: {track['video_name']} - ID: {track['unique_id']} - Time: {formatted_time} - Confidence: {track['best_conf']:.2f} - Length: {max(track['lengths']):.1f}ft - Label: {track['label']}"
+                item_text = f"Video: {track['video_name']} - ID: {track['unique_id']} - Time: {formatted_time} - Confidence: {track['best_conf']:.2f} - Length: {track['best_length']:.1f}ft - Label: {track['label']}"
                 item = QListWidgetItem(item_text)
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 self.detection_list.addItem(item)
@@ -954,6 +1020,25 @@ class MainWindow(QMainWindow):
     def go_to_review_history(self):
         self.stack_widget.setCurrentWidget(self.review_widget)
 
+    def toggle_display_mode(self):
+        if self.frame_player.timer.isActive():
+            self.frame_player.timer.stop()
+
+            current_track = self.sorted_tracks[self.current_detection_index]
+            mask_overlay = current_track[1]['mask_overlay']
+
+            frame = mask_overlay
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width, channel = frame_rgb.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+            scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            
+            self.frame_player.setPixmap(scaled_pixmap)
+        else:
+            self.frame_player.timer.start()
+
     def setup_review_widget(self):
         layout = QVBoxLayout(self.review_widget)
         
@@ -967,6 +1052,11 @@ class MainWindow(QMainWindow):
         
         frame_player_container.addStretch()  # Add stretch after frame player
         layout.addLayout(frame_player_container)
+
+        # Button to toggle display to show gif/segmentation mask
+        self.toggle_display_mode_button = QPushButton("Toggle Mask/Bounding Box Display")
+        self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
+        layout.addWidget(self.toggle_display_mode_button)
         
         # Label combo
         self.label_combo = QComboBox()
