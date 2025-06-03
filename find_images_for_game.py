@@ -248,7 +248,7 @@ def main(base_path, n: int):
 
 if __name__ == "__main__":
     path2020 = Path("sharkeye2/all_data/yolo_image_format/2020")
-    main(base_path=path2020, n = 10)
+    main(base_path=path2020, n = 30)
     
 
 
