@@ -247,7 +247,7 @@ def main(base_path, n: int):
             cropped_count += 1
 
 if __name__ == "__main__":
-    base_path = Path("2020")
+    base_path = Path("sharkeye2/all_data/yolo_image_format")
     main(base_path=base_path, n = 20)
 
 
