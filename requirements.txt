@@ -3,3 +3,5 @@ lapx
 PyQt6
 pyinstaller
 appdirs
+segment_anything
+scikit-image
