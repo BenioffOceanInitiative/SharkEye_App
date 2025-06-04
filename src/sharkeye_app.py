@@ -937,7 +937,7 @@ class MainWindow(QMainWindow):
                 timestamp = track['timestamps'][0]  # Get first timestamp
                 time_str = datetime.utcfromtimestamp(timestamp / 1000).strftime("%M%S")
                 formatted_time = f"{time_str[:2]}:{time_str[2:]}"
-                item_text = f"Video: {track['video_name']} - ID: {track['unique_id']} - Time: {formatted_time} - Confidence: {track['best_conf']:.2f} - Length: {track['best_length']:.1f}ft - Label: {track['label']}"
+                item_text = f"Video: {track['video_name']} - ID: {track['unique_id']} - Time: {formatted_time} - Confidence: {track['longest_conf']:.2f} - Length: {track['longest_length']:.1f}ft - Label: {track['label']}"
                 item = QListWidgetItem(item_text)
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 self.detection_list.addItem(item)
@@ -1194,7 +1194,7 @@ class MainWindow(QMainWindow):
                 writer.writeheader()
                 
                 for _, track in self.sorted_tracks:
-                    timestamp = track['timestamps'][0]
+                    timestamp = track['longest_timestamp']
                     time_str = datetime.utcfromtimestamp(timestamp / 1000).strftime('%M:%S')
                     
                     writer.writerow({
@@ -1202,8 +1202,8 @@ class MainWindow(QMainWindow):
                         'track_id': track['unique_id'],
                         'label': track['label'],
                         'timestamp': time_str,
-                        'confidence': track['best_conf'],
-                        'length_ft': max(track['lengths'])
+                        'confidence': track['longest_conf'],
+                        'length_ft': track['longest_length']
                     })
             
             QMessageBox.information(self, "Export Complete", f"Results exported to {file_path}")
@@ -1260,7 +1260,7 @@ class MainWindow(QMainWindow):
                              (int(x + w/2), int(y + h/2)), 
                              (0, 255, 0), 2)
                 
-                frame_filename = f"{video_name}_{label}{track_id}_conf{int(track['best_conf']*100):02d}_len{max(track['lengths']):.1f}ft.jpg"
+                frame_filename = f"{video_name}_{label}{track_id}_conf{int(track['best_conf']*100):02d}_len{track['longest_length']:.1f}ft.jpg"
                 
                 if label == 'shark':
                     cv2.imwrite(os.path.join(temp_dir, 'bounding_boxes', frame_filename), frame_with_box)
