@@ -27,8 +27,9 @@ ultralytics_path = os.path.dirname(ultralytics.__file__)
 # Update data files
 data_files = [
     ('assets/images', 'assets/images'),
-    ('assets/logo', 'assets/logo'),  # Add this line to include logo files
+    ('assets/logo', 'assets/logo'),
     ('model_weights/runs-detect-train-weights-best.pt', 'model_weights'),
+    ('model_weights/sam_vit_b_01ec64.pth', 'model_weights'),
     (scipy_path, 'scipy'),
     (ultralytics_path, 'ultralytics')
 ]
@@ -51,12 +52,14 @@ hidden_imports = [
 hidden_imports.extend(scipy_submodules)
 hidden_imports.extend(ultralytics_submodules)
 
+# Set icon path based on platform
 if sys.platform.startswith('win'):
-    icon_file = 'assets/logo/SharkEye.ico'
+    icon_file = os.path.abspath('assets/logo/SharkEye.ico')
 elif sys.platform.startswith('darwin'):
-    icon_file = 'assets/logo/SharkEye.icns'
+    icon_file = os.path.abspath('assets/logo/SharkEye.icns')
 else:
     icon_file = None
+
 a = Analysis(
     ['src/sharkeye_app.py'],
     pathex=[],
@@ -94,7 +97,7 @@ if sys.platform.startswith('darwin'):
         a.datas,
         name='SharkEye.app',
         icon=icon_file,
-        bundle_identifier=None,
+        bundle_identifier='com.sharkeye.app',
         info_plist={
             'NSHighResolutionCapable': 'True',
             'NSPrincipalClass': 'NSApplication',
@@ -105,6 +108,8 @@ if sys.platform.startswith('darwin'):
             'CFBundleDocumentTypes': [],
             'NSCameraUsageDescription': 'This app requires camera access to process video files.',
             'NSPhotoLibraryUsageDescription': 'This app requires access to the photo library to process video files.',
+            'CFBundleIconFile': 'SharkEye.icns',
+            'CFBundleIconName': 'SharkEye',
         },
     )
 else:
