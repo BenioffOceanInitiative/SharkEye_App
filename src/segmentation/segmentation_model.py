@@ -2,21 +2,17 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import cv2
-import sys
-import os
-import logging
 import time
 import math
 from segment_anything import sam_model_registry, SamPredictor 
+from utility import resource_path
 
 try:
     from segmentation.segmentation_utility import show_mask, show_box
 except Exception as e:
     from segmentation_utility import show_mask, show_box
 
-from pathlib import Path
-from skimage import measure
-from scipy.spatial.distance import pdist, squareform, euclidean
+from scipy.spatial.distance import euclidean
 from scipy.spatial import ConvexHull
 from skimage.measure import label
 
@@ -56,7 +52,7 @@ def crop_image(image, area):
 def run_prediction(image, bbox, draw_mask = False, cropped=False):
     start_time = time.time()
 
-    sam_checkpoint = "src/segmentation/sam_vit_b_01ec64.pth"
+    sam_checkpoint = resource_path("model_weights/sam_vit_b_01ec64.pth")
     model_type = "vit_b"
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
