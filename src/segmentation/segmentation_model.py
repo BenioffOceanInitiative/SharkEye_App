@@ -171,10 +171,11 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
     
     return max_length
 
-def calculate_shark_length_from_pixel(shark_pixel_length):
+def calculate_shark_length_from_pixel(shark_pixel_length, original_width=ORIGINAL_WIDTH, original_height=ORIGINAL_HEIGHT):
     """Calculate shark length in feet based on pixel_length"""
-    long_side = (2 * ASPECT_RATIO * DRONE_ALTITUDE_M * math.tan(FOV_RADIANS / 2))/ np.sqrt(1 + ASPECT_RATIO ** 2) 
-    pixel_size_m = long_side / ORIGINAL_WIDTH
+    aspect_ratio = original_width / original_height
+    long_side = (2 * aspect_ratio * DRONE_ALTITUDE_M * math.tan(FOV_RADIANS / 2))/ np.sqrt(1 + aspect_ratio ** 2) 
+    pixel_size_m = long_side / original_width
 
     length_m = shark_pixel_length * pixel_size_m 
     return length_m * 3.28084  # Convert meters to feet
