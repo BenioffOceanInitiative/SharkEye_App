@@ -1,6 +1,7 @@
 import multiprocessing
 import sys
 import os
+import argparse
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
                              QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox)
@@ -238,13 +239,13 @@ class CustomTracker:
         
         for track_id, track in self.tracks.items():
             num_frames = len(track['positions'])
-            print(num_frames)
             avg_confidence = np.mean(track['confidences'])
             
             if num_frames >= self.min_frames and avg_confidence > self.confidence_threshold:
                 pass
             else:
                 print('Track detected below threshold')
+
             longest_frame = track['longest_frame']
             longest_timestamp = track['longest_timestamp']
             longest_confidence = track['longest_conf']
@@ -1462,27 +1463,9 @@ class FramePlayer(QLabel):
         # Show completion popup with both time and detections
         self.show_completion_popup(time_str, total_detections)
 
-class HeadlessVideoProcessor:
+class HeadlessVideoProcessor(VideoProcessingWorker):
     progress_update = 0
     processing_complete = {}
-
-    def __init__(self, video_path, model, output_dir):
-        super().__init__()
-        self.video_path = video_path
-        self.model = model
-        self.output_dir = output_dir
-
-    def draw_bounding_boxes(self, frame, detections):
-        frame_with_boxes = frame.copy()
-        for x, y, w, h, confidence in detections:
-            cv2.rectangle(frame_with_boxes, 
-                          (int(x - w/2), int(y - h/2)), 
-                          (int(x + w/2), int(y + h/2)), 
-                          (0, 255, 0), 2)
-            label = f"Shark: {confidence:.2f}"
-            cv2.putText(frame_with_boxes, label, (int(x - w/2), int(y - h/2) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-        return frame_with_boxes
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
@@ -1503,7 +1486,6 @@ class HeadlessVideoProcessor:
 
         frame_num = 0
         while frame_num < total_frames:
-
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
             ret, frame = cap.read()
             if not ret:
@@ -1545,40 +1527,103 @@ class HeadlessVideoProcessor:
 
             frame_num += frame_skip
             self.progress_update = int((frame_num + 1) / total_frames * 100) 
-            print(self.progress_update)
 
         cap.release()
-        
         custom_tracker.save_best_frames(self.output_dir, self.video_path)
-        self.save_detections_csv(custom_tracker.tracks, self.output_dir)
-        self.processing_finished(custom_tracker.tracks)
+
+        all_track_info = [] 
+
+        for track_id, track in custom_tracker.tracks.items():
+            meets_thresholds = (len(track['confidences']) >= 10 and 
+                                np.mean(track['confidences']) > 0.4)
+            
+            track_info = {   
+                'Video name': self.video_path.name, 
+                'Track Id': track_id,
+                'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
+                'Highest Confidence': max(track['confidences']),
+                'Average Confidence': np.mean(track['confidences']),
+                'Lowest Confidence': min(track['confidences']),
+                'Longest Length': max(track['lengths']),
+                'Highest Confidence Length': track['best_length'],
+                'Number of Detections': len(track['confidences']),
+                'Meets Thresholds': meets_thresholds
+            }
+
+            all_track_info.append(track_info)
+        
+        return all_track_info        
 
 def mass_prediction(video_path, current_output_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
-    processor = HeadlessVideoProcessor(video_path, model, current_output_dir)
-    processor.run()
+    videos_tqdm = tqdm(video_path)
+    all_track_results = []
+    for path in videos_tqdm:
+        videos_tqdm.set_description(f"Processing {path}")
+        processor = HeadlessVideoProcessor(path, model, current_output_dir)
+        all_track_results.extend(processor.run())
+    
+    return all_track_results
+
+def parse_args(): 
+    parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
+    parser.add_argument('--input_dir', type=str, required=True, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
+    return parser.parse_args()
+
+def main():
+    args = parse_args()  
+
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    video_paths = input_dir.glob("*.mp4")
+    if not video_paths:
+        print(f"No .mp4 videos found in {input_dir}")
+        exit(1)
+
+    # Run prediction
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+
+    # Save results to CSV
+    if results:
+        csv_path = output_dir / "output.csv"
+        with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=results[0].keys())
+            writer.writeheader()
+            writer.writerows(results)
+        print(f"Results saved to {csv_path}")
+    else:
+        print("No valid tracks were found.")
 
 if __name__ == '__main__':
-    # video_path = Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")
-    # output_dir = Path("./headless_predictions")
-    
-    # results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
+    main()        
+# if __name__ == '__main__':
+#     #video_path = [Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")]
+#     video_path = [Path(path) for path in Path('C:/Users/legop/Downloads/videos/videos').glob("*.mp4")]
 
+#     output_dir = Path("./headless_predictions")
+#     results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
 
-    multiprocessing.freeze_support()
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
+#     with open(output_dir / "output.csv", mode="w", newline="", encoding="utf-8") as file:
+#         writer = csv.DictWriter(file, fieldnames=results[0].keys())
+#         writer.writeheader()
+#         writer.writerows(results)
+
+    # multiprocessing.freeze_support()
+    # app = QApplication(sys.argv)
+    # app.setQuitOnLastWindowClosed(True)
     
-    app_icon_path = {
-        'win32': 'assets/logo/SharkEye.ico',
-        'darwin': 'assets/logo/SharkEye.icns'
-    }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+    # app_icon_path = {
+    #     'win32': 'assets/logo/SharkEye.ico',
+    #     'darwin': 'assets/logo/SharkEye.icns'
+    # }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
     
-    app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+    # app.setWindowIcon(QIcon(resource_path(app_icon_path)))
     
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    # window = MainWindow()
+    # window.show()
+    # sys.exit(app.exec())
