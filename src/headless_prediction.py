@@ -24,7 +24,6 @@ import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
 from segment_anything import sam_model_registry, SamPredictor 
-from sharkeye_app import calculate_gsd, calculate_shark_length
 
 # Add these constants for length calculation
 DRONE_ALTITUDE_M = 40
@@ -40,6 +39,20 @@ MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
 # Use a constant for file extensions
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
+
+def calculate_gsd(altitude, sensor_width, focal_length, image_width):
+    """Calculate Ground Sample Distance (GSD)"""
+    return (altitude * sensor_width) / (focal_length * image_width)
+
+GSD = calculate_gsd(DRONE_ALTITUDE_M, SENSOR_WIDTH_MM, FOCAL_LENGTH_MM, MODEL_WIDTH)
+
+def calculate_shark_length(bbox):
+    """Calculate shark length in feet based on bounding box"""
+    _, _, _, height = bbox
+    adjusted_height = height * (MODEL_HEIGHT / MODEL_WIDTH)
+    length_m = adjusted_height * GSD
+    # depth_correction_factor = (1 + DRONE_ALTITUDE_M) / DRONE_ALTITUDE_M
+    return length_m * 3.28084 # * depth_correction_factor  # Convert meters to feet
 
 class CustomTracker:
     def __init__(self, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
