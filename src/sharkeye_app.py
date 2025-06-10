@@ -1554,6 +1554,29 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         
         return all_track_info        
 
+        all_track_info = [] 
+
+        for track_id, track in custom_tracker.tracks.items():
+            meets_thresholds = (len(track['confidences']) >= 10 and 
+                                np.mean(track['confidences']) > 0.4)
+            
+            track_info = {   
+                'Video name': self.video_path.name, 
+                'Track Id': track_id,
+                'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
+                'Highest Confidence': max(track['confidences']),
+                'Average Confidence': np.mean(track['confidences']),
+                'Lowest Confidence': min(track['confidences']),
+                'Longest Length': max(track['lengths']),
+                'Highest Confidence Length': track['best_length'],
+                'Number of Detections': len(track['confidences']),
+                'Meets Thresholds': meets_thresholds
+            }
+
+            all_track_info.append(track_info)
+        
+        return all_track_info        
+
 def mass_prediction(video_path, current_output_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -1607,7 +1630,22 @@ if __name__ == '__main__':
 
 #     output_dir = Path("./headless_predictions")
 #     results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
+    main()        
+# if __name__ == '__main__':
+#     #video_path = [Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")]
+#     video_path = [Path(path) for path in Path('C:/Users/legop/Downloads/videos/videos').glob("*.mp4")]
 
+#     output_dir = Path("./headless_predictions")
+#     results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
+
+#     with open(output_dir / "output.csv", mode="w", newline="", encoding="utf-8") as file:
+#         writer = csv.DictWriter(file, fieldnames=results[0].keys())
+#         writer.writeheader()
+#         writer.writerows(results)
+
+    # multiprocessing.freeze_support()
+    # app = QApplication(sys.argv)
+    # app.setQuitOnLastWindowClosed(True)
 #     with open(output_dir / "output.csv", mode="w", newline="", encoding="utf-8") as file:
 #         writer = csv.DictWriter(file, fieldnames=results[0].keys())
 #         writer.writeheader()
@@ -1621,7 +1659,12 @@ if __name__ == '__main__':
     #     'win32': 'assets/logo/SharkEye.ico',
     #     'darwin': 'assets/logo/SharkEye.icns'
     # }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+    # app_icon_path = {
+    #     'win32': 'assets/logo/SharkEye.ico',
+    #     'darwin': 'assets/logo/SharkEye.icns'
+    # }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
     
+    # app.setWindowIcon(QIcon(resource_path(app_icon_path)))
     # app.setWindowIcon(QIcon(resource_path(app_icon_path)))
     
     # window = MainWindow()
