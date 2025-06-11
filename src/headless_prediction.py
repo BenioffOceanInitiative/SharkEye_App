@@ -108,7 +108,7 @@ class CustomTracker:
             self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
 
         if self.unique_sharks != self.last_reported_sharks:
-            tqdm.write("\nShark Detected: Shark Count: {}".format(self.unique_sharks))
+            tqdm.write("Shark Detected: Shark Count: {}".format(self.unique_sharks))
             self.last_reported_sharks = self.unique_sharks
 
         return active_tracks
@@ -414,7 +414,7 @@ def main():
     sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-    video_paths = list(input_dir.rglob("*.mp4"))
+    video_paths = list(input_dir.rglob("*.mp4") + input_dir.rglob("*.mov"))
     if not video_paths:
         print(f"No .mp4 videos found in {input_dir}")
         exit(1)
@@ -435,4 +435,4 @@ def main():
         print("No valid tracks were found.")
 
 if __name__ == '__main__':
-    main()        
+    main()       
