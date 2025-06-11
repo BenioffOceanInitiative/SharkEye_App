@@ -207,10 +207,10 @@ class CustomTracker:
             if longest_frame is not None:
                 timestamp_str = self._format_timestamp_filename(longest_timestamp)
                 
-                print(f'Track confidences: {track['confidences']}')
-                print(f'Longest Confidence: {longest_confidence}')
-                print(f'Track Positions {track['positions']}')
-                print(f'Track confidences: {track['confidences'].index(longest_confidence)}')
+                print(f"Track confidences: {track['confidences']}")
+                print(f"Longest Confidence: {longest_confidence}")
+                print(f"Track Positions {track['positions']}")
+                print(f"Track confidences: {track['confidences'].index(longest_confidence)}")
 
                 x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
                 
