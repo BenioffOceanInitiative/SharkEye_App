@@ -207,13 +207,18 @@ class CustomTracker:
             if longest_frame is not None:
                 timestamp_str = self._format_timestamp_filename(longest_timestamp)
                 
+                print(f'Track confidences: {track['confidences']}')
+                print(f'Longest Confidence: {longest_confidence}')
+                print(f'Track Positions {track['positions']}')
+                print(f'Track confidences: {track['confidences'].index(longest_confidence)}')
+
                 x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
                 
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length, original_width=longest_frame.shape[1], original_height=longest_frame.shape[0])
-                track['longest_length'] = segmentation_length
+                track['segmentation_length'] = segmentation_length
                 longest_length = track['longest_length']
 
                 mask_overlay = draw_mask(mask, longest_frame)
