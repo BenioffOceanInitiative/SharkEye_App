@@ -414,7 +414,7 @@ def main():
     sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-    video_paths = list(input_dir.rglob("*.mp4") + input_dir.rglob("*.mov"))
+    video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov"))
     if not video_paths:
         print(f"No .mp4 videos found in {input_dir}")
         exit(1)
