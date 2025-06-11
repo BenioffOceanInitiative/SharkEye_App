@@ -6,6 +6,7 @@ import time
 import math
 from segment_anything import sam_model_registry, SamPredictor 
 from utility import resource_path
+from pathlib import Path
 
 try:
     from segmentation.segmentation_utility import show_mask, show_box
@@ -49,11 +50,19 @@ def crop_image(image, area):
     x1, y1, x2, y2 = area
     return image[y1:y2, x1:x2]
 
-def run_prediction(image, bbox, draw_mask = False, cropped=False):
+def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_vit_b_01ec64.pth"), 
+                   draw_mask = False, cropped=False, show_time=False):
     start_time = time.time()
 
-    sam_checkpoint = resource_path("model_weights/sam_vit_b_01ec64.pth")
-    model_type = "vit_b"
+    model_types = {
+        "sam_vit_h_4b8939.pth" : "vit_h",
+        "sam_vit_l_0b3195.pth" : "vit_l",
+        "sam_vit_b_01ec64.pth" : "vit_b",
+    }
+
+    sam_checkpoint = resource_path(checkpoint_path)
+    model_type = model_types[checkpoint_path.name]
+
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
@@ -66,7 +75,7 @@ def run_prediction(image, bbox, draw_mask = False, cropped=False):
     if cropped:
         h, w, _ = image.shape
         point_h = int(h / 2)
-        point_w = int(w /2 )
+        point_w = int(w / 2)
         
         input_point = np.array([[point_h, point_w]])
         input_label = np.array([1])
@@ -95,7 +104,8 @@ def run_prediction(image, bbox, draw_mask = False, cropped=False):
         plt.show()
     
     end_time = time.time()
-    print("Time taken to compute prediction:", end_time - start_time)
+    if show_time:
+        print("\nTime taken to compute prediction:", end_time - start_time)
     return masks
 
 def draw_mask(mask, image):

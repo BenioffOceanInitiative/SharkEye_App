@@ -55,7 +55,7 @@ def calculate_shark_length(bbox):
     return length_m * 3.28084 # * depth_correction_factor  # Convert meters to feet
 
 class CustomTracker:
-    def __init__(self, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
+    def __init__(self, sam_model_path, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
         self.tracks = {}
         self.next_id = 1
         self.distance_threshold = distance_threshold
@@ -63,6 +63,7 @@ class CustomTracker:
         self.confidence_threshold = confidence_threshold
         self.unique_sharks = 0
         self.last_reported_sharks = 0
+        self.sam_model_path = sam_model_path
 
     def update(self, detections, frame, timestamp):
         active_tracks = set()
@@ -107,7 +108,7 @@ class CustomTracker:
             self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
 
         if self.unique_sharks != self.last_reported_sharks:
-            tqdm.write("Shark Detected: Shark Count: {}".format(self.unique_sharks))
+            tqdm.write("\nShark Detected: Shark Count: {}".format(self.unique_sharks))
             self.last_reported_sharks = self.unique_sharks
 
         return active_tracks
@@ -130,7 +131,8 @@ class CustomTracker:
             'longest_frame': frame.copy(),
             'longest_conf': confidence, 
             'longest_timestamp': timestamp,
-            'longest_length': length,            
+            'longest_length': length,         
+            'longest_position': (x, y, w, h),   
             'frames_since_last_detection': 0,
             'velocity': np.array([0, 0]),
             'label': 'Shark',
@@ -168,6 +170,7 @@ class CustomTracker:
             track['longest_frame'] = frame.copy()
             track['longest_timestamp'] = timestamp
             track['longest_length'] = length
+            track['longest_position'] = (x, y, w, h)
 
         if len(track['positions']) > 1:
             prev_pos = np.array(track['positions'][-2][:2])
@@ -203,22 +206,17 @@ class CustomTracker:
             longest_timestamp = track['longest_timestamp']
             longest_confidence = track['longest_conf']
             longest_length = track['longest_length']
+            longest_position = track['longest_position']
             
             if longest_frame is not None:
                 timestamp_str = self._format_timestamp_filename(longest_timestamp)
-                
-                print(f"Track confidences: {track['confidences']}")
-                print(f"Longest Confidence: {longest_confidence}")
-                print(f"Track Positions {track['positions']}")
-                print(f"Track confidences: {track['confidences'].index(longest_confidence)}")
-
-                x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
+                x, y, w, h = longest_position
                 
                 # Use segmentation model to generate lengths
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length, original_width=longest_frame.shape[1], original_height=longest_frame.shape[0])
-                track['segmentation_length'] = segmentation_length
+                track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
                 mask_overlay = draw_mask(mask, longest_frame)
@@ -234,6 +232,9 @@ class CustomTracker:
                 
                 # Save original frame
                 cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+
+                # Save mask
+                cv2.imwrite(os.path.join(output_dir, 'masks', filename), mask_overlay)
                 
                 # Save frame with bounding box
                 boxed_frame = longest_frame.copy()
@@ -248,7 +249,7 @@ class CustomTracker:
                 
                 images_saved += 1
 
-        print(f"Shark Images Saved: {images_saved}")
+        tqdm.write(f"Shark Images Saved: {images_saved}")
 
     def reset(self):
         """Reset tracker state"""
@@ -279,22 +280,24 @@ class HeadlessVideoProcessor():
     progress_update = 0
     processing_complete = {}
     
-    def __init__(self, video_path, model, output_dir):
+    def __init__(self, video_path, model, output_dir, sam_model_path):
         super().__init__()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
+        self.sam_model_path = sam_model_path
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         
-        custom_tracker = CustomTracker()
+        custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
         
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'masks'), exist_ok=True)
 
         min_frame_skip, max_frame_skip = 10, 60
         frame_skip = min_frame_skip
@@ -384,22 +387,23 @@ class HeadlessVideoProcessor():
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
         return frame_with_boxes
     
-def mass_prediction(video_path, current_output_dir):
+def mass_prediction(video_paths, current_output_dir, sam_model_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
-    videos_tqdm = tqdm(video_path)
+    videos_tqdm = tqdm(video_paths)
     all_track_results = []
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
-        processor = HeadlessVideoProcessor(path, model, current_output_dir)
+        processor = HeadlessVideoProcessor(path, model, current_output_dir, sam_model_path=sam_model_path)
         all_track_results.extend(processor.run())
     
     return all_track_results
 
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
+    parser.add_argument('--sam_model_path', type=str, required=True, help="Path to segment anything model")
     parser.add_argument('--input_dir', type=str, required=True, help='Directory containing .mp4 videos to process')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
     return parser.parse_args()
@@ -407,16 +411,17 @@ def parse_args():
 def main():
     args = parse_args()  
 
+    sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-    video_paths = input_dir.rglob("*.mp4")
+    video_paths = list(input_dir.rglob("*.mp4"))
     if not video_paths:
         print(f"No .mp4 videos found in {input_dir}")
         exit(1)
 
     # Run prediction
     output_dir.mkdir(parents=True, exist_ok=True)
-    results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+    results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir, sam_model_path=sam_model_path)
 
     # Save results to CSV
     if results:
