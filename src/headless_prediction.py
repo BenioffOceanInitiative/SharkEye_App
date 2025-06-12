@@ -414,7 +414,24 @@ def main():
     sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
+
+    manual_sizes = [
+        "502", "516", "518", "933", "936", "936", "027", "030", "533", "533", "533",
+        "536", "031", "033", "568", "572", "583", "585", "588", "594", "595", "606",
+        "607", "610", "611", "614", "617", "623", "044", "044", "045", "635", "635", "635",
+        "636", "639", "640", "648", "655", "655", "658", "661", "662", "056", "056",
+        "056", "058", "061", "671", "672", "672", "678", "691", "071", "697", "702",
+        "705", "705", "705", "715", "715", "716", "716", "716", "717", "717", "717",
+        "717", "720", "720", "721", "725", "725", "733", "733", "734", "734", "750",
+        "755", "756", "756", "756", "757", "759", "759", "760", "761", "769", "773",
+        "773", "777", "777", "077", "780", "780", "781", "784", "787", "791", "791",
+        "794", "795", "797", "799", "816", "827", "827", "827", "831", "832", "841",
+        "847", "848", "849", "866"
+    ]
+
     video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
+    video_paths = video_paths + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.MP4")) + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.mp4"))
+    video_paths = [video for video in video_paths if video.stem.split("_")[-1][-3:] in manual_sizes]
     if not video_paths:
         print(f"No .mp4 videos found in {input_dir}")
         exit(1)
