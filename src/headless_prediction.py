@@ -429,7 +429,7 @@ def main():
         "847", "848", "849", "866"
     ]
     # 2021 Transect Only
-    video_paths = list(input_dir.rglob("*/transect/*.mp4")) + list(input_dir.rglob("*/transect/*.mov")) + list(input_dir.rglob("*/transect/*.MP4")) + list(input_dir.rglob("*/transect/*.MOV"))
+    video_paths = list(input_dir.rglob("*/Transect/*.mp4")) + list(input_dir.rglob("*/Transect/*.mov")) + list(input_dir.rglob("*/Transect/*.MP4")) + list(input_dir.rglob("*/Transect/*.MOV"))
     
     # 2023
     # video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
