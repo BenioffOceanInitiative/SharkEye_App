@@ -428,13 +428,13 @@ def main():
         "794", "795", "797", "799", "816", "827", "827", "827", "831", "832", "841",
         "847", "848", "849", "866"
     ]
-
-    video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
-    video_paths = video_paths + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.MP4")) + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.mp4"))
-    video_paths = [video for video in video_paths if video.stem.split("_")[-1][-3:] in manual_sizes]
-    if not video_paths:
-        print(f"No .mp4 videos found in {input_dir}")
-        exit(1)
+    # 2021 Transect Only
+    video_paths = list(input_dir.rglob("*/transect/*.mp4")) + list(input_dir.rglob("*/transect/*.mov")) + list(input_dir.rglob("*/transect/*.MP4")) + list(input_dir.rglob("*/transect/*.MOV"))
+    
+    # 2023
+    # video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
+    # video_paths = video_paths + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.MP4")) + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.mp4"))
+    # video_paths = [video for video in video_paths if video.stem.split("_")[-1][-3:] in manual_sizes]    
 
     # Run prediction
     output_dir.mkdir(parents=True, exist_ok=True)
