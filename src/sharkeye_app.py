@@ -2,11 +2,11 @@ import multiprocessing
 import sys
 import os
 import argparse
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
-                             QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox)
+                             QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDir, QTimer, QDateTime, QObject
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator
 
 import cv2
 import torch
@@ -67,33 +67,6 @@ def calculate_bbox_area(bbox):
     _, _, width, height = bbox
     return width * height
 
-# def calculate_shark_length(bbox):
-#     """Calculate shark length in feet based on bounding box"""
-#     ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 2688, 1512
-#     ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
-#     DRONE_ALTITUDE_M = 40
-#     FOV_RADIANS = 1.274090354 # From estimate of 73 degrees 
-
-#     long_side = (2 * ASPECT_RATIO * DRONE_ALTITUDE_M * math.tan(FOV_RADIANS / 2))/ np.sqrt(1 + ASPECT_RATIO ** 2) 
-#     pixel_size_m = long_side / ORIGINAL_WIDTH
-
-#     _, _, width, height = bbox
-
-#     shark_ratio = 1.5
-#     side_a = min(width, height)
-#     side_b = max(width, height)
-
-#     print(f'Short side: {side_a}')
-#     print(f'Long side: {side_b}')
-#     print(f'Long to short {(side_b / side_a)}')
-#     if (side_b / side_a) < shark_ratio:
-#         shark_pixel_length = np.sqrt((side_a ** 2) + (side_b ** 2))
-#     else:
-#         shark_pixel_length = side_a
-
-#     length_m = shark_pixel_length * pixel_size_m 
-#     return length_m * 3.28084  # Convert meters to feet
-
 def calculate_adjusted_shark_length(length_raw):
     """Calculate adjusted shark length in feet using correction factors"""
     asl_correction_factor = 1
@@ -110,6 +83,8 @@ class CustomTracker:
         self.confidence_threshold = confidence_threshold
         self.unique_sharks = 0
         self.last_reported_sharks = 0
+        self.fov_radians = 1.274090354
+        self.drone_altitude = DRONE_ALTITUDE_M
 
     def update(self, detections, frame, timestamp):
         active_tracks = set()
@@ -259,7 +234,10 @@ class CustomTracker:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
-                segmentation_length = calculate_shark_length_from_pixel(pixel_length, original_width=longest_frame.shape[1], original_height=longest_frame.shape[0])
+                segmentation_length = calculate_shark_length_from_pixel(pixel_length,
+                                                                         original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
+                                                                         drone_altitude=self.drone_altitude,
+                                                                         fov_radians=self.fov_radians)
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
@@ -322,19 +300,31 @@ class VideoProcessingWorker(QObject):
     processing_complete = pyqtSignal(dict, str)
     frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
 
-    def __init__(self, video_path, model, output_dir):
+    def __init__(self, video_path, model, output_dir, drone_type, altitude):
         super().__init__()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
+        self.drone_type = drone_type
+        self.altitude = altitude
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        
+
         custom_tracker = CustomTracker()
         
+        drones = {
+            "DJI": {"fov_radians": 1.274090354},
+            "Mavic 2 Pro":{"fov_radians": math.radians(77)},
+            "Air 2S" :{"fov_radians": math.radians(88)} 
+            }
+        
+        custom_tracker.fov_radians = drones[self.drone_type]["fov_radians"]
+        custom_tracker.drone_altitude = self.altitude
+        print(custom_tracker.fov_radians)
+
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
@@ -565,6 +555,7 @@ class MainWindow(QMainWindow):
         # Select Video(s) button
         self.select_videos_button = QPushButton("Select Video(s)")
         self.select_videos_button.clicked.connect(self.select_videos)
+        # self.select_videos_button.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.select_videos_button)
 
         # Remove buttons in horizontal layout
@@ -587,33 +578,53 @@ class MainWindow(QMainWindow):
         self.video_list.updateInternalOrder = self.update_video_order
         layout.addWidget(self.video_list)
 
+        # Select Drone and Altitude Dropdown
+        form_layout = QGridLayout()
+
+        form_layout.addWidget(QLabel("Select Drone Model:"), 0, 0)
+        self.drone_select = QComboBox()
+        self.drone_select.addItems(["DJI", "Mavic 2 Pro", "Air 2S"])
+        self.drone_select.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        form_layout.addWidget(self.drone_select, 0, 1)
+
+        form_layout.addWidget(QLabel("Enter Drone Altitude:"), 1, 0)
+        self.altitude_input = QLineEdit('40')
+        self.altitude_input.setValidator(QDoubleValidator(0, 999, 2))
+        self.altitude_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        form_layout.addWidget(self.altitude_input, 1, 1)
+
+        layout.addLayout(form_layout)
+
         # Process Videos button
+        process_layout = QVBoxLayout()
         self.process_button = QPushButton("Process Videos")
         self.process_button.clicked.connect(self.toggle_processing)
         self.process_button.setEnabled(False)  # Initially disabled
-        layout.addWidget(self.process_button)
+        process_layout.addWidget(self.process_button)
+        layout.addLayout(process_layout)
+        layout.addStretch()
 
         # Frame display
         self.frame_display = QLabel()
         self.frame_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frame_display.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.frame_display.setMinimumSize(720, 480)
+        # self.frame_display.setMinimumSize(720, 480)
         self.frame_display.hide()
-        layout.addWidget(self.frame_display)
+        layout.addWidget(self.frame_display, stretch=1)
 
         # Progress bar (initially hidden)
         self.progress_bar = QProgressBar()
         self.progress_bar.hide()
+        self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignBottom)
         layout.addWidget(self.progress_bar)
 
         # Timer label (initially hidden)
         self.timer_label = QLabel("00:00:00")
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignBottom)
         self.timer_label.hide()
         layout.addWidget(self.timer_label)
         
-        layout.addItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
-
         # # Review History button
         # self.to_review_history_button = QPushButton("Review History")
         # self.to_review_history_button.clicked.connect(self.go_to_review_history)
@@ -686,7 +697,7 @@ class MainWindow(QMainWindow):
         self.cleanup_previous_processing()
         
         self.processing_thread = QThread()
-        self.processing_worker = VideoProcessingWorker(video_path, self.model, self.current_output_dir)
+        self.processing_worker = VideoProcessingWorker(video_path, self.model, self.current_output_dir, drone_type=self.drone_select.currentText(), altitude=float(self.altitude_input.text()))
         self.processing_worker.moveToThread(self.processing_thread)
         
         self.connect_worker_signals()
@@ -1599,15 +1610,6 @@ def main():
     else:
         print("No valid tracks were found.")
 
-# if __name__ == '__main__':
-    # main()        
-# if __name__ == '__main__':
-#     #video_path = [Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")]
-#     video_path = [Path(path) for path in Path('C:/Users/legop/Downloads/videos/videos').glob("*.mp4")]
-
-#     output_dir = Path("./headless_predictions")
-#     results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
-    # main()        
 if __name__ == '__main__':
     #video_path = [Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")]
     # video_path = [Path(path) for path in Path('C:/Users/legop/Downloads/videos/videos').glob("*.mp4")]
@@ -1647,5 +1649,4 @@ if __name__ == '__main__':
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
-    #  python SharkEye_App/src/sharkeye_app.py --input_dir "sharkeye/2023" --output_dir "2023/predictions"
+    
