@@ -316,9 +316,8 @@ class VideoProcessingWorker(QObject):
         custom_tracker = CustomTracker()
         
         drones = {
-            "DJI": {"fov_radians": 1.274090354},
-            "Mavic 2 Pro":{"fov_radians": math.radians(77)},
-            "Air 2S" :{"fov_radians": math.radians(88)} 
+            "Mavic 2 Pro":{"fov_radians": 1.274090354},
+            "Air 2S" :{"fov_radians": math.radians(85.3)} 
             }
         
         custom_tracker.fov_radians = drones[self.drone_type]["fov_radians"]
@@ -583,7 +582,7 @@ class MainWindow(QMainWindow):
 
         form_layout.addWidget(QLabel("Select Drone Model:"), 0, 0)
         self.drone_select = QComboBox()
-        self.drone_select.addItems(["DJI", "Mavic 2 Pro", "Air 2S"])
+        self.drone_select.addItems(["Mavic 2 Pro", "Air 2S"])
         self.drone_select.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         form_layout.addWidget(self.drone_select, 0, 1)
 
@@ -1611,24 +1610,6 @@ def main():
         print("No valid tracks were found.")
 
 if __name__ == '__main__':
-    #video_path = [Path("./TRIMMED_2023-04-23_Transect_DJI_0502.mp4")]
-    # video_path = [Path(path) for path in Path('C:/Users/legop/Downloads/videos/videos').glob("*.mp4")]
-
-    # output_dir = Path("./headless_predictions")
-    # results = mass_prediction(video_path=video_path, current_output_dir=output_dir)
-
-    # with open(output_dir / "output.csv", mode="w", newline="", encoding="utf-8") as file:
-    #     writer = csv.DictWriter(file, fieldnames=results[0].keys())
-    #     writer.writeheader()
-    #     writer.writerows(results)
-
-    # multiprocessing.freeze_support()
-    # app = QApplication(sys.argv)
-    # app.setQuitOnLastWindowClosed(True)
-    # with open(output_dir / "output.csv", mode="w", newline="", encoding="utf-8") as file:
-    #     writer = csv.DictWriter(file, fieldnames=results[0].keys())
-    #     writer.writeheader()
-    #     writer.writerows(results)
 
     multiprocessing.freeze_support()
     app = QApplication(sys.argv)
