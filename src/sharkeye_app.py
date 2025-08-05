@@ -4,9 +4,9 @@ import os
 import argparse
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
-                             QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDir, QTimer, QDateTime, QObject
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator
+                             QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit, QTreeWidget, QTreeWidgetItem, QInputDialog, QFormLayout)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDir, QTimer, QDateTime, QObject, QSettings, QByteArray
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator, QFont
 
 import cv2
 import torch
@@ -32,13 +32,13 @@ import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
 from segment_anything import sam_model_registry, SamPredictor 
+import ast
 
 # Add these constants for length calculation
 DRONE_ALTITUDE_M = 40
 SENSOR_WIDTH_MM = 13.2
 FOCAL_LENGTH_MM = 28
 MODEL_WIDTH = MODEL_HEIGHT = 640
-# ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 3840, 2160
 ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 2688, 1512
 ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 
@@ -74,6 +74,344 @@ def calculate_adjusted_shark_length(length_raw):
     length_adj = length_raw * asl_correction_factor * depth_correction_factor
     return length_adj
 
+class EditDroneDialog(QDialog):
+    resolution_deleted = pyqtSignal()  # 🔔 Custom signal
+
+    def __init__(self, drone_name: str, width: str, height: str, fov_rad: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Drone")
+        self.delete_requested = False  # Fallback if you prefer checking flags
+
+        self.drone_name_input = QLineEdit(drone_name)
+        self.resolution_width_input = QLineEdit(str(width))
+        self.resolution_height_input = QLineEdit(str(height))
+        self.fov_input = QLineEdit(f"{fov_rad:.5f}")
+
+        layout = QFormLayout(self)
+        layout.addRow("Drone Name:", self.drone_name_input)
+        layout.addRow("Resolution Width:", self.resolution_width_input)
+        layout.addRow("Resolution Height:", self.resolution_height_input)
+        layout.addRow("FOV (radians):", self.fov_input)
+
+        # === Dialog buttons
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        # === Delete resolution button
+        self.delete_button = QPushButton("Delete Resolution")
+        self.delete_button.clicked.connect(self.handle_delete)
+
+        # Add both buttons
+        button_layout = QVBoxLayout()
+        button_layout.addWidget(self.buttons)
+        button_layout.addWidget(self.delete_button)
+        layout.addRow(button_layout)
+
+        self.drone_name_input.setDisabled(True)
+
+    def get_inputs(self):
+        return (
+            self.resolution_width_input.text().strip(),
+            self.resolution_height_input.text().strip(),
+            self.fov_input.text().strip()
+        )
+
+    def handle_delete(self):
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            "Are you sure you want to delete this resolution?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.resolution_deleted.emit()  # 🔔 Notify parent
+            self.done(2)  # Custom dialog code for delete
+
+class NewDroneDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add New Drone")
+
+        self.name_input = QLineEdit()
+        self.resolution_width_input = QLineEdit()
+        self.resolution_height_input = QLineEdit()
+        self.fov_input = QLineEdit()
+
+        layout = QFormLayout(self)
+        layout.addRow("Drone Name:", self.name_input)
+        layout.addRow("Resolution Width:", self.resolution_width_input)
+        layout.addRow("Resolution Height:", self.resolution_height_input)
+        layout.addRow("FOV (radians):", self.fov_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def get_inputs(self):
+        return (
+            self.name_input.text().strip(),
+            self.resolution_width_input.text().strip(),
+            self.resolution_height_input.text().strip(),
+            self.fov_input.text().strip()
+        )
+
+class SettingsDialog(QDialog):
+    settings_updated = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Settings")
+        self.setGeometry(100, 100, 800, 500)
+        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        
+        main_layout = QHBoxLayout(self)
+
+        # Left: category list
+        self.category_list = QListWidget()
+        self.category_list.addItem("Drone Settings")
+        self.category_list.setFixedWidth(150)
+        self.category_list.currentRowChanged.connect(self.switch_category)
+        main_layout.addWidget(self.category_list)
+
+        # Right: stacked settings pages
+        self.pages = QStackedWidget()
+        self.drone_settings_page = DroneSettingsPage(self.settings_obj, self)
+        self.pages.addWidget(self.drone_settings_page)
+
+        main_layout.addWidget(self.pages)
+        self.setLayout(main_layout)
+
+        self.category_list.setCurrentRow(0)
+
+    def switch_category(self, index):
+        self.pages.setCurrentIndex(index)
+
+    def closeEvent(self, event):
+        self.drone_settings_page.save_settings()
+        self.settings_updated.emit()  # 🚀 Notify parent to refresh drone list
+        super().closeEvent(event)
+
+class DroneSettingsPage(QWidget):
+    def __init__(self, settings_obj, parent=None):
+        super().__init__(parent)
+        self.settings_obj = settings_obj
+        self.settings = {}
+
+        layout = QVBoxLayout(self)
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(["Drones", ""])
+        layout.addWidget(self.tree)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.edit_button = QPushButton("Edit")
+        self.edit_button.setEnabled(False)
+        self.edit_button.clicked.connect(self.edit_button_state)
+
+        self.new_drone_button = QPushButton("Add New Drone")
+        self.new_drone_button.clicked.connect(self.add_new_drone)
+
+        self.delete_button = QPushButton("Delete Drone")
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self.delete_drone)
+
+        button_layout.addWidget(self.edit_button)
+        button_layout.addWidget(self.new_drone_button)
+        button_layout.addWidget(self.delete_button)
+        layout.addLayout(button_layout)
+
+        # Initialize tree and signals
+        self.load_settings()
+        self.tree.itemClicked.connect(self.enable_action_buttons)
+
+    def load_settings(self):
+        default_drones = {
+            "Mavic 2 Pro": {
+                "Resolution": {
+                    "(2688, 1512)": math.radians(73)
+                }
+            },
+            "Air 2S": {
+                "Resolution": {
+                    "(2688, 1512)": math.radians(63.5),
+                    "(5472, 3078)": math.radians(82.9)
+                }
+            }
+        }
+
+        value = self.settings_obj.value("drone_settings")
+        if not value:
+            self.settings_obj.setValue("drone_settings", json.dumps(default_drones))
+            value = self.settings_obj.value("drone_settings")
+        self.settings = json.loads(value)
+
+        self.populate_tree()
+
+    def populate_tree(self):
+        self.tree.clear()
+        for drone_name, drone_settings in self.settings.items():
+            drone_item = QTreeWidgetItem([drone_name])
+            self.tree.addTopLevelItem(drone_item)
+
+            for resolution, fov in drone_settings["Resolution"].items():
+                width, height = eval(resolution)
+                resolution_label = f"{width}x{height}"
+                resolution_item = QTreeWidgetItem([resolution_label])
+                drone_item.addChild(resolution_item)
+
+                fov_item = QTreeWidgetItem(["FOV (radians):", f"{fov:.5f}"])
+                resolution_item.addChild(fov_item)
+
+        self.tree.expandAll()
+        self.tree.resizeColumnToContents(0)
+        self.tree.resizeColumnToContents(1)
+
+        self.edit_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
+
+    def enable_action_buttons(self):
+        item = self.tree.currentItem()
+        if not item:
+            self.edit_button.setEnabled(False)
+            self.delete_button.setEnabled(False)
+            return
+
+        parent = item.parent()
+        grandparent = parent.parent() if parent else None
+
+        is_resolution = parent is not None and grandparent is None
+        is_fov = parent is not None and grandparent is not None
+        self.edit_button.setEnabled(is_resolution or is_fov)
+        self.delete_button.setEnabled(parent is None)
+
+    def edit_button_state(self):
+        item = self.tree.currentItem()
+        if not item:
+            return
+
+        parent = item.parent()
+        grandparent = parent.parent() if parent else None
+
+        if parent and grandparent is None:
+            drone_name = parent.text(0)
+            width_str, height_str = item.text(0).split("x")
+            key = f"({width_str.strip()}, {height_str.strip()})"
+            current_fov_rad = self.settings[drone_name]["Resolution"][key]
+
+        elif parent and grandparent:
+            drone_name = grandparent.text(0)
+            width_str, height_str = parent.text(0).split("x")
+            key = f"({width_str.strip()}, {height_str.strip()})"
+            current_fov_rad = self.settings[drone_name]["Resolution"][key]
+        else:
+            return
+
+        dialog = EditDroneDialog(drone_name, width_str, height_str, current_fov_rad, self)
+
+        # Connect delete signal
+        def on_resolution_deleted():
+            res_dict = self.settings[drone_name]["Resolution"]
+            key = f"({width_str.strip()}, {height_str.strip()})"
+            if key in res_dict:
+                del res_dict[key]
+
+                # If drone has no more resolutions, remove it entirely
+                if not res_dict:
+                    del self.settings[drone_name]
+
+                self.save_settings()
+
+        dialog.resolution_deleted.connect(on_resolution_deleted)
+
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            new_width, new_height, new_fov_input = dialog.get_inputs()
+
+            if not new_width or not new_height or not new_fov_input:
+                QMessageBox.warning(self, "Incomplete Input", "All fields must be filled.")
+                return
+
+            if not new_width.isdigit() or not new_height.isdigit():
+                QMessageBox.warning(self, "Invalid Input", "Width and Height must be positive integers.")
+                return
+
+            try:
+                new_fov_rad = float(new_fov_input)
+                if new_fov_rad <= 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Input", "FOV must be a positive number (in radians).")
+                return
+
+            res_dict = self.settings[drone_name]["Resolution"]
+            old_key = f"({width_str.strip()}, {height_str.strip()})"
+            new_key = f"({new_width}, {new_height})"
+
+            if old_key != new_key:
+                res_dict.pop(old_key, None)
+
+            res_dict[new_key] = new_fov_rad
+            self.save_settings()
+
+        elif result == 2:  # Custom dialog code for "Delete Resolution"
+            return  # Deletion already handled via signal
+
+
+    def add_new_drone(self):
+        dialog = NewDroneDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            drone_name, width, height, fov_input = dialog.get_inputs()
+
+            if not drone_name or not width or not height or not fov_input:
+                QMessageBox.warning(self, "Incomplete Input", "All fields must be filled.")
+                return
+
+            if not width.isdigit() or not height.isdigit():
+                QMessageBox.warning(self, "Invalid Input", "Width and Height must be positive integers.")
+                return
+
+            try:
+                fov_rad = float(fov_input)
+                if fov_rad <= 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Input", "FOV must be a positive number (in radians).")
+                return
+
+            res_key = f"({width}, {height})"
+            self.settings.setdefault(drone_name, {}).setdefault("Resolution", {})[res_key] = fov_rad
+            self.save_settings()
+
+    def delete_drone(self):
+        item = self.tree.currentItem()
+        if not item:
+            return
+
+        drone_name = item.text(0)
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete the drone '{drone_name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            if drone_name in self.settings:
+                del self.settings[drone_name]
+                self.save_settings()
+
+    def save_settings(self):
+        self.settings_obj.setValue("drone_settings", json.dumps(self.settings))
+        self.populate_tree()
+        
 class CustomTracker:
     def __init__(self, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
         self.tracks = {}
@@ -307,6 +645,11 @@ class VideoProcessingWorker(QObject):
         self.output_dir = output_dir
         self.drone_type = drone_type
         self.altitude = altitude
+        
+        # Read settings 
+        settings = QSettings("BOSL", "SharkEye_App")
+        value = settings.value("drone_settings")
+        self.settings = json.loads(value)
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
@@ -314,15 +657,11 @@ class VideoProcessingWorker(QObject):
         fps = cap.get(cv2.CAP_PROP_FPS)
 
         custom_tracker = CustomTracker()
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        drones = {
-            "Mavic 2 Pro":{"fov_radians": 1.274090354},
-            "Air 2S" :{"fov_radians": math.radians(85.3)} 
-            }
-        
-        custom_tracker.fov_radians = drones[self.drone_type]["fov_radians"]
+        custom_tracker.fov_radians = self.settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
-        print(custom_tracker.fov_radians)
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
@@ -474,7 +813,27 @@ class MainWindow(QMainWindow):
 
         # Connect the upload_finished signal
         self.upload_finished.connect(self.on_upload_finished)
+    
+    def load_drone_settings(self):
+        settings = QSettings("BOSL", "SharkEye_App")
+        settings_dialog = SettingsDialog()
+        settings_dialog.settings_updated.connect(self.update_available_drones)
+        settings_dialog.exec()
 
+    def save_setting(self, key, value):
+        self.settings.setValue(key, value)
+    
+    def load_setting(self, key, default_value=None):
+        return self.settings.value(key, default_value)
+    
+    def save_complex_setting(self, key, value):
+        serialized_value = json.dumps(value)
+        self.settings.setValue(key, serialized_value)
+    
+    def load_complex_setting(self, key, default_value=None):
+        value = self.settings.value(key, default_value)
+        return json.loads(value) if value else default_value
+        
     def init_attributes(self):
         self.is_processing = False
         self.timer = QTimer(self)
@@ -547,6 +906,22 @@ class MainWindow(QMainWindow):
 
         self.stack_widget.addWidget(self.home_widget)
         self.stack_widget.addWidget(self.review_widget)
+    
+    def update_available_drones(self):
+        settings = QSettings("BOSL", "SharkEye_App")
+        value = settings.value("drone_settings")
+        
+        if not value:
+            return  # No drones saved yet
+
+        try:
+            drone_data = json.loads(value)
+            drone_names = list(drone_data.keys())
+        except (json.JSONDecodeError, TypeError):
+            drone_names = []
+
+        self.drone_select.clear()
+        self.drone_select.addItems(drone_names)
 
     def setup_home_page(self):
         layout = QVBoxLayout(self.home_widget)
@@ -582,9 +957,15 @@ class MainWindow(QMainWindow):
 
         form_layout.addWidget(QLabel("Select Drone Model:"), 0, 0)
         self.drone_select = QComboBox()
-        self.drone_select.addItems(["Mavic 2 Pro", "Air 2S"])
+        self.update_available_drones()
         self.drone_select.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # Settings button
+        self.settings_button = QPushButton("⚙️")
+        self.settings_button.clicked.connect(self.load_drone_settings)
+        
         form_layout.addWidget(self.drone_select, 0, 1)
+        form_layout.addWidget(self.settings_button, 0, 2)
 
         form_layout.addWidget(QLabel("Enter Drone Altitude:"), 1, 0)
         self.altitude_input = QLineEdit('40')
@@ -624,7 +1005,7 @@ class MainWindow(QMainWindow):
         self.timer_label.hide()
         layout.addWidget(self.timer_label)
         
-        # # Review History button
+        # Review History button
         # self.to_review_history_button = QPushButton("Review History")
         # self.to_review_history_button.clicked.connect(self.go_to_review_history)
         # layout.addWidget(self.to_review_history_button)
@@ -634,6 +1015,23 @@ class MainWindow(QMainWindow):
             self.start_processing()
         else:
             self.confirm_cancel_processing()
+
+    def get_valid_resolutions_for_drone(self, drone_name):
+        settings = QSettings("BOSL", "SharkEye_App")
+        value = settings.value("drone_settings")
+        
+        if not value:
+            return []
+
+        try:
+            drone_data = json.loads(value)
+            if drone_name in drone_data and "Resolution" in drone_data[drone_name]:
+                return [eval(res) for res in drone_data[drone_name]["Resolution"].keys()]
+        except Exception as e:
+            print(f"Error loading drone resolutions: {e}")
+            return []
+        
+        return []
 
     def start_processing(self):
         self.is_processing = True
@@ -671,6 +1069,35 @@ class MainWindow(QMainWindow):
         self.current_output_dir = os.path.join(get_results_dir(), timestamp)
         os.makedirs(self.current_output_dir, exist_ok=True)
         
+        # Validate resolution before processing
+        if self.video_queue:
+            first_video = self.video_queue[0]
+            cap = cv2.VideoCapture(first_video)
+            if not cap.isOpened():
+                QMessageBox.critical(self, "Video Error", f"Could not open video: {first_video}")
+                return
+
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+
+            valid_resolutions = self.get_valid_resolutions_for_drone(self.drone_select.currentText())
+            if (width, height) not in valid_resolutions:
+                QMessageBox.warning(
+                    self,
+                    "Resolution Mismatch",
+                    f"The selected video has resolution {width}x{height}, which is not valid for the selected drone.\n\n"
+                    f"Valid resolutions for '{self.drone_select.currentText()}':\n" +
+                    "\n".join([f"{w}x{h}" for w, h in valid_resolutions])
+                )
+                # Reset UI
+                self.is_processing = False
+                self.process_button.setText("Process Videos")
+                self.process_button.setEnabled(True)
+                self.remove_button.setEnabled(len(self.video_list.selectedItems()) > 0)
+                self.remove_all_button.setEnabled(self.video_list.count() > 0)
+                return
+    
         self.process_next_video()
 
     def process_next_video(self):
@@ -681,7 +1108,7 @@ class MainWindow(QMainWindow):
 
     def process_video(self, video_path):
         self.current_video = video_path
-        
+            
         # Reset all video list items to remove any existing emojis
         for i in range(self.video_list.count()):
             item = self.video_list.item(i)
@@ -698,7 +1125,7 @@ class MainWindow(QMainWindow):
         self.processing_thread = QThread()
         self.processing_worker = VideoProcessingWorker(video_path, self.model, self.current_output_dir, drone_type=self.drone_select.currentText(), altitude=float(self.altitude_input.text()))
         self.processing_worker.moveToThread(self.processing_thread)
-        
+
         self.connect_worker_signals()
         
         self.processing_thread.start()
@@ -960,7 +1387,7 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(item_text)
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 if track['longest_conf'] < 0.65:
-                    item.setBackground(QColor("yellow"))   
+                    item.setText( f"⚠️ Video: {track['video_name']} - ID: {track['unique_id']} - Time: {formatted_time} - Confidence: {track['longest_conf']:.2f} - Length: {track['longest_length']:.1f}ft - Label: {track['label']}")
                 self.detection_list.addItem(item)
             except KeyError as e:
                 print(f"Missing key in track data: {e}")
@@ -1129,7 +1556,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         # Home button
-        home_button = QPushButton("Home")
+        home_button = QPushButton("Return to Home Screen")
         home_button.clicked.connect(self.go_to_home)
         layout.addWidget(home_button)
 
