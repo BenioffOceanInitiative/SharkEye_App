@@ -3,10 +3,10 @@ import sys
 import os
 import argparse
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
-                             QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
-                             QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit, QTreeWidget, QTreeWidgetItem, QInputDialog, QFormLayout)
+                            QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
+                            QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit, QTreeWidget, QTreeWidgetItem, QInputDialog, QFormLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDir, QTimer, QDateTime, QObject, QSettings, QByteArray
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator, QFont
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator, QFont, QMovie
 
 import cv2
 import torch
@@ -28,6 +28,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import shutil
 import tempfile
 import io
+import imageio 
+import pandas as pd
 import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
@@ -436,10 +438,10 @@ class CustomTracker:
             self.unique_sharks = 1
         else:
             predicted_positions = {track_id: self._predict_new_position(track) 
-                                   for track_id, track in self.tracks.items()}
+                                for track_id, track in self.tracks.items()}
 
             cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id]) 
-                                     for det in detections] 
+                                    for det in detections] 
                                     for track_id, track in self.tracks.items()])
             
             track_indices, detection_indices = linear_sum_assignment(cost_matrix)
@@ -506,9 +508,9 @@ class CustomTracker:
         # Store frame with bounding box
         frame_with_box = frame.copy()
         cv2.rectangle(frame_with_box, 
-                     (int(x - w/2), int(y - h/2)), 
-                     (int(x + w/2), int(y + h/2)), 
-                     (0, 255, 0), 2)
+                    (int(x - w/2), int(y - h/2)), 
+                    (int(x + w/2), int(y + h/2)), 
+                    (0, 255, 0), 2)
         track['track_frames'].append(frame_with_box)
         
         track['positions'].append((x, y, w, h))
@@ -573,9 +575,9 @@ class CustomTracker:
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length,
-                                                                         original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
-                                                                         drone_altitude=self.drone_altitude,
-                                                                         fov_radians=self.fov_radians)
+                                                                        original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
+                                                                        drone_altitude=self.drone_altitude,
+                                                                        fov_radians=self.fov_radians)
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
@@ -630,8 +632,8 @@ class CustomTracker:
     def _count_significant_tracks(self):
         """Count tracks that meet the criteria for being a significant detection"""
         return sum(1 for track in self.tracks.values() 
-                   if len(track['positions']) >= self.min_frames 
-                   and np.mean(track['confidences']) > self.confidence_threshold)
+                if len(track['positions']) >= self.min_frames 
+                and np.mean(track['confidences']) > self.confidence_threshold)
 
 class VideoProcessingWorker(QObject):
     progress_update = pyqtSignal(int)
@@ -666,6 +668,7 @@ class VideoProcessingWorker(QObject):
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
 
         min_frame_skip, max_frame_skip = 10, 60
         frame_skip = min_frame_skip
@@ -693,8 +696,8 @@ class VideoProcessingWorker(QObject):
                 confidences = results[0].boxes.conf.cpu().tolist()
 
                 detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > self.detection_threshold]
+                                for (x, y, w, h), confidence in zip(boxes, confidences) 
+                                if confidence > self.detection_threshold]
 
             has_detection = bool(detections)
             if has_detection:
@@ -727,7 +730,7 @@ class VideoProcessingWorker(QObject):
         if not QThread.currentThread().isInterruptionRequested():
             # Only save results if not interrupted
             custom_tracker.save_best_frames(self.output_dir, self.video_path)
-            self.save_detections_csv(custom_tracker.tracks, self.output_dir)
+            self.save_detections_csv(custom_tracker.tracks, os.path.join(self.output_dir, 'detection_results'))
             self.processing_finished(custom_tracker.tracks)
 
     @staticmethod
@@ -735,9 +738,9 @@ class VideoProcessingWorker(QObject):
         frame_with_boxes = frame.copy()
         for x, y, w, h, confidence in detections:
             cv2.rectangle(frame_with_boxes, 
-                          (int(x - w/2), int(y - h/2)), 
-                          (int(x + w/2), int(y + h/2)), 
-                          (0, 255, 0), 2)
+                        (int(x - w/2), int(y - h/2)), 
+                        (int(x + w/2), int(y + h/2)), 
+                        (0, 255, 0), 2)
             label = f"Shark: {confidence:.2f}"
             cv2.putText(frame_with_boxes, label, (int(x - w/2), int(y - h/2) - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
@@ -748,11 +751,12 @@ class VideoProcessingWorker(QObject):
         self.processing_complete.emit(tracks, os.path.basename(self.video_path))
 
     def save_detections_csv(self, tracks, output_dir):
-        csv_path = os.path.join(output_dir, 'shark_detections.csv')
+        csv_path = os.path.join(output_dir, f'{Path(self.video_path).stem}.csv')
+        print(f"Starting save to {csv_path}")
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
-                          'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
-                          'Number of Detections', 'Meets Thresholds']
+            fieldnames = ['video_name', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
+                        'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
+                        'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
 
@@ -761,16 +765,20 @@ class VideoProcessingWorker(QObject):
                                     np.mean(track['confidences']) > 0.4)
                 
                 csv_writer.writerow({
+                    'video_name': self.video_path,
                     'Track Id': track_id,
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                     'Highest Confidence': max(track['confidences']),
                     'Average Confidence': np.mean(track['confidences']),
                     'Lowest Confidence': min(track['confidences']),
-                    'Longest Length': max(track['lengths']),
-                    'Highest Confidence Length': track['best_length'],
+                    'Longest Length': max(track['lengths']),  
+                    'Highest Confidence Length': track['longest_length'], # 
                     'Number of Detections': len(track['confidences']),
-                    'Meets Thresholds': meets_thresholds
+                    'Meets Thresholds': meets_thresholds,
+                    'Confidence of Longest Length': track['longest_conf'],
+                    'Label': 'Shark',
                 })
+            print("Done saving csv")
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -825,14 +833,6 @@ class MainWindow(QMainWindow):
     
     def load_setting(self, key, default_value=None):
         return self.settings.value(key, default_value)
-    
-    def save_complex_setting(self, key, value):
-        serialized_value = json.dumps(value)
-        self.settings.setValue(key, serialized_value)
-    
-    def load_complex_setting(self, key, default_value=None):
-        value = self.settings.value(key, default_value)
-        return json.loads(value) if value else default_value
         
     def init_attributes(self):
         self.is_processing = False
@@ -855,6 +855,7 @@ class MainWindow(QMainWindow):
         self.upload_thread = None
         self.progress_dialog = None
         self.confidence_threshold = .4 
+        self.reviewing_history = False
 
     def init_ui(self):
         self.central_widget = QWidget()
@@ -983,6 +984,11 @@ class MainWindow(QMainWindow):
         process_layout.addWidget(self.process_button)
         layout.addLayout(process_layout)
         layout.addStretch()
+
+        # Review History button
+        self.review_history_button = QPushButton("Review Previous Experiments")
+        self.review_history_button.clicked.connect(self.go_to_review_history)
+        layout.addWidget(self.review_history_button)
 
         # Frame display
         self.frame_display = QLabel()
@@ -1295,6 +1301,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(overall_progress)
 
     def processing_complete(self, tracks, video_filename):
+        print("processing_complete")
         self.tracks[video_filename] = tracks
         self.current_detection_index = 0
         
@@ -1303,6 +1310,7 @@ class MainWindow(QMainWindow):
         self.current_video_index += 1
 
         if self.current_video_index < len(self.video_queue):
+            print("Processing next video")
             self.process_video(self.video_queue[self.current_video_index])
         else:
             # Sort tracks before showing review widget
@@ -1317,6 +1325,7 @@ class MainWindow(QMainWindow):
             self.stack_widget.setCurrentWidget(self.review_widget)
 
     def finish_processing(self):
+        print("finish_processing")
         self.is_processing = False
         self.timer.stop()
         self.process_button.setEnabled(True)  # Re-enable the process button
@@ -1352,8 +1361,17 @@ class MainWindow(QMainWindow):
                              (int(x + w/2), int(y + h/2)), 
                              (0, 255, 0), 2)
                 track_frames.append(frame_with_box)
+
+            # Save frames as GIF
+            gif_path = os.path.join(self.current_output_dir, "tracking_gifs", f"{Path(key).stem}.gif")
+            os.makedirs(os.path.dirname(gif_path), exist_ok=True)
             
-            # Show track frames in the player
+            # Convert BGR (OpenCV) to RGB before saving
+            track_frames_rgb = [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in track_frames]
+            imageio.mimsave(gif_path, track_frames_rgb, fps=10)  # Adjust fps as needed
+            print("image saved")
+            
+            # Show track frames in the players
             self.frame_player.set_frames(track_frames)
             self.show_confidence_warning()
             
@@ -1396,6 +1414,7 @@ class MainWindow(QMainWindow):
 
         print(f"Updated detection list with {self.detection_list.count()} items")
         self.highlight_current_detection()
+        print("Done highlighting")
 
     def show_selected_detection(self):
         selected_items = self.detection_list.selectedItems()
@@ -1406,7 +1425,12 @@ class MainWindow(QMainWindow):
             self.show_confidence_warning()
 
     def highlight_current_detection(self):
+        if self.reviewing_history:
+            # Do not attempt to highlight in detection_list when in historical mode
+            return
+        print('highlight_current_detection')
         for i in range(self.detection_list.count()):
+            print(i)
             item = self.detection_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == self.current_detection_index:
                 item.setSelected(True)
@@ -1518,10 +1542,17 @@ class MainWindow(QMainWindow):
         frame_player_container.addStretch()  # Add stretch after frame player
         layout.addLayout(frame_player_container)
 
-        # Button to toggle display to show gif/segmentation mask
+        # Button to toggle display to show gif/segmentation mask + Toggle Historical Experiments
+        display_mode_layout = QHBoxLayout()
         self.toggle_display_mode_button = QPushButton("Toggle Mask/Bounding Box Display")
         self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        layout.addWidget(self.toggle_display_mode_button)
+
+        self.toggle_historical_experiments_button = QPushButton("Toggle Historical Experiments Button")
+        self.toggle_historical_experiments_button.clicked.connect(self.toggle_historical_experiments)
+
+        display_mode_layout.addWidget(self.toggle_display_mode_button)
+        display_mode_layout.addWidget(self.toggle_historical_experiments_button)
+        layout.addLayout(display_mode_layout)
         
         # Label combo
         self.label_combo = QComboBox()
@@ -1545,6 +1576,13 @@ class MainWindow(QMainWindow):
         self.detection_list.setMaximumHeight(100)
         layout.addWidget(self.detection_list)
 
+        # Historical items list (initially hidden)
+        self.historical_items = QListWidget()
+        self.historical_items.setMaximumHeight(100)
+        self.historical_items.hide()
+        self.historical_items.itemSelectionChanged.connect(self.show_historical_gif)
+        layout.addWidget(self.historical_items)
+
         # Export/Upload buttons
         button_layout = QHBoxLayout()
         export_button = QPushButton("Export Results")
@@ -1560,15 +1598,69 @@ class MainWindow(QMainWindow):
         home_button.clicked.connect(self.go_to_home)
         layout.addWidget(home_button)
 
+    def switch_detection_list(self, show_historical=False):
+        if show_historical:
+            self.detection_list.hide()
+            self.historical_items.show()
+        else:
+            self.historical_items.hide()
+            self.detection_list.show()
+
+    def show_historical_gif(self):
+        selected_items = self.historical_items.selectedItems()
+        if not selected_items:
+            return
+        experiment, track_csv = selected_items[0].data(Qt.ItemDataRole.UserRole)
+        gif_dir = Path(get_results_dir()) / experiment / "tracking_gifs"
+        # Assume GIF filename matches CSV filename but with .gif extension
+        gif_name = Path(track_csv).stem + ".gif"
+        gif_path = gif_dir / gif_name
+        if gif_path.exists():
+            movie = QMovie(str(gif_path))
+            self.frame_player.setMovie(movie)
+            movie.start()
+        else:
+            self.frame_player.clear()
+            self.frame_player.setText("GIF not found")
+
+    def toggle_historical_experiments(self):
+        experiments = get_results_dir()
+        self.historical_items.clear()
+
+        if not self.reviewing_history:
+            for experiment in os.listdir(experiments):
+                shark_detections_path = Path(os.path.join(experiments, experiment, "detection_results"))
+                tracking_gif_path = Path(os.path.join(experiments, experiment, "tracking_gifs"))
+                if os.path.exists(shark_detections_path) and os.path.exists(tracking_gif_path):
+                    for track_file in os.listdir(shark_detections_path):
+                        try:
+                            track = pd.read_csv(os.path.join(shark_detections_path, track_file)).iloc[0].to_dict()
+                            formatted_time = track['Highest Conf Timestamp'][0]
+                            item_text = f"Video: {track['video_name']} - ID: {track['Track Id']} - Time: {formatted_time} - Confidence: {track['Confidence of Longest Length']:.2f} - Length: {track['Highest Confidence Length']:.1f}ft - Label: {track['Label']}"
+                            item = QListWidgetItem(item_text)
+                            # Store experiment and track file for later retrieval
+                            item.setData(Qt.ItemDataRole.UserRole, (experiment, track_file))
+                            self.historical_items.addItem(item)
+                        except Exception as e:
+                            print(f"Error creating historical item: {e}")
+            
+            print(self.historical_items)
+            self.historical_items.itemSelectionChanged.connect(self.show_historical_gif)
+            self.switch_detection_list(show_historical=True)
+            self.reviewing_history = True
+        else:
+            self.switch_detection_list(show_historical=False)
+            self.reviewing_history = False
+
     def go_to_home(self):
         # Clean up generated files and folders
-        if hasattr(self, 'current_output_dir') and self.current_output_dir:
-            try:
-                if os.path.exists(self.current_output_dir):
-                    shutil.rmtree(self.current_output_dir)
-                    print(f"Cleaned up output directory: {self.current_output_dir}")
-            except Exception as e:
-                print(f"Error cleaning up output directory: {str(e)}")
+        # if hasattr(self, 'current_output_dir') and self.current_output_dir:
+        #     try:
+        #         if os.path.exists(self.current_output_dir):
+        #             shutil.rmtree(self.current_output_dir)
+        #             print(f"Cleaned up output directory: {self.current_output_dir}")
+        #     except Exception as e:
+        #         print(f"Error cleaning up output directory: {str(e)}")
         
         # Reset processing state
         self.is_processing = False
@@ -1604,11 +1696,12 @@ class MainWindow(QMainWindow):
         self.stack_widget.setCurrentWidget(self.home_widget)
         
     def show_confidence_warning(self):
-        _, track = self.sorted_tracks[self.current_detection_index]
-        if track['longest_conf'] < .65:
-            self.low_confidence_warning.setVisible(True)
-        else:
-            self.low_confidence_warning.setVisible(False)
+        if not self.frame_display.isHidden:
+            _, track = self.sorted_tracks[self.current_detection_index]
+            if track['longest_conf'] < .65:
+                self.low_confidence_warning.setVisible(True)
+            else:
+                self.low_confidence_warning.setVisible(False)
 
     def update_timer(self):
         self.elapsed_time += 1
@@ -1630,13 +1723,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Clean up generated files and folders
-        if hasattr(self, 'current_output_dir') and self.current_output_dir:
-            try:
-                if os.path.exists(self.current_output_dir):
-                    shutil.rmtree(self.current_output_dir)
-                    print(f"Cleaned up output directory: {self.current_output_dir}")
-            except Exception as e:
-                print(f"Error cleaning up output directory: {str(e)}")
+        # if hasattr(self, 'current_output_dir') and self.current_output_dir:
+        #     try:
+        #         if os.path.exists(self.current_output_dir):
+        #             shutil.rmtree(self.current_output_dir)
+        #             print(f"Cleaned up output directory: {self.current_output_dir}")
+        #     except Exception as e:
+        #         print(f"Error cleaning up output directory: {str(e)}")
         
         # Ensure threads are properly closed
         if self.processing_thread:
@@ -1778,6 +1871,14 @@ class MainWindow(QMainWindow):
         if self.upload_thread:
             self.upload_thread.wait()
             self.upload_thread = None
+
+        self.is_uploading = False
+
+    def ensure_track_consistency(self):
+        if len(self.tracks) != len(self.sorted_tracks):
+            print("Warning: Inconsistency detected between tracks and sorted_tracks")
+            self.tracks = dict(self.sorted_tracks)
+        
 
         self.is_uploading = False
 
@@ -1936,8 +2037,8 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 confidences = results[0].boxes.conf.cpu().tolist()
 
                 detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > detection_threshold]
+                            for (x, y, w, h), confidence in zip(boxes, confidences) 
+                            if confidence > detection_threshold]
 
             has_detection = bool(detections)
             if has_detection:
