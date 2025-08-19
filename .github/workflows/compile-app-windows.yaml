@@ -1,0 +1,25 @@
+name: Python Build for Windows(PyInstaller)
+uses: vednig/pyinstaller-action-windows@v0.1.5
+  with:
+    path: src
+    spec: SharkEye.spec
+
+on: [push]
+
+jobs:
+  build:
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Package Application
+      uses: vednig/pyinstaller-action-windows@v0.1.5
+      with:
+        path: src
+
+    - uses: actions/upload-artifact@v2
+      with:
+        name: name-of-artifact
+        path: src/dist/windows
