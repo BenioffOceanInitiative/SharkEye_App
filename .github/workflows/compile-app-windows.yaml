@@ -1,10 +1,6 @@
 name: Build Windows Executable (PyInstaller Spec)
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+on: [push]
 
 jobs:
   build-windows:
