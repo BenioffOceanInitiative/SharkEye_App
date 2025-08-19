@@ -27,7 +27,7 @@ jobs:
       # Build executable with PyInstaller
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --onefile src/sharkeye_app.py
+          pyinstaller SharkEye.spec
 
       # Upload the generated EXE as artifact
       - name: Upload EXE
