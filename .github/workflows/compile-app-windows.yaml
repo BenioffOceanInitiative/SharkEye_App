@@ -7,8 +7,31 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v3
+      - name: Checkout source (with Git LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+          # submodules: recursive   # uncomment if weights live in submodules
+
+      - name: Ensure LFS files are pulled
+        shell: pwsh
+        run: |
+          git lfs install
+          git lfs pull
+          if (Test-Path .gitmodules) {
+            git submodule update --init --recursive
+            git -c submodule.recurse=true lfs pull
+          }
+
+      - name: Verify SAM weights (not an LFS pointer)
+        shell: pwsh
+        run: |
+          $path = "model_weights/sam_vit_b_01ec64.pth"
+          if (-not (Test-Path $path)) { throw "Missing weights at $path. Did LFS fetch run?" }
+          $size = (Get-Item $path).Length
+          if ($size -lt 314572800) { throw "Weights too small ($size bytes) — likely a Git LFS pointer." }
+          Write-Host "Weights OK: $path ($size bytes)"
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -24,13 +47,11 @@ jobs:
       - name: Build with PyInstaller spec
         run: pyinstaller SharkEye.spec
 
-      # Optional: list contents for debugging
       - name: List dist contents
         run: |
           dir dist
           dir dist\SharkEye
 
-      # Upload full dist folder so it's ready-to-run
       - name: Upload build folder
         uses: actions/upload-artifact@v4
         with:
