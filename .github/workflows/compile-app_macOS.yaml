@@ -61,15 +61,22 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
+
+      - name: Clean build outputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf build dist __pycache__
 
       - name: Build with PyInstaller spec
         shell: bash
         run: |
           set -euxo pipefail
-          pyinstaller --distpath dist/macos-intel SharkEye.spec
+          pyinstaller --clean --noconfirm SharkEye.spec
+
 
       - name: List dist contents
         shell: bash
@@ -88,5 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SharkEye-macOS-Intel
-          path: dist/macos-intel
+          path: |
+            dist/SharkEye.app   
+            dist/SharkEye/
           if-no-files-found: warn

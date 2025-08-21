@@ -68,7 +68,7 @@ a = Analysis(
     hookspath=[str(HERE)],
     hooksconfig={},
     runtime_hooks=[],                 # you can add a runtime hook file here if needed
-    excludes=[],
+    excludes=['PyQt6.QtBluetooth', 'PyQt6.QtNfc'],
     noarchive=False,
 )
 
