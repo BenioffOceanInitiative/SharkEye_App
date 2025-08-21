@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          pyinstaller SharkEye.spec
+          pyinstaller --distpath dist/macos-intel SharkEye.spec
 
       - name: List dist contents
         shell: bash
@@ -88,7 +88,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: SharkEye-macOS-Intel
-          path: |
-            dist/SharkEye.app
-            dist/SharkEye/
+          path: dist/macos-intel
           if-no-files-found: warn
