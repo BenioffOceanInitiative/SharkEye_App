@@ -1347,6 +1347,8 @@ class MainWindow(QMainWindow):
             self.finish_processing()
             # Automatically show review widget after processing
             self.stack_widget.setCurrentWidget(self.review_widget)
+            # Display most recent detections
+            self.switch_detection_list(show_historical=False)
     
     def save_detection_gif(self, output_dir):
         print("Saving Track results as GIFs")
