@@ -651,6 +651,14 @@ class VideoProcessingWorker(QObject):
         # Read settings 
         settings = QSettings("BOSL", "SharkEye_App")
         value = settings.value("drone_settings")
+        if not value:
+            # seed safe defaults (match your SettingsDialog defaults)
+            value = json.dumps({
+                "Mavic 2 Pro": {"Resolution": {"(2688, 1512)": math.radians(73)}},
+                "Air 2S": {"Resolution": {"(2688, 1512)": math.radians(63.5),
+                                        "(5472, 3078)": math.radians(82.9)}}
+            })
+            settings.setValue("drone_settings", value)
         self.settings = json.loads(value)
 
     def run(self):
@@ -882,7 +890,9 @@ class MainWindow(QMainWindow):
         self.setup_review_widget()
 
     def setup_model(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        device = torch.device('cpu') if getattr(sys, 'frozen', False) else \
+         torch.device('cuda' if torch.cuda.is_available() else
+                      'mps' if torch.backends.mps.is_available() else 'cpu')
         print(f"Using device: {device}")
         self.model = YOLO(MODEL_PATH).to(device)
 
