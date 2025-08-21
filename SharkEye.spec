@@ -22,7 +22,9 @@ ENTRY = SRC / "sharkeye_app.py"                      # your main script
 
 # ---------- hidden imports ----------
 hidden_imports = []
-hidden_imports += collect_submodules("PyQt6")
+hidden_imports += collect_submodules("PyQt6.QtCore")
+hidden_imports += collect_submodules("PyQt6.QtGui")
+hidden_imports += collect_submodules("PyQt6.QtWidgets")
 hidden_imports += collect_submodules("ultralytics")
 hidden_imports += collect_submodules("segment_anything")
 hidden_imports += collect_submodules("scipy")
@@ -31,7 +33,9 @@ hidden_imports += collect_submodules("scipy")
 
 # ---------- data files ----------
 datas  = []
-datas += collect_data_files("PyQt6")                 # Qt plugins/resources
+datas += collect_data_files("PyQt6.QtCore")
+datas += collect_data_files("PyQt6.QtGui")
+datas += collect_data_files("PyQt6.QtWidgets")                 # Qt plugins/resources
 datas += collect_data_files("ultralytics")
 datas += collect_data_files("torch")
 datas += collect_data_files("certifi")               # CA bundle for requests
