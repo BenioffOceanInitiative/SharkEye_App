@@ -1,0 +1,103 @@
+name: Build macOS Executable (PyInstaller Spec, Apple Silicon)
+
+on: [push]
+
+jobs:
+  build-macos-apple:
+    # macos-14 and newer are Apple Silicon (arm64)
+    runs-on: macos-14
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"  # ensure arm64 wheels resolve cleanly
+
+    steps:
+      - name: Checkout source (with Git LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Ensure LFS files are pulled
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git lfs install
+          git lfs pull
+          if [ -f .gitmodules ]; then
+            git submodule update --init --recursive
+            git -c submodule.recurse=true lfs pull
+          fi
+
+      - name: Verify SAM weights (not an LFS pointer)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          path="model_weights/sam_vit_b_01ec64.pth"
+          if [ ! -f "$path" ]; then
+            echo "Missing weights at $path. Did LFS fetch run?" >&2
+            exit 1
+          fi
+          size=$(stat -f%z "$path")
+          if [ "$size" -lt 314572800 ]; then
+            echo "Weights too small ($size bytes) — likely a Git LFS pointer." >&2
+            exit 1
+          fi
+          echo "Weights OK: $path ($size bytes)"
+
+      - name: Setup Python (arm64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: "arm64"
+
+      - name: Confirm runner and Python architecture
+        shell: bash
+        run: |
+          uname -a
+          python -c "import platform, sys; print('Python:', sys.version); print('Machine:', platform.machine()); print('Arch tuple:', platform.architecture())"
+          py_machine=$(python -c "import platform; print(platform.machine())")
+          [ "$py_machine" = "arm64" ] || (echo "Unexpected Python machine: $py_machine" >&2; exit 1)
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip wheel
+          # If you use torch, prefer CPU+MPS wheels on Apple Silicon.
+          pip install -r requirements.txt
+          pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
+
+      - name: Clean build outputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf build dist __pycache__
+
+      - name: Build with PyInstaller spec
+        shell: bash
+        run: |
+          set -euxo pipefail
+          pyinstaller --clean --noconfirm SharkEye.spec
+
+      - name: List dist contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -lah dist || true
+          if [ -d "dist/SharkEye.app" ]; then
+            du -sh dist/SharkEye.app || true
+            ls -lah "dist/SharkEye.app/Contents/MacOS" || true
+            file "dist/SharkEye.app/Contents/MacOS/"* || true
+          elif [ -d "dist/SharkEye" ]; then
+            ls -lah dist/SharkEye || true
+            file dist/SharkEye/* || true
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharkEye-macOS-AppleSilicon
+          path: |
+            dist/SharkEye.app
+            dist/SharkEye/
+          if-no-files-found: warn
