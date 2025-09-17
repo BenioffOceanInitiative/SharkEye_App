@@ -55,6 +55,6 @@ jobs:
       - name: Upload build folder
         uses: willo32/google-drive-upload-action@v1
         with:
-          target: dist/SharkEye/
+          target: dist/SharkEye/SharkEye.exe
           credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
           parent_folder_id: "1Ce6ToUA7BP4moCCfvAlTNbwN084Rqthd"
