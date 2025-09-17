@@ -57,4 +57,4 @@ jobs:
         with:
           target: dist/SharkEye/SharkEye.exe
           credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-          parent_folder_id: "1Ce6ToUA7BP4moCCfvAlTNbwN084Rqthd"
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE}}
