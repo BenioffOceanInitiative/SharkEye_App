@@ -53,7 +53,8 @@ jobs:
           dir dist\SharkEye
 
       - name: Upload build folder
-        uses: actions/upload-artifact@v4
+        uses: willo32/google-drive-upload-action@v1
         with:
-          name: SharkEye-Windows
-          path: dist/SharkEye/
+          target: dist/SharkEye/
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: "1Ce6ToUA7BP4moCCfvAlTNbwN084Rqthd"
