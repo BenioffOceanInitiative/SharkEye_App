@@ -1,0 +1,33 @@
+name: Test Google Drive Upload
+
+on: [push]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source (with Git LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+          # submodules: recursive   # uncomment if weights live in submodules
+
+      - name: Ensure LFS files are pulled
+        shell: pwsh
+        run: |
+          git lfs install
+          git lfs pull
+          if (Test-Path .gitmodules) {
+            git submodule update --init --recursive
+            git -c submodule.recurse=true lfs pull
+          }
+          
+      - name: Upload build folder
+        uses: willo32/google-drive-upload-action@v1
+        with:
+          target: requirements.txt
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: "1Ce6ToUA7BP4moCCfvAlTNbwN084Rqthd"
+          owner: "lucasjoseph@ucsb.edu"
