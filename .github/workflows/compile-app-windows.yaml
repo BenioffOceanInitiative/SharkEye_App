@@ -12,7 +12,6 @@ jobs:
         with:
           lfs: true
           fetch-depth: 0
-          # submodules: recursive   # uncomment if weights live in submodules
 
       - name: Ensure LFS files are pulled
         shell: pwsh
@@ -52,9 +51,19 @@ jobs:
           dir dist
           dir dist\SharkEye
 
-      - name: Upload build folder
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          $date = (Get-Date -Format "yyyyMMdd")
+          $zipName = "SharkEye_Windows_$date.zip"
+          Compress-Archive -Path dist\SharkEye\* -DestinationPath $zipName
+          Write-Host "Created $zipName"
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - name: Upload ZIP to Google Drive
         uses: willo32/google-drive-upload-action@v1
         with:
-          target: dist/SharkEye/SharkEye.exe
+          target: ${{ env.ZIP_NAME }}
           credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE}}
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+          name: ${{ env.ZIP_NAME }}
