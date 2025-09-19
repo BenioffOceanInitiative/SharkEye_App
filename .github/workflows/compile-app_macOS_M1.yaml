@@ -93,11 +93,28 @@ jobs:
             file dist/SharkEye/* || true
           fi
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - name: Create ZIP archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          date=$(date +"%Y%m%d")
+          zipName="SharkEye_macOS_Silicon_$date.zip"
+          # If PyInstaller created an .app bundle
+          if [ -d "dist/SharkEye.app" ]; then
+            zip -r "$zipName" "dist/SharkEye.app"
+          elif [ -d "dist/SharkEye" ]; then
+            zip -r "$zipName" "dist/SharkEye"
+          else
+            echo "No known build output found" >&2
+            exit 1
+          fi
+          echo "ZIP_NAME=$zipName" >> "$GITHUB_ENV"
+          echo "Created $zipName"
+
+      - name: Upload ZIP to Google Drive
+        uses: willo32/google-drive-upload-action@v1
         with:
-          name: SharkEye-macOS-AppleSilicon
-          path: |
-            dist/SharkEye.app
-            dist/SharkEye/
-          if-no-files-found: warn
+          target: ${{ env.ZIP_NAME }}
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+          name: ${{ env.ZIP_NAME }}
