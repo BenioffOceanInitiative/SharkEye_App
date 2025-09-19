@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
                              QProgressBar, QStackedWidget, QSpacerItem, QSizePolicy, QScrollArea, QMessageBox, QDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox, QTextEdit, QLineEdit, QTreeWidget, QTreeWidgetItem, QInputDialog, QFormLayout)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QDir, QTimer, QDateTime, QObject, QSettings, QByteArray
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator, QFont
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QPen, QIcon, QDoubleValidator, QFont, QMovie
 
 import cv2
 import torch
@@ -28,6 +28,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import shutil
 import tempfile
 import io
+import imageio
+import pandas as pd
 import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
@@ -649,6 +651,14 @@ class VideoProcessingWorker(QObject):
         # Read settings 
         settings = QSettings("BOSL", "SharkEye_App")
         value = settings.value("drone_settings")
+        if not value:
+            # seed safe defaults (match your SettingsDialog defaults)
+            value = json.dumps({
+                "Mavic 2 Pro": {"Resolution": {"(2688, 1512)": math.radians(73)}},
+                "Air 2S": {"Resolution": {"(2688, 1512)": math.radians(63.5),
+                                        "(5472, 3078)": math.radians(82.9)}}
+            })
+            settings.setValue("drone_settings", value)
         self.settings = json.loads(value)
 
     def run(self):
@@ -666,6 +676,8 @@ class VideoProcessingWorker(QObject):
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
 
         min_frame_skip, max_frame_skip = 10, 60
         frame_skip = min_frame_skip
@@ -727,7 +739,7 @@ class VideoProcessingWorker(QObject):
         if not QThread.currentThread().isInterruptionRequested():
             # Only save results if not interrupted
             custom_tracker.save_best_frames(self.output_dir, self.video_path)
-            self.save_detections_csv(custom_tracker.tracks, self.output_dir)
+            self.save_detections_csv(custom_tracker.tracks, os.path.join(self.output_dir, 'detection_results'))
             self.processing_finished(custom_tracker.tracks)
 
     @staticmethod
@@ -748,11 +760,12 @@ class VideoProcessingWorker(QObject):
         self.processing_complete.emit(tracks, os.path.basename(self.video_path))
 
     def save_detections_csv(self, tracks, output_dir):
-        csv_path = os.path.join(output_dir, 'shark_detections.csv')
+        csv_path = os.path.join(output_dir, f'{Path(self.video_path).stem}.csv')
+        print(f"Starting save to {csv_path}")
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
-                          'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
-                          'Number of Detections', 'Meets Thresholds']
+            fieldnames = ['video_name', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
+                        'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
+                        'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
 
@@ -761,16 +774,20 @@ class VideoProcessingWorker(QObject):
                                     np.mean(track['confidences']) > 0.4)
                 
                 csv_writer.writerow({
+                    'video_name': self.video_path,
                     'Track Id': track_id,
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                     'Highest Confidence': max(track['confidences']),
                     'Average Confidence': np.mean(track['confidences']),
                     'Lowest Confidence': min(track['confidences']),
-                    'Longest Length': max(track['lengths']),
-                    'Highest Confidence Length': track['best_length'],
+                    'Longest Length': max(track['lengths']),  
+                    'Highest Confidence Length': track['longest_length'], # 
                     'Number of Detections': len(track['confidences']),
-                    'Meets Thresholds': meets_thresholds
+                    'Meets Thresholds': meets_thresholds,
+                    'Confidence of Longest Length': track['longest_conf'],
+                    'Label': 'Shark',
                 })
+            print("Done saving csv")
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -855,6 +872,10 @@ class MainWindow(QMainWindow):
         self.upload_thread = None
         self.progress_dialog = None
         self.confidence_threshold = .4 
+        self.cleanup_trees = False
+        self.reviewing_history = False
+        self.historical_label_changes = {}  # key: (experiment, csv_name, track_id) -> new_label
+
 
     def init_ui(self):
         self.central_widget = QWidget()
@@ -869,7 +890,9 @@ class MainWindow(QMainWindow):
         self.setup_review_widget()
 
     def setup_model(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+        device = torch.device('cpu') if getattr(sys, 'frozen', False) else \
+         torch.device('cuda' if torch.cuda.is_available() else
+                      'mps' if torch.backends.mps.is_available() else 'cpu')
         print(f"Using device: {device}")
         self.model = YOLO(MODEL_PATH).to(device)
 
@@ -974,6 +997,13 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(self.altitude_input, 1, 1)
 
         layout.addLayout(form_layout)
+
+        # Review History button
+        self.review_history_button = QPushButton("Review Previous Experiments")
+        self.review_history_button.clicked.connect(self.go_to_review_history)
+        self.review_history_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
+        self.review_history_button.clicked.connect(self.toggle_historical_experiments)
+        layout.addWidget(self.review_history_button)
 
         # Process Videos button
         process_layout = QVBoxLayout()
@@ -1309,12 +1339,37 @@ class MainWindow(QMainWindow):
             self.sort_tracks()
             # Update detection list
             self.update_detection_list()
+            # Save GIFs for each detection
+            self.save_detection_gif(self.current_output_dir)
             # Show first detection if available
             if self.sorted_tracks:
                 self.show_detection(0)
             self.finish_processing()
             # Automatically show review widget after processing
             self.stack_widget.setCurrentWidget(self.review_widget)
+            # Display most recent detections
+            self.switch_detection_list(show_historical=False)
+    
+    def save_detection_gif(self, output_dir):
+        print("Saving Track results as GIFs")
+        gifs_dir = os.path.join(output_dir, "tracking_gifs")
+        for key, track in self.sorted_tracks:
+            # Use the bounding box frames for the track
+            track_frames = []
+            for pos, frame in zip(track['positions'], track['frames']):
+                x, y, w, h = pos
+                frame_with_box = frame.copy()
+                cv2.rectangle(frame_with_box,
+                            (int(x - w/2), int(y - h/2)),
+                            (int(x + w/2), int(y + h/2)),
+                            (0, 255, 0), 2)
+                track_frames.append(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))  # Convert to RGB for imageio
+
+            if track_frames:
+                gif_filename = f"{key}.gif"
+                gif_path = os.path.join(gifs_dir, gif_filename)
+                imageio.mimsave(gif_path, track_frames, fps=10)
+                print(f"Saved GIF: {gif_path}")
 
     def finish_processing(self):
         self.is_processing = False
@@ -1335,6 +1390,8 @@ class MainWindow(QMainWindow):
 
     def go_to_review_from_popup(self, popup):
         popup.accept()
+        self.reviewing_history = False
+        self.switch_detection_list(show_historical=False)
         self.go_to_review_history()
 
     def show_detection(self, index):
@@ -1363,8 +1420,7 @@ class MainWindow(QMainWindow):
             self.highlight_current_detection()
         else:
             print(f"Error: Invalid detection index: {index}")
-            self.frame_player.clear()
-            self.frame_player.setText("No detections available")
+            self.show_no_detections_message()
 
     def show_no_detections_message(self):
         self.frame_player.clear()
@@ -1415,12 +1471,41 @@ class MainWindow(QMainWindow):
                 item.setSelected(False)
 
     def prev_detection(self):
-        self.show_detection(self.current_detection_index - 1)
+        if self.reviewing_history:
+            self.historical_items.setCurrentRow(max(0, self.historical_items.currentRow() - 1))
+        else:
+            self.show_detection(self.current_detection_index - 1)
 
     def next_detection(self):
-        self.show_detection(self.current_detection_index + 1)
+        if self.reviewing_history:
+            self.historical_items.setCurrentRow(min(self.historical_items.count() - 1, self.historical_items.currentRow() + 1))
+        else:
+            self.show_detection(self.current_detection_index + 1)
 
     def update_label(self, index):
+        new_label = self.label_combo.currentText()
+
+        if self.reviewing_history:
+            selected = self.historical_items.selectedItems()
+            if not selected:
+                return
+            item = selected[0]
+            meta = self._parse_historical_item_text(item.text())
+            experiment = meta["experiment"]
+            csv_name = meta["csv_name"]
+            track_id = meta["track_id"]
+
+            key = (experiment, csv_name, track_id)
+            self.historical_label_changes[key] = new_label
+
+            # Update the visible line’s label text immediately
+            txt = item.text()
+            if "Label:" in txt:
+                item.setText(re.sub(r"Label:.*$", f"Label: {new_label}", txt))
+            else:
+                item.setText(txt + f" - Label: {new_label}")
+            return
+        
         if not self.sorted_tracks:
             print("Error: No sorted tracks available. Cannot update label.")
             return
@@ -1513,15 +1598,23 @@ class MainWindow(QMainWindow):
         self.low_confidence_warning = QLabel("⚠️ Warning: Low confidence in this detection. Please double check the image to make sure the boxed area is a shark!")
         self.low_confidence_warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.low_confidence_warning.setMinimumHeight(30)
+        self.low_confidence_warning.setVisible(False)
         frame_player_container.addWidget(self.low_confidence_warning)
 
         frame_player_container.addStretch()  # Add stretch after frame player
         layout.addLayout(frame_player_container)
 
         # Button to toggle display to show gif/segmentation mask
+        display_mode_layout = QHBoxLayout()
         self.toggle_display_mode_button = QPushButton("Toggle Mask/Bounding Box Display")
         self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        layout.addWidget(self.toggle_display_mode_button)
+
+        self.toggle_historical_experiments_button = QPushButton("Toggle Historical Experiments Button")
+        self.toggle_historical_experiments_button.clicked.connect(self.toggle_historical_experiments)
+
+        display_mode_layout.addWidget(self.toggle_display_mode_button)
+        display_mode_layout.addWidget(self.toggle_historical_experiments_button)
+        layout.addLayout(display_mode_layout)
         
         # Label combo
         self.label_combo = QComboBox()
@@ -1545,14 +1638,21 @@ class MainWindow(QMainWindow):
         self.detection_list.setMaximumHeight(100)
         layout.addWidget(self.detection_list)
 
+        # Historical items list (initially hidden)
+        self.historical_items = QListWidget()
+        self.historical_items.setMaximumHeight(100)
+        self.historical_items.hide()
+        self.historical_items.itemSelectionChanged.connect(self.show_historical_gif)
+        layout.addWidget(self.historical_items)
+
         # Export/Upload buttons
         button_layout = QHBoxLayout()
-        export_button = QPushButton("Export Results")
-        export_button.clicked.connect(self.export_results)
-        upload_button = QPushButton("Upload Results")
-        upload_button.clicked.connect(self.upload_images)
-        button_layout.addWidget(export_button)
-        button_layout.addWidget(upload_button)
+        self.export_button = QPushButton("Export Results")  # text will change in historical mode
+        self.export_button.clicked.connect(self.export_results)
+        self.upload_button = QPushButton("Upload Results")
+        self.upload_button.clicked.connect(self.upload_images)
+        button_layout.addWidget(self.export_button)
+        button_layout.addWidget(self.upload_button)
         layout.addLayout(button_layout)
 
         # Home button
@@ -1560,15 +1660,155 @@ class MainWindow(QMainWindow):
         home_button.clicked.connect(self.go_to_home)
         layout.addWidget(home_button)
 
+    def switch_detection_list(self, show_historical=False):
+        current_list = self.historical_items if show_historical else self.detection_list
+        other_list = self.detection_list if show_historical else self.historical_items
+
+        other_list.hide()
+        current_list.show()
+
+        if current_list.count() > 0:
+            current_list.setCurrentRow(0)
+            if not show_historical:
+                self.show_detection(self.current_detection_index)
+            else:
+                self.update_detection_list()
+        else:
+            self.show_no_detections_message()
+
+    def show_historical_gif(self):
+        if self.frame_player.timer.isActive():
+            self.frame_player.timer.stop()
+
+        selected = self.historical_items.selectedItems()
+        if not selected:
+            return
+
+        meta = self._parse_historical_item_text(selected[0].text())
+        experiment = meta["experiment"]
+        video_basename = meta["video_basename"]
+        track_id = meta["track_id"]
+
+        gif_dir = Path(get_results_dir()) / experiment / "tracking_gifs"
+        gif_name = f"{video_basename}_{track_id}.gif"
+        gif_path = gif_dir / gif_name
+
+        if gif_path.exists():
+            self.frame_player.set_gif(str(gif_path))
+        else:
+            alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
+            if alt.exists():
+                self.frame_player.set_gif(str(alt))
+            else:
+                self.frame_player.clear()
+                self.frame_player.setText(f"GIF not found:\n{gif_name}")
+
+        self.prev_button.setEnabled(self.historical_items.currentRow() > 0)
+        self.next_button.setEnabled(self.historical_items.currentRow() < (self.historical_items.count() - 1))
+
+    def toggle_historical_experiments(self):
+        experiments_root = get_results_dir()
+        self.historical_items.clear()
+
+        if not self.reviewing_history:
+            try:
+                # newest-first
+                for experiment in sorted(os.listdir(experiments_root), reverse=True):
+                    exp_dir = Path(experiments_root) / experiment
+                    det_dir = exp_dir / "detection_results"
+                    gif_dir = exp_dir / "tracking_gifs"
+
+                    if not (det_dir.exists() and gif_dir.exists()):
+                        continue
+
+                    # each CSV can contain multiple tracks (rows) → iterate rows!
+                    for csv_name in os.listdir(det_dir):
+                        csv_path = det_dir / csv_name
+                        try:
+                            df = pd.read_csv(csv_path)
+                        except Exception as e:
+                            print(f"Error reading {csv_path}: {e}")
+                            continue
+
+                        # Create one item per track (row)
+                        for _, row in df.iterrows():
+                            try:
+                                # CSV writer used these column names in save_detections_csv()
+                                video_path_str = str(row.get('video_name', ''))
+                                video_basename = Path(video_path_str).name  # e.g., "clip.mp4"
+                                track_id = int(row.get('Track Id'))
+                                time_str = str(row.get('Highest Conf Timestamp', ''))
+                                conf_longest = float(row.get('Confidence of Longest Length', 0.0))
+                                len_high_conf = float(row.get('Highest Confidence Length', 0.0))
+                                label = str(row.get('Label', 'Shark'))
+
+                                # Pretty experiment timestamp for the list label
+                                try:
+                                    exp_dt = datetime.strptime(experiment, "%m%d%Y_%H%M%S")
+                                    exp_disp = exp_dt.strftime("%Y/%-m/%-d %I:%M:%S %p")  # mac/linux
+                                except Exception:
+                                    # Windows compatibility (no %-m / %-d)
+                                    try:
+                                        exp_disp = datetime.strptime(experiment, "%m%d%Y_%H%M%S").strftime("%Y/%#m/%#d %I:%M:%S %p")
+                                    except Exception:
+                                        exp_disp = experiment
+
+                                item_text = (
+                                    f"Experiment: {exp_disp} - "
+                                    f"Video: {video_basename} - "
+                                    f"ID: {track_id} - "
+                                    f"Time: {time_str} - "
+                                    f"Confidence: {conf_longest:.2f} - "
+                                    f"Length: {len_high_conf:.1f}ft - "
+                                    f"Label: {label}"
+                                )
+
+                                item = QListWidgetItem(item_text)
+                                # Store everything we need to resolve the GIF
+                                item.setData(Qt.ItemDataRole.UserRole, (experiment, video_basename, track_id))
+                                # Optional: visually flag low confidence
+                                if conf_longest < 0.65:
+                                    item.setText("⚠️ " + item.text())
+                                self.historical_items.addItem(item)
+                            except Exception as e:
+                                print(f"Error creating historical row item from {csv_path}: {e}")
+
+                self.switch_detection_list(show_historical=True)
+                self.reviewing_history = True
+                self.toggle_display_mode_button.setEnabled(False)
+                self.label_combo.setEnabled(True)
+                
+                # editor mode UI
+                self.export_button.setText("Save Changes")
+                self.upload_button.setEnabled(False)
+                self.historical_label_changes.clear()
+
+            except Exception as e:
+                print(f"Error while building historical list: {e}")
+                # Fall back to current detections list
+                self.switch_detection_list(show_historical=False)
+                self.reviewing_history = False
+                self.toggle_display_mode_button.setEnabled(True)
+        else:
+            # toggling back to current run
+            self.switch_detection_list(show_historical=False)
+            self.reviewing_history = False
+            self.toggle_display_mode_button.setEnabled(True)
+            
+            # Restore normal UI
+            self.export_button.setText("Export Results")
+            self.upload_button.setEnabled(True)
+
     def go_to_home(self):
         # Clean up generated files and folders
-        if hasattr(self, 'current_output_dir') and self.current_output_dir:
-            try:
-                if os.path.exists(self.current_output_dir):
-                    shutil.rmtree(self.current_output_dir)
-                    print(f"Cleaned up output directory: {self.current_output_dir}")
-            except Exception as e:
-                print(f"Error cleaning up output directory: {str(e)}")
+        if self.cleanup_trees:
+            if hasattr(self, 'current_output_dir') and self.current_output_dir:
+                try:
+                    if os.path.exists(self.current_output_dir):
+                        shutil.rmtree(self.current_output_dir)
+                        print(f"Cleaned up output directory: {self.current_output_dir}")
+                except Exception as e:
+                    print(f"Error cleaning up output directory: {str(e)}")
         
         # Reset processing state
         self.is_processing = False
@@ -1630,14 +1870,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Clean up generated files and folders
-        if hasattr(self, 'current_output_dir') and self.current_output_dir:
-            try:
-                if os.path.exists(self.current_output_dir):
-                    shutil.rmtree(self.current_output_dir)
-                    print(f"Cleaned up output directory: {self.current_output_dir}")
-            except Exception as e:
-                print(f"Error cleaning up output directory: {str(e)}")
-        
+        if self.cleanup_trees:
+            if hasattr(self, 'current_output_dir') and self.current_output_dir:
+                try:
+                    if os.path.exists(self.current_output_dir):
+                        shutil.rmtree(self.current_output_dir)
+                        print(f"Cleaned up output directory: {self.current_output_dir}")
+                except Exception as e:
+                    print(f"Error cleaning up output directory: {str(e)}")
+            
         # Ensure threads are properly closed
         if self.processing_thread:
             self.processing_thread.quit()
@@ -1650,6 +1891,10 @@ class MainWindow(QMainWindow):
         print("Video order updated:", self.video_queue)
 
     def export_results(self):
+        if self.reviewing_history:
+            self._save_historical_label_changes()
+            return
+    
         if not self.sorted_tracks:
             QMessageBox.warning(self, "No Data", "There are no results to export.")
             return
@@ -1793,6 +2038,123 @@ class MainWindow(QMainWindow):
 
         print(f"Tracks consistency check complete. Total tracks: {len(self.tracks)}")
 
+    def _parse_historical_item_text(self, text: str):
+        """
+        Parses a historical list row like and returns dict with experiment folder name, video_basename, track_id.
+        """
+        # strip optional warning prefix
+        text = re.sub(r'^⚠️\s*', '', text).strip()
+
+        # Pull out Experiment, Video, ID (robust to spaces / dashes in video name)
+        m = re.search(
+            r'Experiment:\s*(?P<exp>.*?)\s*-\s*Video:\s*(?P<video>.*?)\s*-\s*ID:\s*(?P<id>\d+)',
+            text
+        )
+        if not m:
+            raise ValueError(f"Could not parse historical item text: {text}")
+
+        exp_disp = m.group('exp').strip()            # e.g. 2025/8/14 3:05:22 PM
+        video_basename = m.group('video').strip()    # e.g. clip.mp4
+        track_id = int(m.group('id'))
+
+        # Parse the human-readable timestamp back to datetime, then to folder format
+        # %m/%d handles unpadded numbers too.
+        try:
+            dt = datetime.strptime(exp_disp, "%Y/%m/%d %I:%M:%S %p")
+        except ValueError:
+            # As a last resort, parse with a regex (no external deps)
+            m2 = re.match(
+                r'(?P<Y>\d{4})/(?P<m>\d{1,2})/(?P<d>\d{1,2})\s+(?P<h>\d{1,2}):(?P<M>\d{2}):(?P<S>\d{2})\s+(?P<ampm>AM|PM)',
+                exp_disp
+            )
+            if not m2:
+                raise
+            Y = int(m2.group('Y'))
+            m_ = int(m2.group('m'))
+            d_ = int(m2.group('d'))
+            h  = int(m2.group('h'))
+            M  = int(m2.group('M'))
+            S  = int(m2.group('S'))
+            ampm = m2.group('ampm')
+            if ampm == 'PM' and h != 12:
+                h += 12
+            if ampm == 'AM' and h == 12:
+                h = 0
+            dt = datetime(Y, m_, d_, h, M, S)
+
+        experiment_folder = dt.strftime("%m%d%Y_%H%M%S")  # e.g. 08142025_150522
+        csv_name = f"{Path(video_basename).stem}.csv"
+
+        return {
+            "experiment": experiment_folder,
+            "video_basename": video_basename,
+            "csv_name": csv_name,
+            "track_id": track_id,
+        }
+
+    def _save_historical_label_changes(self):
+        """
+        Persist queued label changes into their corresponding historical CSV files.
+        Keys in self.historical_label_changes are (experiment, csv_name, track_id).
+        """
+        if not self.historical_label_changes:
+            QMessageBox.information(self, "No Changes", "There are no label changes to save.")
+            return
+
+        failures = []
+        updated_files = set()
+
+        for (experiment, csv_name, track_id), new_label in list(self.historical_label_changes.items()):
+            try:
+                exp_dir = Path(get_results_dir()) / experiment / "detection_results"
+                csv_path = exp_dir / csv_name
+                if not csv_path.exists():
+                    failures.append(f"Missing CSV: {csv_path}")
+                    continue
+
+                # Load, edit, save
+                df = pd.read_csv(csv_path)
+                if 'Track Id' not in df.columns or 'Label' not in df.columns:
+                    failures.append(f"CSV missing columns in {csv_path}")
+                    continue
+
+                # Update all rows matching this track id (normally one)
+                mask = df['Track Id'].astype(int) == int(track_id)
+                if mask.any():
+                    df.loc[mask, 'Label'] = new_label
+                    # Persist
+                    df.to_csv(csv_path, index=False)
+                    updated_files.add(str(csv_path))
+                    # Remove from pending
+                    del self.historical_label_changes[(experiment, csv_name, track_id)]
+                else:
+                    failures.append(f"Track {track_id} not found in {csv_path}")
+
+            except Exception as e:
+                failures.append(f"{csv_name} (Track {track_id}): {e}")
+
+        # Feedback
+        if failures and updated_files:
+            QMessageBox.warning(
+                self,
+                "Partial Save",
+                "Some changes were saved, but a few failed:\n\n" + "\n".join(failures[:10])
+                + ("\n..." if len(failures) > 10 else "")
+            )
+        elif failures:
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                "Could not save changes:\n\n" + "\n".join(failures[:15])
+                + ("\n..." if len(failures) > 15 else "")
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Changes Saved",
+                "All label changes were saved back to their CSV files."
+            )
+
 class UploadThread(QThread):
     progress_updated = pyqtSignal(int)
     upload_finished = pyqtSignal(bool, str)
@@ -1838,7 +2200,8 @@ class FramePlayer(QLabel):
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
         self.timer.setInterval(100)  # 10 FPS
-        
+        self._movie = None
+
     def set_frames(self, frames):
         self.frames = frames
         self.current_frame = 0
@@ -1899,6 +2262,69 @@ class FramePlayer(QLabel):
         
         # Show completion popup with both time and detections
         self.show_completion_popup(time_str, total_detections)
+    
+     # --- NEW: apply scaled size while keeping aspect ratio
+    def _apply_movie_scaled_size(self):
+        if self._movie:
+            img = self._movie.currentImage()
+            if not img.isNull():
+                target = self.size()
+                if not target.isValid() or target.isEmpty():
+                    # fallback if first layout hasn't run yet
+                    target = self.parent().size() if self.parent() and self.parent().size().isValid() else QSize(720, 480)
+
+                scaled = img.size().scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
+                self._movie.setScaledSize(scaled)
+
+    def set_gif(self, path: str):
+        self.timer.stop()  # pause any slideshow frames
+
+        movie = QMovie(path)
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+
+        # Determine target size (fallback if widget not laid out yet)
+        target = self.size()
+        if not target.isValid() or target.isEmpty():
+            if self.parent() and self.parent().size().isValid():
+                target = self.parent().size()
+            else:
+                target = QSize(720, 480)
+
+        # PRE-SCALE FIRST FRAME to avoid initial flash/jump
+        if movie.isValid() and movie.jumpToFrame(0):
+            img = movie.currentImage()
+            if not img.isNull():
+                scaled_size = img.size().scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
+                movie.setScaledSize(scaled_size)
+
+                # Paint first frame at final size BEFORE attaching the movie
+                first_pix = QPixmap.fromImage(img).scaled(
+                    scaled_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                )
+                self.setPixmap(first_pix)
+
+        # Attach and wire signals AFTER scaled size & prepaint
+        self._movie = movie
+
+        # Maintain aspect ratio as frames change or widget resizes
+        self._movie.frameChanged.connect(lambda _=None: self._apply_movie_scaled_size())
+
+        # Seamless loop WITHOUT setLoopCount: restart at end without recreating movie
+        def _restart():
+            # keep the same scaled size; just rewind and continue
+            self._movie.stop()
+            self._movie.jumpToFrame(0)
+            self._apply_movie_scaled_size()
+            self._movie.start()
+
+        self._movie.finished.connect(_restart)
+
+        self.setMovie(self._movie)
+        self._movie.start()
+
+    def resizeEvent(self, event):
+        self._apply_movie_scaled_size()
+        super().resizeEvent(event)
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
     progress_update = 0

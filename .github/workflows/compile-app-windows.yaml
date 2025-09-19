@@ -1,0 +1,69 @@
+name: Build Windows Executable (PyInstaller Spec)
+
+on: [push]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source (with Git LFS)
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Ensure LFS files are pulled
+        shell: pwsh
+        run: |
+          git lfs install
+          git lfs pull
+          if (Test-Path .gitmodules) {
+            git submodule update --init --recursive
+            git -c submodule.recurse=true lfs pull
+          }
+
+      - name: Verify SAM weights (not an LFS pointer)
+        shell: pwsh
+        run: |
+          $path = "model_weights/sam_vit_b_01ec64.pth"
+          if (-not (Test-Path $path)) { throw "Missing weights at $path. Did LFS fetch run?" }
+          $size = (Get-Item $path).Length
+          if ($size -lt 314572800) { throw "Weights too small ($size bytes) — likely a Git LFS pointer." }
+          Write-Host "Weights OK: $path ($size bytes)"
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller spec
+        run: pyinstaller SharkEye.spec
+
+      - name: List dist contents
+        run: |
+          dir dist
+          dir dist\SharkEye
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          $date = (Get-Date -Format "yyyyMMdd")
+          $zipName = "SharkEye_Windows_$date.zip"
+          Compress-Archive -Path dist\SharkEye\* -DestinationPath $zipName
+          Write-Host "Created $zipName"
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - name: Upload ZIP to Google Drive
+        uses: willo32/google-drive-upload-action@v1
+        with:
+          target: ${{ env.ZIP_NAME }}
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+          name: ${{ env.ZIP_NAME }}
