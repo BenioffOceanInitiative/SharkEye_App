@@ -6,3 +6,4 @@ appdirs
 segment_anything
 scikit-image
 dask
+tqdm
