@@ -4,9 +4,11 @@ import os
 import argparse
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
-                             QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, QTreeWidgetItem, QFormLayout, QHeaderView)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QMovie
+                             QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
+                             QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
+                             QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter
 from PyQt6.QtSvgWidgets import QSvgWidget
 
 import cv2
@@ -48,9 +50,6 @@ ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 # Use a constant for the model path
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
-# Use a constant for file extensions
-IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
-
 def calculate_gsd(altitude, sensor_width, focal_length, image_width):
     """Calculate Ground Sample Distance (GSD)"""
     return (altitude * sensor_width) / (focal_length * image_width)
@@ -85,119 +84,38 @@ class QComboBox(QComboBox):
 
     # def _save_previous_text(self):
     #     self.previous_text = self.currentText()
-        
-class EditDroneDialog(QDialog):
-    resolution_deleted = pyqtSignal()  # 🔔 Custom signal
-
-    def __init__(self, drone_name: str, width: str, height: str, fov_rad: float, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Edit Drone")
-        self.delete_requested = False  # Fallback if you prefer checking flags
-
-        self.drone_name_input = QLineEdit(drone_name)
-        self.resolution_width_input = QLineEdit(str(width))
-        self.resolution_height_input = QLineEdit(str(height))
-        self.fov_input = QLineEdit(f"{fov_rad:.5f}")
-
-        layout = QFormLayout(self)
-        layout.addRow("Drone Name:", self.drone_name_input)
-        layout.addRow("Resolution Width:", self.resolution_width_input)
-        layout.addRow("Resolution Height:", self.resolution_height_input)
-        layout.addRow("FOV (radians):", self.fov_input)
-
-        # === Dialog buttons
-        self.buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-
-        # === Delete resolution button
-        self.delete_button = QPushButton("Delete Resolution")
-        self.delete_button.clicked.connect(self.handle_delete)
-
-        # Add both buttons
-        button_layout = QVBoxLayout()
-        button_layout.addWidget(self.buttons)
-        button_layout.addWidget(self.delete_button)
-        layout.addRow(button_layout)
-
-        self.drone_name_input.setDisabled(True)
-
-    def get_inputs(self):
-        return (
-            self.resolution_width_input.text().strip(),
-            self.resolution_height_input.text().strip(),
-            self.fov_input.text().strip()
-        )
-
-    def handle_delete(self):
-        reply = QMessageBox.question(
-            self,
-            "Confirm Delete",
-            "Are you sure you want to delete this resolution?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            self.resolution_deleted.emit()  # 🔔 Notify parent
-            self.done(2)  # Custom dialog code for delete
-
-class NewDroneDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Add New Drone")
-
-        self.name_input = QLineEdit()
-        self.resolution_width_input = QLineEdit()
-        self.resolution_height_input = QLineEdit()
-        self.fov_input = QLineEdit()
-
-        layout = QFormLayout(self)
-        layout.addRow("Drone Name:", self.name_input)
-        layout.addRow("Resolution Width:", self.resolution_width_input)
-        layout.addRow("Resolution Height:", self.resolution_height_input)
-        layout.addRow("FOV (radians):", self.fov_input)
-
-        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
-
-    def get_inputs(self):
-        return (
-            self.name_input.text().strip(),
-            self.resolution_width_input.text().strip(),
-            self.resolution_height_input.text().strip(),
-            self.fov_input.text().strip()
-        )
 
 class SettingsDialog(QDialog):
     settings_updated = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, settings_obj):
         super().__init__()
         self.setWindowTitle("Settings")
         self.setGeometry(100, 100, 800, 500)
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.settings_obj = settings_obj
         
         main_layout = QHBoxLayout(self)
 
         # Left: category list
         self.category_list = QListWidget()
         self.category_list.addItem("Drone Settings")
-        self.category_list.addItem("Historical Experiments")
+        self.category_list.addItem("Past Experiments")
+        self.category_list.addItem("Confidence Threshold")
+        self.category_list.addItem("Cloud Features")
         self.category_list.setFixedWidth(150)
         self.category_list.currentRowChanged.connect(self.switch_category)
         main_layout.addWidget(self.category_list)
 
-        self.historical_settings_page = HistoricalExperimentsPage()
-
         # Right: stacked settings pages
         self.pages = QStackedWidget()
         self.drone_settings_page = DroneSettingsPage(self.settings_obj, self)
+        self.historical_settings_page = HistoricalExperimentsPage()
+        self.confidence_settings_page = ConfidencePage(self.settings_obj)
+        self.cloud_feature_page = CloudUploadPage(self.settings_obj)
         self.pages.addWidget(self.drone_settings_page)
         self.pages.addWidget(self.historical_settings_page)
+        self.pages.addWidget(self.confidence_settings_page)
+        self.pages.addWidget(self.cloud_feature_page)
 
         main_layout.addWidget(self.pages)
         self.setLayout(main_layout)
@@ -212,54 +130,6 @@ class SettingsDialog(QDialog):
         self.settings_updated.emit()  # 🚀 Notify parent to refresh drone list
         super().closeEvent(event)
 
-class HistoricalExperimentsPage(QWidget):
-    """Minimal settings page: single button to remove all previous experiments."""
-    results_cleared = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-
-        info = QLabel("Remove all previous experiment results.")
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        self.clear_all_button = QPushButton("Clear All Previous Results")
-        self.clear_all_button.setStyleSheet("background-color: #d9534f; color: white;")
-        self.clear_all_button.clicked.connect(self.clear_all_results)
-        layout.addWidget(self.clear_all_button)
-
-        layout.addStretch()
-
-    def clear_all_results(self):
-        root = Path(get_results_dir())
-        if not root.exists():
-            QMessageBox.information(self, "Nothing to Clear", "No historical results directory found.")
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm Clear All",
-            "This will permanently delete ALL historical experiment results. This action cannot be undone.\n\nDo you want to continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        removed = 0
-        for child in root.iterdir():
-            try:
-                if child.is_dir():
-                    # remove directory (only within results dir)
-                    shutil.rmtree(child)
-                    removed += 1
-            except Exception:
-                # ignore failures for individual items
-                pass
-
-        QMessageBox.information(self, "Cleared", f"Removed {removed} experiment folder(s).")
-        self.results_cleared.emit()
-        
 class DroneSettingsPage(QWidget):
     def __init__(self, settings_obj, parent=None):
         super().__init__(parent)
@@ -279,7 +149,7 @@ class DroneSettingsPage(QWidget):
         self.edit_button.setEnabled(False)
         self.edit_button.clicked.connect(self.edit_button_state)
 
-        self.new_drone_button = QPushButton("Add New Drone")
+        self.new_drone_button = QPushButton("Add New Drone") 
         self.new_drone_button.clicked.connect(self.add_new_drone)
 
         self.delete_button = QPushButton("Delete Drone")
@@ -475,14 +345,504 @@ class DroneSettingsPage(QWidget):
     def save_settings(self):
         self.settings_obj.setValue("drone_settings", json.dumps(self.settings))
         self.populate_tree()
+
+class EditDroneDialog(QDialog):
+    resolution_deleted = pyqtSignal()  # 🔔 Custom signal
+
+    def __init__(self, drone_name: str, width: str, height: str, fov_rad: float, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Drone")
+        self.delete_requested = False  # Fallback if you prefer checking flags
+
+        self.drone_name_input = QLineEdit(drone_name)
+        self.resolution_width_input = QLineEdit(str(width))
+        self.resolution_height_input = QLineEdit(str(height))
+        self.fov_input = QLineEdit(f"{fov_rad:.5f}")
+
+        layout = QFormLayout(self)
+        layout.addRow("Drone Name:", self.drone_name_input)
+        layout.addRow("Resolution Width:", self.resolution_width_input)
+        layout.addRow("Resolution Height:", self.resolution_height_input)
+        layout.addRow("FOV (radians):", self.fov_input)
+
+        # === Dialog buttons
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        # === Delete resolution button
+        self.delete_button = QPushButton("Delete Resolution")
+        self.delete_button.clicked.connect(self.handle_delete)
+
+        # Add both buttons
+        button_layout = QVBoxLayout()
+        button_layout.addWidget(self.buttons)
+        button_layout.addWidget(self.delete_button)
+        layout.addRow(button_layout)
+
+        self.drone_name_input.setDisabled(True)
+
+    def get_inputs(self):
+        return (
+            self.resolution_width_input.text().strip(),
+            self.resolution_height_input.text().strip(),
+            self.fov_input.text().strip()
+        )
+
+    def handle_delete(self):
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            "Are you sure you want to delete this resolution?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.resolution_deleted.emit()  # 🔔 Notify parent
+            self.done(2)  # Custom dialog code for delete
+
+class NewDroneDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add New Drone")
+
+        self.name_input = QLineEdit()
+        self.resolution_width_input = QLineEdit()
+        self.resolution_height_input = QLineEdit()
+        self.fov_input = QLineEdit()
+
+        layout = QFormLayout(self)
+        layout.addRow("Drone Name:", self.name_input)
+        layout.addRow("Resolution Width:", self.resolution_width_input)
+        layout.addRow("Resolution Height:", self.resolution_height_input)
+        layout.addRow("FOV (radians):", self.fov_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def get_inputs(self):
+        return (
+            self.name_input.text().strip(),
+            self.resolution_width_input.text().strip(),
+            self.resolution_height_input.text().strip(),
+            self.fov_input.text().strip()
+        )
+
+class HistoricalExperimentsPage(QWidget):
+    """Minimal settings page: single button to remove all previous experiments."""
+    results_cleared = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        if type(self) == HistoricalExperimentsPage:
+            # Setup Layout
+            layout = QVBoxLayout(self)
+
+            self.checked = set()
+            self.export_sharks_only = QCheckBox("Export only sharks to CSV")
+            self.historical_experiments_settings = QTableWidget()
+            self.historical_experiments_settings.setColumnCount(2)
+            self.historical_experiments_settings.verticalHeader().setVisible(False)
+            self.historical_experiments_settings.horizontalHeader().setVisible(False)
+            self.historical_experiments_settings.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+
+            # Allow the table to expand vertically to fill available space
+            self.historical_experiments_settings.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.historical_experiments_settings.setMinimumHeight(200)
+
+            self.populate_experiment_table()
+
+            experiment_table = QVBoxLayout()
+            experiment_table.addWidget(QLabel("Past Experiments"))
+            experiment_table.addWidget(self.historical_experiments_settings)
+            experiment_table.addWidget(self.export_sharks_only)
+
+            experiment_buttons = QHBoxLayout()
+            experiment_buttons.setContentsMargins(0, 0, 0, 0)
+            experiment_buttons.setSpacing(8)
+
+            export_selected = QPushButton("Export Selected Results")
+            deleted_selected = QPushButton("Delete Selected Results")
+            # upload_selected = QPushButton("Upload Selected Results to Cloud")
+            select_all = QPushButton("Select All")
+
+            # Make buttons expand horizontally and share space equally
+            for btn in (export_selected, deleted_selected, select_all):
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+            export_selected.clicked.connect(self.on_export)
+            deleted_selected.clicked.connect(self.on_delete)
+            # upload_selected.clicked.connect(self.on_upload)
+            select_all.clicked.connect(self.on_select_all)
+
+            experiment_buttons.addWidget(select_all)
+            experiment_buttons.addWidget(export_selected)
+            experiment_buttons.addWidget(deleted_selected)
+            # experiment_buttons.addWidget(upload_selected)
+
+            experiment_table.addLayout(experiment_buttons)
+
+            layout.addLayout(experiment_table)
+            # Give the experiment_table (index 0) a stretch so the table area grows vertically
+            layout.setStretch(0, 1)
+            layout.addStretch(0)
+    
+    def find_checked_boxes(self):
+        checked = set()
+        for r in range(self.historical_experiments_settings.rowCount()):
+            if self.historical_experiments_settings.cellWidget(r, 0).isChecked():
+                checked.add(self.historical_experiments_settings.item(r, 1).data(Qt.ItemDataRole.UserRole))
+        return checked
+            
+    def on_export(self):
+        selected = self.find_checked_boxes()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Please select at least one experiment to export.")
+            return
+
+        combined_dfs = []
+        failures = []
+        found_any = False
+
+        for exp in selected:
+            try:
+                exp_path = Path(exp) if not isinstance(exp, Path) else exp
+                det_dir = exp_path / "detection_results"
+                if not det_dir.exists() or not det_dir.is_dir():
+                    continue
+
+                for csv_file in sorted(det_dir.glob("*.csv")):
+                    try:
+                        df = pd.read_csv(csv_file)
+                        # Add provenance columns so user knows origin
+                        df.insert(0, "experiment_folder", exp_path.name)
+                        df.insert(1, "csv_source", csv_file.name)
+                        combined_dfs.append(df)
+                        found_any = True
+                    except Exception as e:
+                        failures.append(f"Failed to read {csv_file}: {e}")
+            except Exception as e:
+                failures.append(f"Error processing {exp}: {e}")
+
+        if not found_any:
+            QMessageBox.information(self, "No CSVs Found", "No CSV files were found in the selected experiments' detection_results folders.")
+            return
+
+        try:
+            final_df = pd.concat(combined_dfs, ignore_index=True)
+            if self.export_sharks_only.isChecked():
+                    final_df = final_df.query('Label == "Shark"')
+        except Exception as e:
+            QMessageBox.critical(self, "Combine Error", f"Failed to combine CSVs: {e}")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Combined CSV", "", "CSV Files (*.csv)")
+        if not save_path:
+            return
+
+        try:
+            final_df.to_csv(save_path, index=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save combined CSV: {e}")
+            return
+
+        msg = f"Combined CSV saved to:\n{save_path}"
+        if failures:
+            msg += "\n\nSome files failed to be processed. See console for details."
+        QMessageBox.information(self, "Export Complete", msg)
         
+    
+    def on_delete(self):
+        selected = self.find_checked_boxes()
+        if not selected:
+            QMessageBox.information(self, "No Selection", "Please select at least one experiment to delete.")
+            return
+        try:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Deletion",
+                f"This will permanently delete the results of {len(selected)} historical experiment{'s' * (len(selected) > 1)}. This action cannot be undone.\n\nDo you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            removed = 0
+            for exp in selected:
+                shutil.rmtree(exp)
+                removed += 1
+            QMessageBox.information(self, "Experiments Deleted", f"{removed} experiment{'s' * (removed > 1)} deleted.")
+            
+            # Refresh Experiment Table
+            self.populate_experiment_table()
+        except Exception as e:
+            QMessageBox.critical(self, "Deletion Error", f"Failed to delete some experiment: {e}")
+            return
+        
+    def on_select_all(self):
+        count_checked = len(self.find_checked_boxes())
+        at_least_one_checked = (count_checked > 0 and count_checked < self.historical_experiments_settings.rowCount())
+            
+        for r in range(self.historical_experiments_settings.rowCount()):
+            self.historical_experiments_settings.cellWidget(r, 0).setChecked(
+                (not at_least_one_checked) * (abs(self.historical_experiments_settings.cellWidget(r, 0).isChecked() - 1))
+            )
+    
+    def on_upload(self):
+        checked = self.find_checked_boxes()
+        api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
+        for experiment_dir in checked: 
+            try:
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, 'w') as zipf:
+                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
+                        folder_path = os.path.join(experiment_dir, folder)
+                        if os.path.exists(folder_path):
+                            for root, _, files in os.walk(folder_path):
+                                for file in files:
+                                    file_path = os.path.join(root, file)
+                                    arcname = os.path.relpath(file_path, experiment_dir)
+                                    zipf.write(file_path, arcname)
+
+                buffer.seek(0)
+                files = {'file': ('upload.zip', buffer, 'application/zip')}
+                response = requests.post(api_url, files=files)
+                response.raise_for_status()
+                upload_status, message = "Upload Finished", "Folder uploaded successfully"
+            except requests.RequestException as e:
+                upload_status, message = "Upload Error", "Failed to Upload folder to cloud storage: {}".format(str(e))
+            except Exception as e:
+                upload_status, message = "Upload Error", "An unexpected error occurred: {}".format(str(e))
+            QMessageBox.information(self, upload_status, message)
+
+
+    def populate_experiment_table(self):
+        experiments_root = get_results_dir()
+        # newest-first
+        
+        self.historical_experiments_settings.clearContents()
+        self.historical_experiments_settings.setRowCount(0)
+
+        for experiment in sorted(os.listdir(experiments_root), reverse=True):
+            if validate_experiment_date(experiment):
+                # First Column: Checkbox
+                checkbox = QCheckBox()
+                checkbox.setStyleSheet("margin-left:9%; margin-right:2.5%;")
+
+                # Second Column: Experiments
+                row_position = self.historical_experiments_settings.rowCount()
+                exp_dir = Path(experiments_root) / experiment
+                exp_date = format_experiment_date(experiment, to_human=True)
+                exp_disp = exp_date + " " + add_experiment_info(exp_dir)
+
+                item = QTableWidgetItem(exp_disp)
+                item.setData(Qt.ItemDataRole.UserRole, exp_dir)
+                self.historical_experiments_settings.insertRow(row_position)
+                self.historical_experiments_settings.setItem(row_position, 1, item)
+                self.historical_experiments_settings.setCellWidget(row_position, 0, checkbox)
+                
+        
+        self.historical_experiments_settings.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.historical_experiments_settings.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.historical_experiments_settings.setShowGrid(False)
+        # self.historical_experiments_settings.setStyleSheet("""
+        #     QTableWidget {
+        #         border: none;
+        #         background-color: #fafafa;
+        #         alternate-background-color: #f0f0f0;
+        #     }
+        #     QHeaderView::section {
+        #         background-color: #e6e6e6;
+        #         border: none;
+        #         padding: 4px;
+        #         font-weight: bold;
+        #     }
+        # """)
+
+    def clear_all_results(self):
+        root = Path(get_results_dir())
+        if not root.exists():
+            QMessageBox.information(self, "Nothing to Clear", "No historical results directory found.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Clear All",
+            "This will permanently delete ALL historical experiment results. This action cannot be undone.\n\nDo you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        removed = 0
+        for child in root.iterdir():
+            try:
+                if child.is_dir():
+                    # remove directory (only within results dir)
+                    shutil.rmtree(child)
+                    removed += 1
+            except Exception:
+                # ignore failures for individual items
+                pass
+
+        QMessageBox.information(self, "Cleared", f"Removed {removed} experiment folder(s).")
+        self.results_cleared.emit()
+
+class ConfidencePage(QWidget):
+    def __init__(self, settings_obj, parent=None):
+        super().__init__(parent)
+        self.settings_obj = settings_obj
+        self.confidence_threshold = self.settings_obj.value("confidence_threshold")
+        self.min_frames = self.settings_obj.value("min_frames")
+
+        form_layout = QGridLayout(self)
+
+        # Tighten spacing and margins
+        form_layout.setContentsMargins(10, 10, 10, 10)  # (left, top, right, bottom)
+        form_layout.setVerticalSpacing(4)
+        form_layout.setHorizontalSpacing(6)
+        form_layout.setAlignment(Qt.AlignmentFlag.AlignTop)  # Align the layout to the top
+
+        # Input fields
+        self.confidence_input = QLineEdit(self.confidence_threshold)
+        self.confidence_input.setValidator(QDoubleValidator(0, 1, 2))
+
+        self.min_frames_input = QLineEdit(str(self.min_frames))
+        self.min_frames_input.setValidator(QIntValidator(1, 10000))
+
+        # Buttons
+        save_btn = QPushButton("Save")
+        reset_btn = QPushButton("Reset to Default")
+
+        save_btn.clicked.connect(self.on_save)
+        reset_btn.clicked.connect(self.on_reset)
+
+        # Add widgets
+        form_layout.addWidget(QLabel("Enter Confidence Threshold:"), 0, 0)
+        form_layout.addWidget(self.confidence_input, 0, 1)
+        form_layout.addWidget(QLabel("Minimum Frames:"), 1, 0)
+        form_layout.addWidget(self.min_frames_input, 1, 1)
+        form_layout.addWidget(reset_btn, 2, 0)
+        form_layout.addWidget(save_btn, 2, 1)
+
+        # Optional: shrink to fit contents
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+    def on_save(self):
+        conf_text = self.confidence_input.text().strip()
+        min_text = self.min_frames_input.text().strip()
+
+        # Validate confidence
+        try:
+            conf_val = float(conf_text)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a numeric confidence value between 0 and 1.")
+            return
+        if conf_val < 0 or conf_val > 1:
+            QMessageBox.warning(self, "Invalid Range", "Confidence must be between 0 and 1.")
+            return
+
+        # Validate min tracks
+        try:
+            min_val = int(min_text)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter an integer for Minimum Frames.")
+            return
+        if min_val < 1:
+            QMessageBox.warning(self, "Invalid Range", "Minimum Frames must be >= 1.")
+            return
+
+        self.settings_obj.setValue("confidence_threshold", f"{conf_val:.2f}")
+        self.settings_obj.setValue("min_frames", str(min_val))
+        QMessageBox.information(self, "Saved", f"Settings saved: confidence={conf_val:.2f}, min_frames={min_val}")
+
+    def on_reset(self):
+        self.settings_obj.setValue("confidence_threshold", "0.40")
+        self.settings_obj.setValue("min_frames", "5")
+        self.confidence_input.setText(self.settings_obj.value("confidence_threshold"))
+        self.min_frames_input.setText(self.settings_obj.value("min_frames"))
+        QMessageBox.information(self, "Reset", "Confidence threshold reset to 0.40 and Minimum Frames reset to 5")
+
+class CloudUploadPage(HistoricalExperimentsPage):
+    """ Page containing settings related to uploading experiments to Google Cloud Bucket"""
+    def __init__(self, settings_obj, parent=None):
+        super().__init__()
+        self.settings_obj = settings_obj
+        # Convert setting string to a boolean
+        enable_auto_upload_bool = str(self.settings_obj.value("enable_auto_upload")).lower() == "true"
+
+        # --- Layout setup ---
+        layout = QVBoxLayout()
+
+        self.checked = set()
+
+        # --- Auto-upload checkbox ---
+        self.auto_upload_checkbox = QCheckBox("Enable automatic Cloud upload when saving")
+        self.auto_upload_checkbox.setChecked(enable_auto_upload_bool)
+
+        # Save setting when checkbox is toggled
+        self.auto_upload_checkbox.stateChanged.connect(
+            lambda state: self.settings_obj.setValue("enable_auto_upload", str(bool(state)))
+        )
+
+        # --- Historical experiments table ---
+        self.historical_experiments_settings = QTableWidget()
+        self.historical_experiments_settings.setColumnCount(2)
+        self.historical_experiments_settings.verticalHeader().setVisible(False)
+        self.historical_experiments_settings.horizontalHeader().setVisible(False)
+        self.historical_experiments_settings.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+
+        # Allow the table to expand vertically
+        self.historical_experiments_settings.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.historical_experiments_settings.setMinimumHeight(200)
+
+        self.populate_experiment_table()
+
+        # --- Experiment layout ---
+        experiment_table = QVBoxLayout()
+        experiment_table.addWidget(QLabel("Past Experiments"))
+        experiment_table.addWidget(self.historical_experiments_settings)
+        experiment_table.addWidget(self.auto_upload_checkbox)
+
+        # --- Buttons ---
+        experiment_buttons = QHBoxLayout()
+        experiment_buttons.setContentsMargins(0, 0, 0, 0)
+        experiment_buttons.setSpacing(8)
+
+        upload_selected = QPushButton("Upload Selected Results to Cloud")
+        select_all = QPushButton("Select All")
+
+        upload_selected.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        select_all.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        upload_selected.clicked.connect(self.on_upload)
+        select_all.clicked.connect(self.on_select_all)
+
+        experiment_buttons.addWidget(select_all)
+        experiment_buttons.addWidget(upload_selected)
+
+        experiment_table.addLayout(experiment_buttons)
+
+        # --- Final layout assembly ---
+        layout.addLayout(experiment_table)
+        layout.setStretch(0, 1)
+        layout.addStretch(0)
+        self.setLayout(layout)
+
 class CustomTracker:
-    def __init__(self, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
+    def __init__(self, distance_threshold=250):
+        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        
         self.tracks = {}
         self.next_id = 1
         self.distance_threshold = distance_threshold
-        self.min_frames = min_frames
-        self.confidence_threshold = confidence_threshold
+        self.min_frames = int(self.settings_obj.value("min_frames"))
+        self.confidence_threshold = float(self.settings_obj.value("confidence_threshold"))
         self.unique_sharks = 0
         self.last_reported_sharks = 0
         self.fov_radians = 1.274090354
@@ -615,13 +975,9 @@ class CustomTracker:
         images_saved = 0
         
         for track_id, track in self.tracks.items():
+            print("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
-            
-            if num_frames >= self.min_frames and avg_confidence > self.confidence_threshold:
-                pass
-            else:
-                print('Track detected below threshold')
 
             longest_frame = track['longest_frame']
             longest_timestamp = track['longest_timestamp']
@@ -636,6 +992,7 @@ class CustomTracker:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
+                print("Running Segmentation")
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length,
                                                                          original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
                                                                          drone_altitude=self.drone_altitude,
@@ -706,25 +1063,16 @@ class VideoProcessingWorker(QObject):
 
     def __init__(self, video_path, model, output_dir, drone_type, altitude):
         super().__init__()
+        # Read settings 
+        self.settings_obj = QSettings("BOSL", "SharkEye_App")
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.drone_type = drone_type
         self.altitude = altitude
+        self.detection_threshold = float(self.settings_obj.value("confidence_threshold"))
+        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
         
-        # Read settings 
-        settings = QSettings("BOSL", "SharkEye_App")
-        value = settings.value("drone_settings")
-        if not value:
-            # seed safe defaults (match your SettingsDialog defaults)
-            value = json.dumps({
-                "Mavic 2 Pro": {"Resolution": {"(2688, 1512)": math.radians(73)}},
-                "Air 2S": {"Resolution": {"(2688, 1512)": math.radians(63.5),
-                                        "(5472, 3078)": math.radians(82.9)}}
-            })
-            settings.setValue("drone_settings", value)
-        self.settings = json.loads(value)
-
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -734,7 +1082,7 @@ class VideoProcessingWorker(QObject):
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        custom_tracker.fov_radians = self.settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
+        custom_tracker.fov_radians = self.drone_settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
@@ -749,7 +1097,7 @@ class VideoProcessingWorker(QObject):
         consecutive_empty_frames = 0
         max_empty_frames = 1 * fps
         
-        self.detection_threshold = 0.4
+        # self.detection_threshold = 0.4
 
         frame_num = 0
         while frame_num < total_frames:
@@ -772,6 +1120,12 @@ class VideoProcessingWorker(QObject):
                 detections = [(float(x), float(y), float(w), float(h), confidence) 
                                for (x, y, w, h), confidence in zip(boxes, confidences) 
                                if confidence > self.detection_threshold]
+                
+            #     passes_requirements = (num_frames >= self.min_frames) and (avg_confidence > self.confidence_threshold)
+            # if not passes_requirements:
+            #     print(f"Track detected below minimum requirements: num_frames = {num_frames}, avg_confidence = {avg_confidence}")
+            #     continue                
+            # print("This should only appear for valid tracks")
 
             has_detection = bool(detections)
             if has_detection:
@@ -835,8 +1189,9 @@ class VideoProcessingWorker(QObject):
             csv_writer.writeheader()
 
             for track_id, track in tracks.items():
-                meets_thresholds = (len(track['confidences']) >= 10 and 
-                                    np.mean(track['confidences']) > 0.4)
+                # meets_thresholds = (len(track['confidences']) >= 10 and 
+                #                     np.mean(track['confidences']) > 0.4)
+                meets_thresholds = True
                 
                 csv_writer.writerow({
                     'video_name': self.video_path,
@@ -913,7 +1268,7 @@ def add_experiment_info(experiment_path: Path):
 
     num_videos = len(video_names)
     num_sharks = len(gif_files)
-    return f"({num_videos} video{'s' if num_videos != 1 else ''}, {num_sharks} shark{'s' if num_sharks != 1 else ''})"
+    return f"({num_videos} video{'s' if num_videos != 1 else ''}, {num_sharks} detection{'s' if num_sharks != 1 else ''})"
 
 def format_experiment_date(date_str, to_human=True):
     """
@@ -960,12 +1315,14 @@ def format_experiment_date(date_str, to_human=True):
 
 class MainWindow(QMainWindow):
     upload_finished = pyqtSignal(bool, str)  # (success, message)
-    
+    resized = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("SharkEye")
         self.setGeometry(100, 100, 1000, 800)
 
+        self.initialize_settings()
         self.init_ui()
         self.init_attributes()  
         self.setup_model()
@@ -974,25 +1331,40 @@ class MainWindow(QMainWindow):
         # Connect the upload_finished signal
         self.upload_finished.connect(self.on_upload_finished)
     
+    def initialize_settings(self):
+        # Drone Settings
+        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        default_drones = {
+                "Mavic 2 Pro": {
+                    "Resolution": {
+                        "(2688, 1512)": math.radians(73)
+                    }
+                },
+                "Air 2S": {
+                    "Resolution": {
+                        "(2688, 1512)": math.radians(63.5),
+                        "(5472, 3078)": math.radians(82.9)
+                    }
+                }
+            }
+
+        if not self.settings_obj.value("drone_settings"):
+            self.settings_obj.setValue("drone_settings", json.dumps(default_drones))
+        
+        # Confidence
+        if not self.settings_obj.value("confidence_threshold"):
+            self.settings_obj.setValue("confidence_threshold", ".40")
+        if not self.settings_obj.value("min_frames"):
+            self.settings_obj.setValue("min_frames", "5")
+
+        # Cloud Settings
+        if not self.settings_obj.value("enable_auto_upload"):
+            self.settings_obj.setValue("enable_auto_upload", "false")
+            
     def load_drone_settings(self):
-        settings = QSettings("BOSL", "SharkEye_App")
-        settings_dialog = SettingsDialog()
+        settings_dialog = SettingsDialog(self.settings_obj)
         settings_dialog.settings_updated.connect(self.update_available_drones)
         settings_dialog.exec()
-
-    def save_setting(self, key, value):
-        self.settings.setValue(key, value)
-    
-    def load_setting(self, key, default_value=None):
-        return self.settings.value(key, default_value)
-    
-    def save_complex_setting(self, key, value):
-        serialized_value = json.dumps(value)
-        self.settings.setValue(key, serialized_value)
-    
-    def load_complex_setting(self, key, default_value=None):
-        value = self.settings.value(key, default_value)
-        return json.loads(value) if value else default_value
         
     def init_attributes(self):
         self.is_processing = False
@@ -1027,7 +1399,7 @@ class MainWindow(QMainWindow):
         self.layout = QVBoxLayout(self.central_widget)
         self.layout.setContentsMargins(0, 0, 0, 0)
 
-        self.setup_banner()
+        self.setup_home_banner()
         self.setup_content_widget()
         self.setup_stack_widget()
         self.setup_home_page()
@@ -1044,7 +1416,7 @@ class MainWindow(QMainWindow):
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-    def setup_banner(self):
+    def setup_home_banner(self):
         # Banner container with left/right buttons and centered logo
         banner_widget = QWidget()
         banner_widget.setStyleSheet("background-color: #1d2633;")
@@ -1053,7 +1425,8 @@ class MainWindow(QMainWindow):
         banner_layout.setSpacing(8)
 
         # Left button (exposed as attribute for later connections)
-        self.banner_left_button = QPushButton("☰")
+        self.banner_left_button = QPushButton()
+        self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
@@ -1063,9 +1436,6 @@ class MainWindow(QMainWindow):
         
         self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
         self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
-        self.banner_left_button.clicked.connect(self.setup_review_dropdown)
-        self.banner_left_button.clicked.connect(self.render_historical_experiments) 
-
 
         # Center logo
         logo_label = QLabel()
@@ -1077,7 +1447,8 @@ class MainWindow(QMainWindow):
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Right button (exposed as attribute for later connections)
-        self.banner_right_button = QPushButton("⚙️")
+        self.banner_right_button = QPushButton()
+        self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
@@ -1098,6 +1469,49 @@ class MainWindow(QMainWindow):
 
         # keep reference for tests/other code
         self.banner = banner_widget
+    
+    def toggle_banner_buttons(self, review=True):
+        self.banner_left_button.clicked.disconnect()
+        self.banner_right_button.clicked.disconnect()
+        self.banner_left_button.setEnabled(True)
+        self.banner_right_button.setEnabled(True)
+        self.banner_left_button.show()
+        self.banner_right_button.show()
+        
+        if review == True:
+            # Review Window
+            self.banner_left_button.setText("")
+            self.banner_left_button.setIcon(QIcon("assets/images/house-fill.svg"))
+            self.banner_left_button.setToolTip("Go to Home")
+            self.banner_left_button.clicked.connect(self.go_to_home)
+            
+            if self.review_dropdown.count() == 0:
+                self.banner_right_button.setEnabled(False)
+                # self.banner_right_button.hide()
+
+            self.banner_right_button.setText("")
+            self.banner_right_button.setIcon(QIcon("assets/images/pencil-fill.svg"))
+            self.banner_right_button.setToolTip("Edit Results")
+            self.banner_right_button.clicked.connect(self.toggle_edit_state)
+        else:
+            # Home Screen
+            self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
+            self.banner_left_button.setFlat(True)
+            self.banner_left_button.setStyleSheet(
+                "color: white; background: transparent; border: none; font-size: 18px;"
+            )
+            self.banner_left_button.setToolTip("Previous Experiments")
+            
+            self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
+            self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
+
+            self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+            self.banner_right_button.clicked.connect(self.load_drone_settings)
+            self.banner_right_button.setFlat(True)
+            self.banner_right_button.setStyleSheet(
+                "color: white; background: transparent; border: none; font-size: 18px;"
+            )
+            self.banner_right_button.setToolTip("Settings")
 
     def setup_content_widget(self):
         # Create a container for the rest of the content
@@ -1119,9 +1533,7 @@ class MainWindow(QMainWindow):
         self.stack_widget.addWidget(self.review_widget)
     
     def update_available_drones(self):
-        settings = QSettings("BOSL", "SharkEye_App")
-        value = settings.value("drone_settings")
-        
+        value = self.settings_obj.value("drone_settings")
         if not value:
             return  # No drones saved yet
 
@@ -1158,6 +1570,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(remove_layout)
 
         self.video_list = QTableWidget()
+        self.video_list.setShowGrid(False)
         self.video_list.setMaximumHeight(250)
         self.video_list.verticalHeader().setVisible(False)
         self.video_list.horizontalHeader().setVisible(False)
@@ -1165,7 +1578,6 @@ class MainWindow(QMainWindow):
         
         # Set table headers
         self.video_list.setColumnCount(2)
-        # self.video_list.setHorizontalHeaderLabels(["Video",  ""])
         
         # self.video_list.rowCountChanged.connect(self.update_remove_buttons)
         self.video_list.updateInternalOrder = self.update_video_order
@@ -1177,8 +1589,6 @@ class MainWindow(QMainWindow):
         # remove_video_button = QPushButton() 
         # self.video_list.setCellWidget(row_position, 2, combo)
         # self.historical_items.setItem(row_position, col, cell)
-        
-        QTableWidgetItem() 
 
         # Select Drone and Altitude Dropdown
         form_layout = QGridLayout()
@@ -1274,9 +1684,7 @@ class MainWindow(QMainWindow):
         self.progress_display_dialog.show()
         
     def get_valid_resolutions_for_drone(self, drone_name):
-        settings = QSettings("BOSL", "SharkEye_App")
-        value = settings.value("drone_settings")
-        
+        value = self.settings_obj.value("drone_settings")
         if not value:
             return []
 
@@ -1543,8 +1951,11 @@ class MainWindow(QMainWindow):
                 self.video_list.setItem(row_position, 0, item)
                 # Stretch the video column to fill available space
                 self.video_list.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+                self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
-                delete_btn = QPushButton("Delete")
+                delete_btn = QPushButton("")
+                delete_btn.setIcon(QIcon("assets/images/x-lg.svg"))
+                delete_btn.setStyleSheet("background: transparent; border: none;")
                 def delete_row():
                     button = self.sender()
                     if button:
@@ -1616,9 +2027,11 @@ class MainWindow(QMainWindow):
             # Automatically show review widget after processing
             self.stack_widget.setCurrentWidget(self.review_widget)
             # Display most recent detections
+            self.toggle_banner_buttons()
             self.switch_detection_list(show_historical=True)
             self.setup_review_dropdown()
             self.render_historical_experiments()
+            self.toggle_edit_state(set_state=True)
     
     def save_detection_gif(self, output_dir):
         print("Saving Track results as GIFs")
@@ -1692,13 +2105,10 @@ class MainWindow(QMainWindow):
     def show_no_detections_message(self):
         self.frame_player.clear()
         self.frame_player.setText("No detections available")
-        # self.prev_button.setEnabled(False)
-        # self.next_button.setEnabled(False)
-        # self.label_combo.setEnabled(False)
 
     def update_detection_list(self):
         # Use a table format for the detection list, matching the historical items table
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label']
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
         self.detection_list.setRowCount(0)
         self.detection_list.clearContents()
         self.detection_list.setHorizontalHeaderLabels(labels)
@@ -1735,7 +2145,7 @@ class MainWindow(QMainWindow):
                 for col, value in enumerate(values):
                     if col == 6:
                         combo = QComboBox()
-                        combo.addItems(["Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Other"])
+                        combo.addItems(["Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Duplicate", "None", "Other"])
                         combo.setCurrentText(label)
                         combo.currentIndexChanged.connect(lambda _, idx=index, c=combo: self._update_label_from_table(idx, c))
                         self.detection_list.setCellWidget(row_position, col, combo)
@@ -1822,6 +2232,7 @@ class MainWindow(QMainWindow):
                 print(f"Deleted experiment directory: {exp_dir}")
                 self.sort_tracks()
                 self.setup_review_dropdown()
+                self.render_historical_experiments()
                 return
             except Exception as e:
                 print(f"Error deleting experiment directory {exp_dir}: {e}")
@@ -1976,11 +2387,28 @@ class MainWindow(QMainWindow):
 
     def go_to_review_history(self):
         self.stack_widget.setCurrentWidget(self.review_widget)
+        self.setup_review_dropdown()
+        self.render_historical_experiments()
+        self.toggle_banner_buttons(review=True)        
+
+    def toggle_edit_state(self, set_state=None):
+        if set_state:
+            self.save_changes_button.setEnabled(set_state)
+            # self.delete_track_button.setEnabled(set_state)
+            for r in range(self.historical_items.rowCount()):
+                self.historical_items.cellWidget(r, 6).setEnabled(set_state)
+                self.historical_items.cellWidget(r, 7).setEnabled(set_state)
+        else:
+            self.save_changes_button.setEnabled(not self.save_changes_button.isEnabled())
+            # self.delete_track_button.setEnabled(not self.delete_track_button.isEnabled())
+            for r in range(self.historical_items.rowCount()):
+                self.historical_items.cellWidget(r, 6).setEnabled(not self.historical_items.cellWidget(r, 6).isEnabled())
+                self.historical_items.cellWidget(r, 7).setEnabled(not self.historical_items.cellWidget(r, 7).isEnabled())
 
     def toggle_review_buttons(self, enable):
         self.historical_items.setEnabled(enable)
         self.save_changes_button.setEnabled(enable)
-        self.delete_track_button.setEnabled(enable)
+        # self.delete_track_button.setEnabled(enable)
         self.toggle_display_mode_button.setEnabled(enable)
         
     def toggle_display_mode(self):
@@ -2006,7 +2434,8 @@ class MainWindow(QMainWindow):
                     q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
                     pixmap = QPixmap.fromImage(q_image)
                     scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                    self.frame_player.setPixmap(scaled_pixmap)
+                    self.frame_player.set_static_pixmap(scaled_pixmap)
+                    self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFinOutline.svg"))
                 else:
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("Alert")
@@ -2049,13 +2478,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.review_dropdown)
         
         # Frame player container with horizontal centering
+        # frame_player_container = QGridLayout()
         frame_player_container = QVBoxLayout()
-        frame_player_container.addStretch()  # Add stretch before frame player
+        # frame_player_container.addStretch()  # Add stretch before frame player
         
         self.frame_player = FramePlayer()
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frame_player.setMinimumSize(int(.93 * 720), int(.93 * 480))
+        # self.frame_player.setA
+        self.frame_player.setMinimumSize(int(720), int(480))
+        #self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         frame_player_container.addWidget(self.frame_player)
+        # frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Add warning when detection falls before 
         self.low_confidence_warning = QLabel("⚠️ Warning: Low confidence in this detection. Please double check the image to make sure the boxed area is a shark!")
@@ -2064,17 +2497,40 @@ class MainWindow(QMainWindow):
         self.low_confidence_warning.setVisible(False)
         frame_player_container.addWidget(self.low_confidence_warning)
 
-        frame_player_container.addStretch()  # Add stretch after frame player
+        # frame_player_container.addStretch()  # Add stretch after frame player
         layout.addLayout(frame_player_container)
+        # layout.addWidget(self.low_confidence_warning)
 
         # Button to toggle display to show gif/segmentation mask
-        display_mode_layout = QHBoxLayout()
-        self.toggle_display_mode_button = QPushButton("Toggle Mask/Bounding Box Display")
+        self.toggle_display_mode_button = QPushButton("", self.frame_player)
         self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
+        self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
+        self.toggle_display_mode_button.setFixedSize(40, 40)
+        self.toggle_display_mode_button.setIconSize(QSize(40, 40))
+        self.toggle_display_mode_button.setStyleSheet(
+            "color: white; background: transparent; border: none; font-size: 18px;"
+        )
 
-        layout.addWidget(self.toggle_display_mode_button)
+        def update_button_position():
+            rect = self.frame_player.content_rect()
+            if rect.isNull():
+                return
 
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label']
+            # Convert from frame_player-local coords → global → back to parent coords
+            top_left = self.frame_player.mapToParent(rect.topLeft())
+            
+            # Position button near bottom-right inside the actual content rect
+            btn_x = top_left.x() + rect.width() - self.toggle_display_mode_button.width() - 13
+            btn_y = top_left.y() + rect.height() - self.toggle_display_mode_button.height() - 38
+
+            self.toggle_display_mode_button.move(btn_x, btn_y)
+
+        self.frame_player.resized.connect(update_button_position)
+        # update_button_position(self.frame_player._movie.scaledSize().width(), self.frame_player._movie.scaledSize().height())
+
+        # layout.addWidget(self.toggle_display_mode_button)
+
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
 
         self.detection_list = QTableWidget()
         self.detection_list.setColumnCount(len(labels))
@@ -2097,14 +2553,11 @@ class MainWindow(QMainWindow):
         button_layout = QHBoxLayout()
         self.save_changes_button = QPushButton("Save Changes")  # text will change in historical mode
         self.save_changes_button.clicked.connect(self.export_results)
-        self.delete_track_button = QPushButton("Delete Track")
-        self.delete_track_button.clicked.connect(self.mark_for_deletion)
-        home_button = QPushButton("Return to Home Screen")
-        home_button.clicked.connect(self.go_to_home)
-
+        # self.delete_track_button = QPushButton("Delete Track")
+        # self.delete_track_button.clicked.connect(self.mark_for_deletion)
+        
         button_layout.addWidget(self.save_changes_button)
-        button_layout.addWidget(home_button)
-        button_layout.addWidget(self.delete_track_button)
+        # button_layout.addWidget(self.delete_track_button)
         layout.addLayout(button_layout)
 
         # Finish Review Setup
@@ -2143,6 +2596,7 @@ class MainWindow(QMainWindow):
             return
 
         row = table.currentRow()
+        print(row)
         if row < 0:
             print("No rows")
             return
@@ -2178,6 +2632,7 @@ class MainWindow(QMainWindow):
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         if gif_path.exists():
+            self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
             self.frame_player.set_gif(str(gif_path))
         else:
             alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
@@ -2203,7 +2658,7 @@ class MainWindow(QMainWindow):
         self.current_experiment = format_experiment_date(exp_date, to_human=False)
 
         experiments_root = get_results_dir()
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label']
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
 
         try:
             # newest-first
@@ -2234,6 +2689,7 @@ class MainWindow(QMainWindow):
                         len_high_conf = float(row.get('Highest Confidence Length', 0.0))
                         label = str(row.get('Label', 'Shark'))
 
+                        pending_change = (self.current_experiment, csv_name, track_id) 
                         row_position = self.historical_items.rowCount()
                         self.historical_items.insertRow(row_position)
                         values = [
@@ -2243,14 +2699,14 @@ class MainWindow(QMainWindow):
                             time_str,
                             f"{conf_longest:.2f}",
                             f"{len_high_conf:.1f}ft",
-                            label
+                            label # if not self.historical_label_changes.get(pending_change) else self.historical_label_changes.get(pending_change)
                         ]
-                        
+
                         for col, value in enumerate(values):
                             if col == 6:
                                 # Creates dropdown for label
                                 combo = QComboBox()
-                                combo.addItems(["Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Other"])
+                                combo.addItems(["Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Duplicate", "None", "Other"])
                                 combo.setCurrentText(label)
                                 combo.previous_text = label
                                 # combo.currentIndexChanged.connect(lambda: setattr(self, "label_combo", combo))
@@ -2263,6 +2719,13 @@ class MainWindow(QMainWindow):
                                 if col == 4 and conf_longest < 0.65:
                                     cell.setForeground(QColor('red'))
                                 self.historical_items.setItem(row_position, col, cell)
+
+                        # Create delete button
+                        del_button = QPushButton("")
+                        del_button.setIcon(QIcon("assets/images/x-lg.svg"))
+                        del_button.setStyleSheet("background: transparent; border: none;")
+                        del_button.clicked.connect(self.mark_for_deletion)
+                        self.historical_items.setCellWidget(row_position, 7, del_button)
 
                         self.historical_items.item(row_position, 0).setData(
                             Qt.ItemDataRole.UserRole, (self.current_experiment, video_basename, track_id)
@@ -2277,11 +2740,15 @@ class MainWindow(QMainWindow):
             self.historical_items.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             self.historical_items.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             self.historical_items.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            self.historical_items.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
 
             self.switch_detection_list(show_historical=True)
             self.reviewing_history = True
+
             detections_present = self.historical_items.rowCount() > 0
-            self.toggle_review_buttons(enable=detections_present)
+            
+            # self.toggle_review_buttons(enable=detections_present)
+            self.toggle_edit_state(set_state=False)
 
         except Exception as e:
             print(f"Error while building historical list: {e}")
@@ -2305,7 +2772,6 @@ class MainWindow(QMainWindow):
                 continue
         self.review_dropdown.setCurrentIndex(0)
         self.current_experiment = format_experiment_date(self.review_dropdown.currentText(), to_human=False)
-        print(f"setup_review_dropdown", {self.current_experiment})
     
     def toggle_dropdown_display(self):
         if self.reviewing_history:  
@@ -2352,6 +2818,9 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.elapsed_time = 0
         
+        # Clear frame player
+        self.frame_player.clear_frame()
+
         # Clear video list and reset buttons
         self.video_list.clear()
         # self.video_list.setHorizontalHeaderLabels(["Video",  ""])
@@ -2377,6 +2846,7 @@ class MainWindow(QMainWindow):
         
         # Switch to home widget
         self.stack_widget.setCurrentWidget(self.home_widget)
+        self.toggle_banner_buttons(review=False)
         
     def show_confidence_warning(self):
         print(self.current_detection_index)
@@ -2638,8 +3108,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Changes", "There are no label changes to save.")
             return
 
+        reply = QMessageBox.question(
+            self,
+            "Save Changes",
+            "Save changes to experiment results?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.No:
+            return
+        
         failures = []
         updated_files = set()
+        experiments_with_changes = set()
 
         for (experiment, csv_name, track_id), new_label in list(self.historical_label_changes.items()):
             if new_label == "Delete":
@@ -2670,10 +3151,16 @@ class MainWindow(QMainWindow):
                     del self.historical_label_changes[(experiment, csv_name, track_id)]
                 else:
                     failures.append(f"Track {track_id} not found in {csv_path}")
-
+                experiments_with_changes.add(Path(get_results_dir()) / experiment)
             except Exception as e:
                 failures.append(f"{csv_name} (Track {track_id}): {e}")
-
+        
+        if str(self.settings_obj.value("enable_auto_upload").lower()) == "true":
+            for exp in list(experiments_with_changes):
+                print(f"{len(list(experiments_with_changes))} experiments being uploaded")
+                experiment_upload = UploadThread(api_url=self.api_url, experiment_dir=exp)
+                experiment_upload.run()
+                
         # Feedback
         if failures and updated_files:
             QMessageBox.warning(
@@ -2695,6 +3182,10 @@ class MainWindow(QMainWindow):
                 "Changes Saved",
                 "All label changes were saved back to their CSV files."
             )
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
 
 class UploadThread(QThread):
     progress_updated = pyqtSignal(int)
@@ -2709,7 +3200,7 @@ class UploadThread(QThread):
         try:
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, 'w') as zipf:
-                for folder in ['bounding_boxes', 'false_positives', 'frames']:
+                for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
                     folder_path = os.path.join(self.experiment_dir, folder)
                     if os.path.exists(folder_path):
                         for root, _, files in os.walk(folder_path):
@@ -2734,14 +3225,19 @@ def signal_handler(signum, frame):
     QApplication.quit()
 
 class FramePlayer(QLabel):
+    resized = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._movie = None
+        self.setScaledContents(False)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.frames = []
         self.current_frame = 0
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
         self.timer.setInterval(100)  # 10 FPS
-        self._movie = None
+        self._static_pixmap = None
 
     def set_frames(self, frames):
         self.frames = frames
@@ -2803,80 +3299,89 @@ class FramePlayer(QLabel):
         
         # Show completion popup with both time and detections
         self.show_completion_popup(time_str, total_detections)
-    
-    # --- NEW: apply scaled size while keeping aspect ratio
-    def _apply_movie_scaled_size(self):
-        if self._movie:
-            img = self._movie.currentImage()
-            if not img.isNull():
-                target = self.size()
-                if not target.isValid() or target.isEmpty():
-                    # fallback if first layout hasn't run yet
-                    target = self.parent().size() if self.parent() and self.parent().size().isValid() else QSize(720, 480)
 
-                scaled = img.size().scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
-                self._movie.setScaledSize(scaled)
-
-    def set_gif(self, path: str):
-        self.timer.stop()  # pause any slideshow frames
-
-        movie = QMovie(path)
-        movie.setCacheMode(QMovie.CacheMode.CacheAll)
-
-        # Determine target size (fallback if widget not laid out yet)
-        target = self.size()
-        if not target.isValid() or target.isEmpty():
-            if self.parent() and self.parent().size().isValid():
-                target = self.parent().size()
-            else:
-                target = QSize(720, 480)
-
-        # PRE-SCALE FIRST FRAME to avoid initial flash/jump
-        if movie.isValid() and movie.jumpToFrame(0):
-            img = movie.currentImage()
-            if not img.isNull():
-                scaled_size = img.size().scaled(target, Qt.AspectRatioMode.KeepAspectRatio)
-                movie.setScaledSize(scaled_size)
-
-                # Paint first frame at final size BEFORE attaching the movie
-                first_pix = QPixmap.fromImage(img).scaled(
-                    scaled_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-                )
-                self.setPixmap(first_pix)
-
-        # Attach and wire signals AFTER scaled size & prepaint
-        self._movie = movie
-
-        # Maintain aspect ratio as frames change or widget resizes
-        self._movie.frameChanged.connect(lambda _=None: self._apply_movie_scaled_size())
-
-        # Seamless loop WITHOUT setLoopCount: restart at end without recreating movie
-        def _restart():
-            # keep the same scaled size; just rewind and continue
-            self._movie.stop()
-            self._movie.jumpToFrame(0)
-            self._apply_movie_scaled_size()
-            self._movie.start()
-
-        self._movie.finished.connect(_restart)
-
-        self.setMovie(self._movie)
-        self._movie.start()
-
-    def resizeEvent(self, event):
-        self._apply_movie_scaled_size()
-        super().resizeEvent(event)
-
-    def clear_frame(self):
-        """Clear the frame and detach the currently playing gif."""
-        self.clear()
+    def set_static_pixmap(self, pixmap: QPixmap):
+        """Display a still image. Detach the movie if one is active."""
         if self._movie:
             self._movie.stop()
             self.setMovie(None)
             self._movie = None
-        self.frames = []
-        self.current_frame = 0
-        self.timer.stop()
+
+        self._static_pixmap = pixmap
+        self.update()
+
+    def set_gif(self, path: str):
+        self._static_pixmap = None
+
+        movie = QMovie(path)
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+        self._movie = movie
+        self.setMovie(self._movie)
+        self._movie.start()
+        self._movie.finished.connect(lambda: self._movie.start())
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        widget_size = self.size()
+
+        # 1) Static Image Mode
+        if self._static_pixmap:
+            frame = self._static_pixmap
+            scaled = frame.size().scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
+            x = (widget_size.width() - scaled.width()) // 2
+            y = (widget_size.height() - scaled.height()) // 2
+            painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), frame)
+            return
+
+        # 2) Movie Mode
+        if self._movie:
+            frame = self._movie.currentPixmap()
+            if not frame.isNull():
+                scaled = frame.size().scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
+                x = (widget_size.width() - scaled.width()) // 2
+                y = (widget_size.height() - scaled.height()) // 2
+                painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), frame)
+            return
+
+        # 3) Fallback (no movie, no pixmap)
+        super().paintEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
+        self.update()
+
+    def clear_frame(self):
+        self._static_pixmap = None
+        if self._movie:
+            self._movie.stop()
+            self.setMovie(None)
+            self._movie = None
+        self.update()
+    
+    def content_rect(self):
+        """
+        Returns the QRect of the actually displayed pixmap/movie frame
+        inside the widget, after aspect-ratio scaling and centering.
+        """
+        if self._static_pixmap:
+            frame_size = self._static_pixmap.size()
+        elif self._movie:
+            frame = self._movie.currentPixmap()
+            if frame.isNull():
+                return QRect()
+            frame_size = frame.size()
+        else:
+            return QRect()
+
+        widget_size = self.size()
+        scaled = frame_size.scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
+
+        x = (widget_size.width() - scaled.width()) // 2
+        y = (widget_size.height() - scaled.height()) // 2
+
+        return QRect(x, y, scaled.width(), scaled.height())
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
     progress_update = 0
