@@ -3,7 +3,7 @@ name: Build macOS Executable (PyInstaller Spec, Apple Silicon)
 on:
   push:
     branches:
-      - master
+      - main
 
 jobs:
   build-macos-apple:
