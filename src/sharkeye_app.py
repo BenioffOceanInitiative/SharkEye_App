@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint
 from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter
 from PyQt6.QtSvgWidgets import QSvgWidget
-
+from PyQt6_SwitchControl import SwitchControl
+    
 import cv2
 import torch
 from ultralytics import YOLO
@@ -648,19 +649,6 @@ class HistoricalExperimentsPage(QWidget):
         self.historical_experiments_settings.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.historical_experiments_settings.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.historical_experiments_settings.setShowGrid(False)
-        # self.historical_experiments_settings.setStyleSheet("""
-        #     QTableWidget {
-        #         border: none;
-        #         background-color: #fafafa;
-        #         alternate-background-color: #f0f0f0;
-        #     }
-        #     QHeaderView::section {
-        #         background-color: #e6e6e6;
-        #         border: none;
-        #         padding: 4px;
-        #         font-weight: bold;
-        #     }
-        # """)
 
     def clear_all_results(self):
         root = Path(get_results_dir())
@@ -1061,7 +1049,7 @@ class VideoProcessingWorker(QObject):
     processing_complete = pyqtSignal(dict, str)
     frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
 
-    def __init__(self, video_path, model, output_dir, drone_type, altitude):
+    def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
         super().__init__()
         # Read settings 
         self.settings_obj = QSettings("BOSL", "SharkEye_App")
@@ -1070,6 +1058,7 @@ class VideoProcessingWorker(QObject):
         self.output_dir = output_dir
         self.drone_type = drone_type
         self.altitude = altitude
+        self.flight_location = flight_location
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold"))
         self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
         
@@ -1182,7 +1171,7 @@ class VideoProcessingWorker(QObject):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
         print(f"Starting save to {csv_path}")
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['video_name', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
+            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
                         'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -1195,6 +1184,7 @@ class VideoProcessingWorker(QObject):
                 
                 csv_writer.writerow({
                     'video_name': self.video_path,
+                    'Flight Location': self.flight_location,
                     'Track Id': track_id,
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                     'Highest Confidence': max(track['confidences']),
@@ -1360,6 +1350,8 @@ class MainWindow(QMainWindow):
         # Cloud Settings
         if not self.settings_obj.value("enable_auto_upload"):
             self.settings_obj.setValue("enable_auto_upload", "false")
+
+        # Last Location
             
     def load_drone_settings(self):
         settings_dialog = SettingsDialog(self.settings_obj)
@@ -1392,6 +1384,7 @@ class MainWindow(QMainWindow):
         self.historical_label_changes = {}  # key: (experiment, csv_name, track_id) -> new_label
         self.experiments = []
         self.gif_active = False
+        self.current_flight_location = None
 
     def init_ui(self):
         self.central_widget = QWidget()
@@ -1426,7 +1419,7 @@ class MainWindow(QMainWindow):
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = QPushButton()
-        self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
+        self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
@@ -1448,7 +1441,7 @@ class MainWindow(QMainWindow):
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
-        self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+        self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
@@ -1481,7 +1474,7 @@ class MainWindow(QMainWindow):
         if review == True:
             # Review Window
             self.banner_left_button.setText("")
-            self.banner_left_button.setIcon(QIcon("assets/images/house-fill.svg"))
+            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/house-fill.svg")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
             
@@ -1490,12 +1483,12 @@ class MainWindow(QMainWindow):
                 # self.banner_right_button.hide()
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon("assets/images/pencil-fill.svg"))
+            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/pencil-fill.svg")))
             self.banner_right_button.setToolTip("Edit Results")
             self.banner_right_button.clicked.connect(self.toggle_edit_state)
         else:
             # Home Screen
-            self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
+            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
                 "color: white; background: transparent; border: none; font-size: 18px;"
@@ -1505,7 +1498,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
 
-            self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
             self.banner_right_button.clicked.connect(self.load_drone_settings)
             self.banner_right_button.setFlat(True)
             self.banner_right_button.setStyleSheet(
@@ -1590,7 +1583,7 @@ class MainWindow(QMainWindow):
         # self.video_list.setCellWidget(row_position, 2, combo)
         # self.historical_items.setItem(row_position, col, cell)
 
-        # Select Drone and Altitude Dropdown
+        # Drone Dropdown
         form_layout = QGridLayout()
 
         form_layout.addWidget(QLabel("Select Drone Model:"), 0, 0)
@@ -1598,17 +1591,29 @@ class MainWindow(QMainWindow):
         self.update_available_drones()
         self.drone_select.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        # Settings button
-        
         form_layout.addWidget(self.drone_select, 0, 1)
 
+        # Altitude Entry
         form_layout.addWidget(QLabel("Enter Drone Altitude:"), 1, 0)
         self.altitude_input = QLineEdit('40')
         self.altitude_input.setValidator(QDoubleValidator(0, 999, 2))
         self.altitude_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
         form_layout.addWidget(self.altitude_input, 1, 1)
 
+        # Flight Location
+        
+        form_layout.addWidget(QLabel("Enter Flight Location:"), 2, 0)
+        last_flight_location = self.settings_obj.value("last_flight_location")
+        self.flight_location_input = QLineEdit(last_flight_location) 
+        self.flight_location_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        
+        form_layout.addWidget(self.flight_location_input, 2, 1)
+
         layout.addLayout(form_layout)
+
+                   
+
         # Process Videos button
         process_layout = QVBoxLayout()
         self.process_button = QPushButton("Process Videos")
@@ -1619,6 +1624,12 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
     def toggle_processing(self):
+        if not self.flight_location_input.text():
+            QMessageBox.warning(self, "Failed to Start Processing", "Please enter the flight location for the selected videos")
+            return
+        if not self.altitude_input.text():
+            QMessageBox.warning(self, "Failed to Start Processing", "Please enter the flight altitude for the selected videos")
+            return
         if not self.is_processing:
             self.start_processing()
         else:
@@ -1706,6 +1717,7 @@ class MainWindow(QMainWindow):
         self.select_videos_button.setEnabled(False)
         self.drone_select.setEnabled(False)
         self.altitude_input.setEnabled(False)
+        self.flight_location_input.setEnabled(False)
         self.process_button.setEnabled(False)
 
         self.create_progress_dialog()
@@ -1720,6 +1732,9 @@ class MainWindow(QMainWindow):
         for i in range(self.video_list.rowCount()): 
             item = self.video_list.item(i, 0)
             item.setText(item.text().replace('🔎 ', '').replace('✅ ', ''))
+
+        # Save last flight location
+        self.settings_obj.setValue("last_flight_location", self.flight_location_input.text())
 
         self.video_queue = [self.video_list.item(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.video_list.rowCount())]
         self.current_video_index = 0
@@ -1783,7 +1798,7 @@ class MainWindow(QMainWindow):
         self.cleanup_previous_processing()
         
         self.processing_thread = QThread()
-        self.processing_worker = VideoProcessingWorker(video_path, self.model, self.current_output_dir, drone_type=self.drone_select.currentText(), altitude=float(self.altitude_input.text()))
+        self.processing_worker = VideoProcessingWorker(video_path, self.model, self.current_output_dir, drone_type=self.drone_select.currentText(), altitude=float(self.altitude_input.text()), flight_location=self.flight_location_input.text())
         self.processing_worker.moveToThread(self.processing_thread)
 
         self.connect_worker_signals()
@@ -1875,6 +1890,7 @@ class MainWindow(QMainWindow):
         self.select_videos_button.setEnabled(True)
         self.drone_select.setEnabled(True)
         self.altitude_input.setEnabled(True)
+        self.flight_location_input.setEnabled(True)
         self.process_button.setEnabled(True)
 
         self.remove_all_button.setEnabled(self.video_list.rowCount() > 0)
@@ -1954,7 +1970,7 @@ class MainWindow(QMainWindow):
                 self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
                 delete_btn = QPushButton("")
-                delete_btn.setIcon(QIcon("assets/images/x-lg.svg"))
+                delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
                 delete_btn.setStyleSheet("background: transparent; border: none;")
                 def delete_row():
                     button = self.sender()
@@ -2178,27 +2194,36 @@ class MainWindow(QMainWindow):
             print(f"Label updated for track {key} to {new_label}")
     
     def mark_for_deletion(self):
-        if self.reviewing_history:
-            row = self.historical_items.currentRow()
-            if row < 0:
-                QMessageBox.warning(self, "Mark for Deletion", "No track selected.")
+        print("Calling Deletion")
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete this detection?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.reviewing_history:
+                row = self.historical_items.currentRow()
+                if row < 0:
+                    QMessageBox.warning(self, "Mark for Deletion", "No track selected.")
+                    return
+
+                experiment_disp = self.historical_items.item(row, 0).text()
+                experiment = format_experiment_date(experiment_disp, to_human=False)
+                video_basename = self.historical_items.item(row, 1).text()
+                track_id = self.historical_items.item(row, 2).text()
+                csv_name = f"{Path(video_basename)}.csv"
+
+                key = (experiment, csv_name, int(track_id))
+                self.historical_label_changes[key] = "Delete"
+
+                # Remove the row from the QTableWidget
+                self.historical_items.removeRow(row)
+                self.historical_items.selectRow(max(0, row - 1))
+                self.show_historical_gif()
+            else:
                 return
-
-            experiment_disp = self.historical_items.item(row, 0).text()
-            experiment = format_experiment_date(experiment_disp, to_human=False)
-            video_basename = self.historical_items.item(row, 1).text()
-            track_id = self.historical_items.item(row, 2).text()
-            csv_name = f"{Path(video_basename)}.csv"
-
-            key = (experiment, csv_name, int(track_id))
-            self.historical_label_changes[key] = "Delete"
-
-            # Remove the row from the QTableWidget
-            self.historical_items.removeRow(row)
-            self.historical_items.selectRow(max(0, row - 1))
-            self.show_historical_gif()
-        else:
-            return
     
     def delete_track(self, experiment, csv_name, track_id):
         """
@@ -2435,7 +2460,7 @@ class MainWindow(QMainWindow):
                     pixmap = QPixmap.fromImage(q_image)
                     scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
                     self.frame_player.set_static_pixmap(scaled_pixmap)
-                    self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFinOutline.svg"))
+                    self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
                 else:
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("Alert")
@@ -2502,14 +2527,48 @@ class MainWindow(QMainWindow):
         # layout.addWidget(self.low_confidence_warning)
 
         # Button to toggle display to show gif/segmentation mask
-        self.toggle_display_mode_button = QPushButton("", self.frame_player)
+        self.toggle_display_mode_button = QPushButton(self.frame_player)
         self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
+        self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
         self.toggle_display_mode_button.setFixedSize(40, 40)
         self.toggle_display_mode_button.setIconSize(QSize(40, 40))
         self.toggle_display_mode_button.setStyleSheet(
             "color: white; background: transparent; border: none; font-size: 18px;"
         )
+
+        self.toggle_container = QWidget()
+        self.toggle_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.toggle_switch_layout = QHBoxLayout(self.toggle_container)
+        self.toggle_switch_layout.setContentsMargins(0, 0, 0, 0)
+        self.toggle_switch_layout.setSpacing(0)
+
+        box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"))
+        box_icon.setFixedSize(40, 40)
+        box_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        mask_icon = QSvgWidget(resource_path("assets/images/MdiSharkFin.svg"))
+        mask_icon.setFixedSize(40, 40)
+        mask_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.toggle_display_switch = SwitchControl(
+            bg_color="transparent",
+            circle_color="#DDD",
+            active_color="transparent",
+            animation_duration=100,
+            checked=True,
+            change_cursor=False
+        )
+        self.toggle_display_switch.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.toggle_switch_layout.addWidget(box_icon)
+        self.toggle_switch_layout.addWidget(self.toggle_display_switch)
+        self.toggle_switch_layout.addWidget(mask_icon)
+
+        self.toggle_container.adjustSize()
+        self.toggle_container.sizeHint = lambda: self.toggle_container.layout().minimumSize()
+        self.toggle_container.updateGeometry()
+
+        # layout.addWidget(container)
 
         def update_button_position():
             rect = self.frame_player.content_rect()
@@ -2520,10 +2579,11 @@ class MainWindow(QMainWindow):
             top_left = self.frame_player.mapToParent(rect.topLeft())
             
             # Position button near bottom-right inside the actual content rect
-            btn_x = top_left.x() + rect.width() - self.toggle_display_mode_button.width() - 13
-            btn_y = top_left.y() + rect.height() - self.toggle_display_mode_button.height() - 38
+            btn_x = top_left.x() + int(rect.width() / 2) # - self.toggle_container.width() - 13
+            btn_y = top_left.y() + int(rect.height() / 2) # - self.toggle_container.height() - 38
 
-            self.toggle_display_mode_button.move(btn_x, btn_y)
+            # self.toggle_display_mode_button.move(btn_x, btn_y)
+            self.toggle_container.move(btn_x, btn_y)
 
         self.frame_player.resized.connect(update_button_position)
         # update_button_position(self.frame_player._movie.scaledSize().width(), self.frame_player._movie.scaledSize().height())
@@ -2632,7 +2692,7 @@ class MainWindow(QMainWindow):
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         if gif_path.exists():
-            self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
+            self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
             self.frame_player.set_gif(str(gif_path))
         else:
             alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
@@ -2722,7 +2782,7 @@ class MainWindow(QMainWindow):
 
                         # Create delete button
                         del_button = QPushButton("")
-                        del_button.setIcon(QIcon("assets/images/x-lg.svg"))
+                        del_button.setIcon(QIcon(resource_path("assets/images/trash-fill.svg")))
                         del_button.setStyleSheet("background: transparent; border: none;")
                         del_button.clicked.connect(self.mark_for_deletion)
                         self.historical_items.setCellWidget(row_position, 7, del_button)
@@ -2842,6 +2902,7 @@ class MainWindow(QMainWindow):
         self.select_videos_button.setEnabled(True)
         self.drone_select.setEnabled(True)
         self.altitude_input.setEnabled(True)
+        self.flight_location_input.setEnabled(True)
         self.process_button.setEnabled(False)
         
         # Switch to home widget

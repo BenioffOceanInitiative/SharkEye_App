@@ -20,4 +20,6 @@ app.log
 videos_with_flight_data.csv
 headless_predictions/
 segmentation_comparison/
-src/find_flight_data.py
+src/find_flight_data.pys
+Sharkeye Todo.md
+src/sharkeye todo.txt
