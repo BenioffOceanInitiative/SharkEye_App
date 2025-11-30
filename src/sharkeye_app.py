@@ -2628,7 +2628,7 @@ class MainWindow(QMainWindow):
             return
 
         # Assign and preserve previous text for change detection
-        self.label_combo = combo
+        self.label_combo = combo # 
 
     def show_historical_gif(self):
         self.gif_active = True
