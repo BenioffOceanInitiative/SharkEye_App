@@ -36,7 +36,7 @@ import pandas as pd
 import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
-from segment_anything import sam_model_registry, SamPredictor 
+from segment_anything import sam_model_registry, SamPredictor
 import ast
 
 # Add these constants for length calculation
@@ -1426,7 +1426,7 @@ class MainWindow(QMainWindow):
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = QPushButton()
-        self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
+        self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
@@ -1448,7 +1448,7 @@ class MainWindow(QMainWindow):
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
-        self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+        self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
@@ -1481,7 +1481,7 @@ class MainWindow(QMainWindow):
         if review == True:
             # Review Window
             self.banner_left_button.setText("")
-            self.banner_left_button.setIcon(QIcon("assets/images/house-fill.svg"))
+            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/house-fill.svg")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
             
@@ -1490,12 +1490,12 @@ class MainWindow(QMainWindow):
                 # self.banner_right_button.hide()
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon("assets/images/pencil-fill.svg"))
+            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/pencil-fill.svg")))
             self.banner_right_button.setToolTip("Edit Results")
             self.banner_right_button.clicked.connect(self.toggle_edit_state)
         else:
             # Home Screen
-            self.banner_left_button.setIcon(QIcon("assets/images/clock-history.svg"))
+            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
                 "color: white; background: transparent; border: none; font-size: 18px;"
@@ -1505,7 +1505,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
 
-            self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
             self.banner_right_button.clicked.connect(self.load_drone_settings)
             self.banner_right_button.setFlat(True)
             self.banner_right_button.setStyleSheet(
@@ -1954,7 +1954,7 @@ class MainWindow(QMainWindow):
                 self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
                 delete_btn = QPushButton("")
-                delete_btn.setIcon(QIcon("assets/images/x-lg.svg"))
+                delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
                 delete_btn.setStyleSheet("background: transparent; border: none;")
                 def delete_row():
                     button = self.sender()
@@ -2408,8 +2408,12 @@ class MainWindow(QMainWindow):
     def toggle_review_buttons(self, enable):
         self.historical_items.setEnabled(enable)
         self.save_changes_button.setEnabled(enable)
-        # self.delete_track_button.setEnabled(enable)
         self.toggle_display_mode_button.setEnabled(enable)
+
+        if enable == False:
+            self.toggle_display_mode_button.hide()
+        else:
+            self.toggle_display_mode_button.show()
         
     def toggle_display_mode(self):
         # Historical mode: always show mask overlay if available
@@ -2435,7 +2439,7 @@ class MainWindow(QMainWindow):
                     pixmap = QPixmap.fromImage(q_image)
                     scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
                     self.frame_player.set_static_pixmap(scaled_pixmap)
-                    self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFinOutline.svg"))
+                    self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
                 else:
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("Alert")
@@ -2486,6 +2490,7 @@ class MainWindow(QMainWindow):
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # self.frame_player.setA
         self.frame_player.setMinimumSize(int(720), int(480))
+        self.frame_player.setBaseSize(int(720), int(480))
         #self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         frame_player_container.addWidget(self.frame_player)
         # frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -2504,7 +2509,7 @@ class MainWindow(QMainWindow):
         # Button to toggle display to show gif/segmentation mask
         self.toggle_display_mode_button = QPushButton("", self.frame_player)
         self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
+        self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
         self.toggle_display_mode_button.setFixedSize(40, 40)
         self.toggle_display_mode_button.setIconSize(QSize(40, 40))
         self.toggle_display_mode_button.setStyleSheet(
@@ -2525,7 +2530,7 @@ class MainWindow(QMainWindow):
 
             self.toggle_display_mode_button.move(btn_x, btn_y)
 
-        self.frame_player.resized.connect(update_button_position)
+        self.frame_player.resized.connect(self.update_button_position)
         # update_button_position(self.frame_player._movie.scaledSize().width(), self.frame_player._movie.scaledSize().height())
 
         # layout.addWidget(self.toggle_display_mode_button)
@@ -2564,6 +2569,22 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown()
         self.review_dropdown.currentIndexChanged.connect(self.render_historical_experiments)
 
+    def update_button_position(self):
+        if self.frame_player and self.toggle_display_mode_button:
+            rect = self.frame_player.content_rect()
+            if rect.isNull():
+                return
+
+            # Convert from frame_player-local coords → global → back to parent coords
+            top_left = self.frame_player.mapToParent(rect.topLeft())
+            
+            # Position button near bottom-right inside the actual content rect
+            btn_x = top_left.x() + rect.width() - self.toggle_display_mode_button.width() - 13
+            btn_y = top_left.y() + rect.height() - self.toggle_display_mode_button.height() - 38
+
+            self.toggle_display_mode_button.move(btn_x, btn_y)
+
+        # layout.addWidget(self.toggle_display_mode_button)
     def switch_detection_list(self, show_historical=False):
         current_list = self.historical_items if show_historical else self.detection_list
         other_list = self.detection_list if show_historical else self.historical_items
@@ -2632,11 +2653,14 @@ class MainWindow(QMainWindow):
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         if gif_path.exists():
-            self.toggle_display_mode_button.setIcon(QIcon("assets/images/MdiSharkFin.svg"))
+            self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+            self.update_button_position()
             self.frame_player.set_gif(str(gif_path))
         else:
             alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
             if alt.exists():
+                self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+                self.update_button_position()
                 self.frame_player.set_gif(str(alt))
             else:
                 self.frame_player.clear()
@@ -2649,6 +2673,7 @@ class MainWindow(QMainWindow):
         self.reviewing_history = True
 
         if not self.current_experiment:
+            self.show_no_detections_message()
             self.toggle_review_buttons(enable=False)
             return
 
@@ -2722,7 +2747,7 @@ class MainWindow(QMainWindow):
 
                         # Create delete button
                         del_button = QPushButton("")
-                        del_button.setIcon(QIcon("assets/images/x-lg.svg"))
+                        del_button.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
                         del_button.setStyleSheet("background: transparent; border: none;")
                         del_button.clicked.connect(self.mark_for_deletion)
                         self.historical_items.setCellWidget(row_position, 7, del_button)
