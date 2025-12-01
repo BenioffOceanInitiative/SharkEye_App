@@ -61,6 +61,7 @@ simsimd==6.2.1
 six==1.17.0
 stringzilla==3.12.5
 sympy==1.13.1
+tensorboard
 threadpoolctl==3.6.0
 tifffile==2025.5.10
 toolz==1.0.0
@@ -77,5 +78,6 @@ urllib3==2.4.0
 zipp==3.23.0
 
 --index-url=https://download.pytorch.org/whl/cu118 --extra-index-url=https://pypi.org/simple
+
 
 
