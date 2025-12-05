@@ -29,6 +29,7 @@ hidden_imports += collect_submodules("PyQt6.QtSvgWidgets")
 hidden_imports += collect_submodules("ultralytics")
 hidden_imports += collect_submodules("segment_anything")
 hidden_imports += collect_submodules("scipy")
+hidden_imports += collect_submodules("tensorboard")
 # If you truly use these, uncomment; otherwise leave out to avoid build errors
 # hidden_imports += ["lapx", "dask"]
 
@@ -41,6 +42,7 @@ datas += collect_data_files("PyQt6.QtSvgWidgets")                # Qt plugins/re
 datas += collect_data_files("ultralytics")
 datas += collect_data_files("torch")
 datas += collect_data_files("certifi")               # CA bundle for requests
+datas += collect_data_files("tensorboard")
 
 # your app assets + model weights
 datas += [

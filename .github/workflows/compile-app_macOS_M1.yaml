@@ -50,7 +50,7 @@ jobs:
       - name: Setup Python (arm64)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11.4"
           architecture: "arm64"
 
       - name: Confirm runner and Python architecture
