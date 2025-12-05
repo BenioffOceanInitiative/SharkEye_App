@@ -3515,53 +3515,81 @@ def mass_prediction(video_path, current_output_dir):
 
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
-    parser.add_argument('--input_dir', type=str, required=True, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--testing', action='store_true', help='Enables testing for app in headless environment')
+    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing .mp4 videos to process')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
     return parser.parse_args()
 
 def main():
-    args = parse_args()  
-
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    video_paths = input_dir.rglob("*.mp4")
-    if not video_paths:
-        print(f"No .mp4 videos found in {input_dir}")
-        exit(1)
-
-    # Run prediction
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
-
-    # Save results to CSV
-    if results:
-        csv_path = output_dir / "output.csv"
-        with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"Results saved to {csv_path}")
-    else:
-        print("No valid tracks were found.")
+    args = parse_args()
+    if args.testing:
+        print('Testing')
+        os.environ["QT_DEBUG_PLUGINS"] = "1"
+        os.environ["QT_QPA_PLATFORM"] = "minimal"
+        multiprocessing.freeze_support()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(True)
+        
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
 
 if __name__ == '__main__':
+    args = parse_args()
+    if args.input_dir and args.output_dir:
+        input_dir = Path(args.input_dir)
+        output_dir = Path(args.output_dir)
+        video_paths = input_dir.rglob("*.mp4")
+        if not video_paths:
+            print(f"No .mp4 videos found in {input_dir}")
+            exit(1)
 
-    multiprocessing.freeze_support()
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
-    
-    app_icon_path = {
-        'win32': 'assets/logo/SharkEye.ico',
-        'darwin': 'assets/logo/SharkEye.icns'
-    }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-    app_icon_path = {
-        'win32': 'assets/logo/SharkEye.ico',
-        'darwin': 'assets/logo/SharkEye.icns'
-    }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-    
-    app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-    app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-    
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+        # Run prediction
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+
+        # Save results to CSV
+        if results:
+            csv_path = output_dir / "output.csv"
+            with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            print(f"Results saved to {csv_path}")
+        else:
+            print("No valid tracks were found.")
+    else:
+        if args.testing:
+            os.environ["QT_DEBUG_PLUGINS"] = "1"
+            os.environ["QT_QPA_PLATFORM"] = "minimal"
+        multiprocessing.freeze_support()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(True)
+        
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
