@@ -63,7 +63,6 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
     sam_checkpoint = resource_path(checkpoint_path)
     model_type = model_types[checkpoint_path.name]
 
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
     # Build the model without auto-loading weights
@@ -71,7 +70,7 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
 
     # PyTorch 2.6 compatibility: explicitly allow pickle ONLY for trusted weights
     # (official SAM weights are fine). This mimics pre-2.6 behavior.
-    ckpt = torch.load(sam_checkpoint, map_location="cpu", weights_only=False)
+    ckpt = torch.load(sam_checkpoint, map_location=device, weights_only=False)
 
     # Some checkpoints wrap the tensors under 'state_dict'
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
@@ -87,7 +86,6 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
 
     predictor = SamPredictor(sam)
     predictor.set_image(image)
-
 
     if cropped:
         h, w, _ = image.shape

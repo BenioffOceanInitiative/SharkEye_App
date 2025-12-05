@@ -77,6 +77,68 @@ def calculate_adjusted_shark_length(length_raw):
     length_adj = length_raw * asl_correction_factor * depth_correction_factor
     return length_adj
 
+class SwitchControl(SwitchControl):
+    """
+    Child class of SwitchControl that:
+    - Removes dragging behavior
+    - Allows clicking anywhere (including the circle) to toggle
+    - Preserves animations and appearance
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        #
+        # Disable dragging on the circle
+        # but allow its click to toggle the parent switch
+        #
+        self.__circle.mousePressEvent = self._circle_click
+        self.__circle.mouseMoveEvent  = lambda e: None    # no dragging
+        self.__circle.mouseReleaseEvent = lambda e: None  # no drag logic
+
+    # --------------------------
+    # Circle click handler
+    # --------------------------
+    def _circle_click(self, event):
+        # Clicking the circle should toggle exactly like clicking the background
+        new_state = not self.isChecked()
+        self.start_animation(new_state)
+        self.toggled.emit(new_state)
+        self.clicked.emit(new_state)
+        event.accept()
+
+    # --------------------------
+    # Override parent drag logic
+    # --------------------------
+    def mousePressEvent(self, event):
+        # No drag detection → act like a normal checkbox
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        # Ignore movement completely
+        event.ignore()
+
+    def mouseReleaseEvent(self, event):
+        # Always toggle on release
+        new_state = not self.isChecked()
+        self.start_animation(new_state)
+        self.toggled.emit(new_state)
+        self.clicked.emit(new_state)
+        event.accept()
+    
+    def reset_position(self, checked=False, animate=False):
+        if animate:
+            self.start_animation(checked)
+        else:
+            if checked:
+                self.__circle.move(self.width() - 26, 3)
+                self.setChecked(True)
+            else:
+                self.__circle.move(3, 3)
+                self.setChecked(False)
+        self.update()
+
+
 class QComboBox(QComboBox):
     def __init__(self):
         super().__init__()
@@ -599,7 +661,7 @@ class HistoricalExperimentsPage(QWidget):
             try:
                 buffer = io.BytesIO()
                 with zipfile.ZipFile(buffer, 'w') as zipf:
-                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
+                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']: 
                         folder_path = os.path.join(experiment_dir, folder)
                         if os.path.exists(folder_path):
                             for root, _, files in os.walk(folder_path):
@@ -609,7 +671,7 @@ class HistoricalExperimentsPage(QWidget):
                                     zipf.write(file_path, arcname)
 
                 buffer.seek(0)
-                files = {'file': ('upload.zip', buffer, 'application/zip')}
+                files = {'file': (f'{Path(experiment_dir).name}.zip', buffer, 'application/zip')}
                 response = requests.post(api_url, files=files)
                 response.raise_for_status()
                 upload_status, message = "Upload Finished", "Folder uploaded successfully"
@@ -2434,7 +2496,8 @@ class MainWindow(QMainWindow):
         self.historical_items.setEnabled(enable)
         self.save_changes_button.setEnabled(enable)
         # self.delete_track_button.setEnabled(enable)
-        self.toggle_display_mode_button.setEnabled(enable)
+        # self.toggle_display_mode_button.setEnabled(enable)
+        self.toggle_display_switch.setEnabled(enable)
         
     def toggle_display_mode(self):
         # Historical mode: always show mask overlay if available
@@ -2460,7 +2523,7 @@ class MainWindow(QMainWindow):
                     pixmap = QPixmap.fromImage(q_image)
                     scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
                     self.frame_player.set_static_pixmap(scaled_pixmap)
-                    self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
+                    # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
                 else:
                     dlg = QMessageBox(self)
                     dlg.setWindowTitle("Alert")
@@ -2509,9 +2572,8 @@ class MainWindow(QMainWindow):
         
         self.frame_player = FramePlayer()
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # self.frame_player.setA
         self.frame_player.setMinimumSize(int(720), int(480))
-        #self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         frame_player_container.addWidget(self.frame_player)
         # frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -2527,46 +2589,39 @@ class MainWindow(QMainWindow):
         # layout.addWidget(self.low_confidence_warning)
 
         # Button to toggle display to show gif/segmentation mask
-        self.toggle_display_mode_button = QPushButton(self.frame_player)
-        self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
-        self.toggle_display_mode_button.setFixedSize(40, 40)
-        self.toggle_display_mode_button.setIconSize(QSize(40, 40))
-        self.toggle_display_mode_button.setStyleSheet(
-            "color: white; background: transparent; border: none; font-size: 18px;"
-        )
+        # self.toggle_display_mode_button = QPushButton(self.frame_player)
+        # self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
+        # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+        # self.toggle_display_mode_button.setFixedSize(40, 40)
+        # self.toggle_display_mode_button.setIconSize(QSize(40, 40))
+        # self.toggle_display_mode_button.setStyleSheet(
+        #     "color: white; background: transparent; border: none; font-size: 18px;"
+        # )
 
-        self.toggle_container = QWidget()
-        self.toggle_container.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"), parent=self.frame_player)
+        self.box_icon.setFixedSize(30, 30)
+        self.box_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        self.toggle_switch_layout = QHBoxLayout(self.toggle_container)
-        self.toggle_switch_layout.setContentsMargins(0, 0, 0, 0)
-        self.toggle_switch_layout.setSpacing(0)
+        self.mask_icon = QSvgWidget(resource_path("assets/images/MdiSharkFin.svg"), parent=self.frame_player)
+        self.mask_icon.setFixedSize(30, 30)
+        self.mask_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"))
-        box_icon.setFixedSize(40, 40)
-        box_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        mask_icon = QSvgWidget(resource_path("assets/images/MdiSharkFin.svg"))
-        mask_icon.setFixedSize(40, 40)
-        mask_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.toggle_display_switch = SwitchControl(
-            bg_color="transparent",
+            bg_color="#777777",
             circle_color="#DDD",
-            active_color="transparent",
+            active_color="#777777",
             animation_duration=100,
-            checked=True,
-            change_cursor=False
+            checked=False,
+            change_cursor=True,
+            parent=self.frame_player
         )
-        self.toggle_display_switch.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.toggle_display_switch.clicked.connect(self.toggle_display_mode)
 
-        self.toggle_switch_layout.addWidget(box_icon)
-        self.toggle_switch_layout.addWidget(self.toggle_display_switch)
-        self.toggle_switch_layout.addWidget(mask_icon)
+        # self.toggle_display_switch.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        self.toggle_container.adjustSize()
-        self.toggle_container.sizeHint = lambda: self.toggle_container.layout().minimumSize()
-        self.toggle_container.updateGeometry()
+        # self.toggle_switch_layout.addWidget(box_icon)
+        # self.toggle_switch_layout.addWidget(self.toggle_display_switch)
+        # self.toggle_switch_layout.addWidget(mask_icon)
 
         # layout.addWidget(container)
 
@@ -2576,17 +2631,19 @@ class MainWindow(QMainWindow):
                 return
 
             # Convert from frame_player-local coords → global → back to parent coords
-            top_left = self.frame_player.mapToParent(rect.topLeft())
+            bottom_right = self.frame_player.mapToParent(rect.bottomRight())
             
             # Position button near bottom-right inside the actual content rect
-            btn_x = top_left.x() + int(rect.width() / 2) # - self.toggle_container.width() - 13
-            btn_y = top_left.y() + int(rect.height() / 2) # - self.toggle_container.height() - 38
+            btn_x = bottom_right.x() - self.mask_icon.width() - 13
+            btn_y = bottom_right.y() - self.mask_icon.height() - 38
 
             # self.toggle_display_mode_button.move(btn_x, btn_y)
-            self.toggle_container.move(btn_x, btn_y)
+            self.mask_icon.move(btn_x, btn_y)
+            self.toggle_display_switch.move(self.mask_icon.x() - self.toggle_display_switch.width() - 9 , btn_y)
+            self.box_icon.move(self.toggle_display_switch.x() - self.toggle_display_switch.width() + 22 , btn_y)
 
         self.frame_player.resized.connect(update_button_position)
-        # update_button_position(self.frame_player._movie.scaledSize().width(), self.frame_player._movie.scaledSize().height())
+        update_button_position()
 
         # layout.addWidget(self.toggle_display_mode_button)
 
@@ -2594,7 +2651,7 @@ class MainWindow(QMainWindow):
 
         self.detection_list = QTableWidget()
         self.detection_list.setColumnCount(len(labels))
-        self.detection_list.setMaximumHeight(100)
+        self.detection_list.setMaximumHeight(120)
         self.detection_list.hide()
         self.detection_list.itemSelectionChanged.connect(self.show_selected_detection)
         layout.addWidget(self.detection_list)
@@ -2602,10 +2659,11 @@ class MainWindow(QMainWindow):
         # Historical items list (initially hidden)
         self.historical_items = QTableWidget()
         self.historical_items.setColumnCount(len(labels))
-        self.historical_items.setMaximumHeight(100)
+        self.historical_items.setMinimumHeight(120)
         self.historical_items.hide()
         self.historical_items.itemSelectionChanged.connect(self.show_historical_gif)
         self.historical_items.itemSelectionChanged.connect(self.set_current_label_combo)
+        self.historical_items.itemSelectionChanged.connect(lambda: setattr(self, 'current_detection_index', self.historical_items.currentRow()))
         self.historical_items.setHorizontalHeaderLabels(labels)
         layout.addWidget(self.historical_items)
 
@@ -2679,11 +2737,12 @@ class MainWindow(QMainWindow):
             self.show_no_detections_message()
             return
         if not selected:
-            return
-        # Get the selected row index
-        row = self.historical_items.currentRow()
-        if row < 0:
-            return
+            row = self.current_detection_index
+        else:
+            # Get the selected row index
+            row = self.historical_items.currentRow()
+            if row < 0:
+                return
 
         experiment = format_experiment_date(self.historical_items.item(row, 0).text(), to_human=False)  # first column
         video_basename = self.historical_items.item(row, 1).text()  # second column
@@ -2692,7 +2751,9 @@ class MainWindow(QMainWindow):
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         if gif_path.exists():
-            self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+            # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+            self.toggle_display_switch.reset_position()
+            self.toggle_display_switch.update()
             self.frame_player.set_gif(str(gif_path))
         else:
             alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
@@ -2856,7 +2917,7 @@ class MainWindow(QMainWindow):
             if clicked_button == save_button:
                 self._save_historical_label_changes()
             elif clicked_button == discard_button:
-                pass
+                self.historical_label_changes = {}
             else:
                 return  # cancel pressed            
 
@@ -3217,11 +3278,40 @@ class MainWindow(QMainWindow):
                 failures.append(f"{csv_name} (Track {track_id}): {e}")
         
         if str(self.settings_obj.value("enable_auto_upload").lower()) == "true":
-            for exp in list(experiments_with_changes):
-                print(f"{len(list(experiments_with_changes))} experiments being uploaded")
-                experiment_upload = UploadThread(api_url=self.api_url, experiment_dir=exp)
-                experiment_upload.run()
-                
+            if list(experiments_with_changes):
+                dlg = QDialog(self)
+                dlg.setWindowTitle("Upload in Progress")
+                dlg.setModal(False)
+
+                layout = QVBoxLayout()
+                layout.addWidget(QLabel(f"Uploading {len(experiments_with_changes)} experiment{'s' * (len(experiments_with_changes) > 1)}"))
+                dlg.setLayout(layout)
+                dlg.show()
+
+                errors = {}
+                for exp in list(experiments_with_changes):
+                    result = []
+                    thread = UploadThread(api_url=self.api_url, experiment_dir=exp)
+                    thread.upload_finished.connect(lambda success, msg, exp=exp:
+                                                    result.extend((success, msg, exp)))
+                    thread.run()
+                    if result[0] == False:
+                        errors[exp] = result[1]
+
+                dlg.hide()
+                msg = QMessageBox(self)
+                msg.setStandardButtons(QMessageBox.StandardButton.Ok)      
+                if not errors:
+                    msg.setWindowTitle("Upload Complete")
+                    msg.setText(f"Successfully Uploaded {len(experiments_with_changes)} experiment{'s' * (len(experiments_with_changes) > 1)}")
+                else:
+                    message = f"Error uploading the following:\n"
+                    for exp, msg in errors.items:
+                        error =  f"{exp}: {msg}\n"  
+                        message += error
+                    msg.setText(message)
+                msg.exec()
+
         # Feedback
         if failures and updated_files:
             QMessageBox.warning(
@@ -3243,7 +3333,9 @@ class MainWindow(QMainWindow):
                 "Changes Saved",
                 "All label changes were saved back to their CSV files."
             )
-    
+    def auto_upload_experiments(self):
+        pass
+        
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.resized.emit()
@@ -3271,7 +3363,7 @@ class UploadThread(QThread):
                                 zipf.write(file_path, arcname)
 
             buffer.seek(0)
-            files = {'file': ('upload.zip', buffer, 'application/zip')}
+            files = {'file': (f'{Path(self.experiment_dir).name}.zip', buffer, 'application/zip')}
             response = requests.post(self.api_url, files=files)
             response.raise_for_status()
 
@@ -3280,6 +3372,30 @@ class UploadThread(QThread):
             self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
         except Exception as e:
             self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
+
+    # def run(self):
+    #     try:
+    #         buffer = io.BytesIO()
+    #         with zipfile.ZipFile(buffer, 'w') as zipf:
+    #             for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
+    #                 folder_path = os.path.join(self.experiment_dir, folder)
+    #                 if os.path.exists(folder_path):
+    #                     for root, _, files in os.walk(folder_path):
+    #                         for file in files:
+    #                             file_path = os.path.join(root, file)
+    #                             arcname = os.path.relpath(file_path, self.experiment_dir)
+    #                             zipf.write(file_path, arcname)
+
+    #         buffer.seek(0)
+    #         files = {'file': ('upload.zip', buffer, 'application/zip')}
+    #         response = requests.post(self.api_url, files=files)
+    #         response.raise_for_status()
+
+    #         self.upload_finished.emit(True, "Folder uploaded successfully")
+    #     except requests.RequestException as e:
+    #         self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
+    #     except Exception as e:
+    #         self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
 
 def signal_handler(signum, frame):
     print(f"Received signal {signum}")
@@ -3551,34 +3667,55 @@ def mass_prediction(video_path, current_output_dir):
 
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
-    parser.add_argument('--input_dir', type=str, required=True, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--testing', action = 'store_true', help='Enable testrun of app for headless environment')
+    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing .mp4 videos to process')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
     return parser.parse_args()
 
 def main():
-    args = parse_args()  
-
-    input_dir = Path(args.input_dir)
-    output_dir = Path(args.output_dir)
-    video_paths = input_dir.rglob("*.mp4")
-    if not video_paths:
-        print(f"No .mp4 videos found in {input_dir}")
-        exit(1)
-
-    # Run prediction
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
-
-    # Save results to CSV
-    if results:
-        csv_path = output_dir / "output.csv"
-        with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-        print(f"Results saved to {csv_path}")
+    args = parse_args()
+    if args.testing:
+        multiprocessing.freeze_support()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(True)
+        
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())
     else:
-        print("No valid tracks were found.")
+        input_dir = Path(args.input_dir)
+        output_dir = Path(args.output_dir)
+        video_paths = input_dir.rglob("*.mp4")
+        if not video_paths:
+            print(f"No .mp4 videos found in {input_dir}")
+            exit(1)
+
+        # Run prediction
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+
+        # Save results to CSV
+        if results:
+            csv_path = output_dir / "output.csv"
+            with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            print(f"Results saved to {csv_path}")
+        else:
+            print("No valid tracks were found.")
 
 if __name__ == '__main__':
 
