@@ -69,7 +69,7 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
     sam = sam_model_registry[model_type](checkpoint=None)
 
     # PyTorch 2.6 compatibility: explicitly allow pickle ONLY for trusted weights
-    # (official SAM weights are fine). This mimics pre-2.6 behavior.
+    # (official SAM weights are fine). This mimics pre-2.6 behavior.    
     ckpt = torch.load(sam_checkpoint, map_location=device, weights_only=False)
 
     # Some checkpoints wrap the tensors under 'state_dict'

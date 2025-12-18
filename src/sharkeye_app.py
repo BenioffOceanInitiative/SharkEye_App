@@ -1447,6 +1447,7 @@ class MainWindow(QMainWindow):
         self.experiments = []
         self.gif_active = False
         self.current_flight_location = None
+        self.low_confidence_threshold = .65
 
     def init_ui(self):
         self.central_widget = QWidget()
@@ -1491,15 +1492,24 @@ class MainWindow(QMainWindow):
         
         self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
         self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
-
-        # Center logo
+        
         logo_label = QLabel()
-        logo_path = resource_path('assets/images/logo-white.png')
-        banner_pixmap = QPixmap(logo_path)
-        if not banner_pixmap.isNull():
-            banner_pixmap = banner_pixmap.scaledToHeight(40, Qt.TransformationMode.SmoothTransformation)
-            logo_label.setPixmap(banner_pixmap)
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_label.setScaledContents(False)
+        logo_label.setFixedHeight(40)
+
+        logo_path = resource_path('assets/images/logo-white.png')
+
+        pixmap = QPixmap(logo_path)
+        dpr = logo_label.devicePixelRatioF()
+
+        pixmap = pixmap.scaledToHeight(
+            int(40 * dpr),
+            Qt.TransformationMode.SmoothTransformation
+        )
+        pixmap.setDevicePixelRatio(dpr)
+
+        logo_label.setPixmap(pixmap)
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
@@ -1527,7 +1537,7 @@ class MainWindow(QMainWindow):
     
     def toggle_banner_buttons(self, review=True):
         self.banner_left_button.clicked.disconnect()
-        self.banner_right_button.clicked.disconnect()
+        # self.banner_right_button.clicked.disconnect()
         self.banner_left_button.setEnabled(True)
         self.banner_right_button.setEnabled(True)
         self.banner_left_button.show()
@@ -1539,15 +1549,10 @@ class MainWindow(QMainWindow):
             self.banner_left_button.setIcon(QIcon(resource_path("assets/images/house-fill.svg")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
-            
-            if self.review_dropdown.count() == 0:
-                self.banner_right_button.setEnabled(False)
-                # self.banner_right_button.hide()
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/pencil-fill.svg")))
-            self.banner_right_button.setToolTip("Edit Results")
-            self.banner_right_button.clicked.connect(self.toggle_edit_state)
+            self.banner_right_button.setEnabled(False)
+            self.banner_right_button.hide()
         else:
             # Home Screen
             self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
@@ -1559,14 +1564,6 @@ class MainWindow(QMainWindow):
             
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
-
-            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
-            self.banner_right_button.clicked.connect(self.load_drone_settings)
-            self.banner_right_button.setFlat(True)
-            self.banner_right_button.setStyleSheet(
-                "color: white; background: transparent; border: none; font-size: 18px;"
-            )
-            self.banner_right_button.setToolTip("Settings")
 
     def setup_content_widget(self):
         # Create a container for the rest of the content
@@ -1606,7 +1603,7 @@ class MainWindow(QMainWindow):
 
         # Select Video(s) button
         self.select_videos_button = QPushButton("Select Video(s)")
-        self.select_videos_button.clicked.connect(self.select_videos_2)
+        self.select_videos_button.clicked.connect(self.select_videos)
         # self.select_videos_button.clicked.connect(self.update_remove_buttons)
         # self.select_videos_button.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.select_videos_button)
@@ -2006,7 +2003,7 @@ class MainWindow(QMainWindow):
         self.remove_all_button.setEnabled(has_any_items and not self.is_processing)
         self.process_button.setEnabled(has_any_items and not self.is_processing)
 
-    def select_videos_2(self):
+    def select_videos(self):
         file_dialog = QFileDialog()
         video_files, _ = file_dialog.getOpenFileNames(self, "Select Video Files", "", "Video Files (*.mp4 *.avi *.mov)")
 
@@ -2043,13 +2040,6 @@ class MainWindow(QMainWindow):
                 delete_btn.clicked.connect(delete_row)
                 self.video_list.setCellWidget(row_position, 1, delete_btn)
         self.update_remove_buttons()
-
-    def select_videos(self):
-        file_dialog = QFileDialog()
-        video_files, _ = file_dialog.getOpenFileNames(self, "Select Video Files", "", "Video Files (*.mp4 *.avi *.mov)")
-        
-        # Get the current list of file paths
-        current_files = set(self.video_list.item(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.video_list.rowCount()))
         
         new_files_added = 0
         for file_path in video_files:
@@ -2153,10 +2143,10 @@ class MainWindow(QMainWindow):
     def go_to_review_from_popup(self, popup):
         popup.accept()
         self.reviewing_history = False
-        self.switch_detection_list(show_historical=False)
+        self.switch_detection_list(show_historical=True)
         self.go_to_review_history()
 
-    def show_detection(self, index):
+    def show_detection(self, index): # Not in Use
         if 0 <= index < len(self.sorted_tracks):
             self.current_detection_index = index
             key, track = self.sorted_tracks[index]
@@ -2174,7 +2164,7 @@ class MainWindow(QMainWindow):
             
             # Show track frames in the player
             self.frame_player.set_frames(track_frames)
-            # self.show_confidence_warning()
+            self.show_confidence_warning()
             self.highlight_current_detection()
         else:
             print(f"Error: Invalid detection index: {index}")
@@ -2375,7 +2365,7 @@ class MainWindow(QMainWindow):
                 index = self.detection_list.item(row, 0).data(Qt.ItemDataRole.UserRole)
                 if index != self.current_detection_index:
                     self.show_detection(index)
-                # self.show_confidence_warning()
+                    self.show_confidence_warning()
         else:
             # Fallback for QListWidget (shouldn't be used anymore)
             selected_items = self.detection_list.selectedItems()
@@ -2383,7 +2373,7 @@ class MainWindow(QMainWindow):
                 index = selected_items[0].data(Qt.ItemDataRole.UserRole)
                 if index != self.current_detection_index:
                     self.show_detection(index)
-                # self.show_confidence_warning()
+                    self.show_confidence_warning()
 
     def highlight_current_detection(self):
         # For QTableWidget, select the row corresponding to current_detection_index
@@ -2473,6 +2463,7 @@ class MainWindow(QMainWindow):
             print(f"Sorted track: {key}")
 
     def go_to_review_history(self):
+        # self.reviewing_history - True
         self.stack_widget.setCurrentWidget(self.review_widget)
         self.setup_review_dropdown()
         self.render_historical_experiments()
@@ -2481,13 +2472,13 @@ class MainWindow(QMainWindow):
     def toggle_edit_state(self, set_state=None):
         if set_state:
             self.save_changes_button.setEnabled(set_state)
-            # self.delete_track_button.setEnabled(set_state)
+            self.edit_tracks_button.setEnabled(set_state)
             for r in range(self.historical_items.rowCount()):
                 self.historical_items.cellWidget(r, 6).setEnabled(set_state)
                 self.historical_items.cellWidget(r, 7).setEnabled(set_state)
         else:
             self.save_changes_button.setEnabled(not self.save_changes_button.isEnabled())
-            # self.delete_track_button.setEnabled(not self.delete_track_button.isEnabled())
+            self.edit_tracks_button.setEnabled(not self.save_changes_button.isEnabled())
             for r in range(self.historical_items.rowCount()):
                 self.historical_items.cellWidget(r, 6).setEnabled(not self.historical_items.cellWidget(r, 6).isEnabled())
                 self.historical_items.cellWidget(r, 7).setEnabled(not self.historical_items.cellWidget(r, 7).isEnabled())
@@ -2495,8 +2486,6 @@ class MainWindow(QMainWindow):
     def toggle_review_buttons(self, enable):
         self.historical_items.setEnabled(enable)
         self.save_changes_button.setEnabled(enable)
-        # self.delete_track_button.setEnabled(enable)
-        # self.toggle_display_mode_button.setEnabled(enable)
         self.toggle_display_switch.setEnabled(enable)
         
     def toggle_display_mode(self):
@@ -2566,37 +2555,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.review_dropdown)
         
         # Frame player container with horizontal centering
-        # frame_player_container = QGridLayout()
-        frame_player_container = QVBoxLayout()
-        # frame_player_container.addStretch()  # Add stretch before frame player
+        self.frame_player_container = QVBoxLayout()
+        # self.frame_player_container.addStretch()  # Add stretch before frame player
         
         self.frame_player = FramePlayer()
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frame_player.setMinimumSize(int(720), int(480))
+        self.frame_player.setMinimumWidth(int(720))
+        # self.frame_player.setMaximumSize(int(1080), int(720))
         self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        frame_player_container.addWidget(self.frame_player)
-        # frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        # self.frame_player_container.addWidget(self.frame_player)
+        # self.frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Add warning when detection falls before 
-        self.low_confidence_warning = QLabel("⚠️ Warning: Low confidence in this detection. Please double check the image to make sure the boxed area is a shark!")
-        self.low_confidence_warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.low_confidence_warning.setMinimumHeight(30)
-        self.low_confidence_warning.setVisible(False)
-        frame_player_container.addWidget(self.low_confidence_warning)
-
-        # frame_player_container.addStretch()  # Add stretch after frame player
-        layout.addLayout(frame_player_container)
-        # layout.addWidget(self.low_confidence_warning)
-
-        # Button to toggle display to show gif/segmentation mask
-        # self.toggle_display_mode_button = QPushButton(self.frame_player)
-        # self.toggle_display_mode_button.clicked.connect(self.toggle_display_mode)
-        # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
-        # self.toggle_display_mode_button.setFixedSize(40, 40)
-        # self.toggle_display_mode_button.setIconSize(QSize(40, 40))
-        # self.toggle_display_mode_button.setStyleSheet(
-        #     "color: white; background: transparent; border: none; font-size: 18px;"
-        # )
+        # self.frame_player_container.addStretch()  # Add stretch after frame player
+        layout.addWidget(self.frame_player)
 
         self.box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"), parent=self.frame_player)
         self.box_icon.setFixedSize(30, 30)
@@ -2617,35 +2588,40 @@ class MainWindow(QMainWindow):
         )
         self.toggle_display_switch.clicked.connect(self.toggle_display_mode)
 
-        # self.toggle_display_switch.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        # Add warning when detection falls before 
+        self.low_confidence_warning = QLabel(
+            "⚠️ Low confidence in this detection. Please review before saving!",
+            parent=self.frame_player)
+        self.low_confidence_warning.setStyleSheet("color: #FFFFFF")
+        self.low_confidence_warning.setScaledContents(True)
+        self.low_confidence_warning.setVisible(False)
 
-        # self.toggle_switch_layout.addWidget(box_icon)
-        # self.toggle_switch_layout.addWidget(self.toggle_display_switch)
-        # self.toggle_switch_layout.addWidget(mask_icon)
-
-        # layout.addWidget(container)
-
-        def update_button_position():
+        def update_frame_elements():
             rect = self.frame_player.content_rect()
             if rect.isNull():
                 return
-
-            # Convert from frame_player-local coords → global → back to parent coords
-            bottom_right = self.frame_player.mapToParent(rect.bottomRight())
             
-            # Position button near bottom-right inside the actual content rect
-            btn_x = bottom_right.x() - self.mask_icon.width() - 13
-            btn_y = bottom_right.y() - self.mask_icon.height() - 38
+            self.low_confidence_warning.adjustSize()
 
-            # self.toggle_display_mode_button.move(btn_x, btn_y)
-            self.mask_icon.move(btn_x, btn_y)
+            # Extract bottom right coordinates2
+            bottom_right_x = rect.x() + rect.width()
+            bottom_right_y = self.frame_player_container.geometry().y() + rect.height()
+            
+            # Position button near bottom-right of video
+            btn_x = bottom_right_x - self.mask_icon.width() - 7
+            btn_y = bottom_right_y - self.mask_icon.height() - 4
+
+            self.mask_icon.move(btn_x , btn_y)
             self.toggle_display_switch.move(self.mask_icon.x() - self.toggle_display_switch.width() - 9 , btn_y)
             self.box_icon.move(self.toggle_display_switch.x() - self.toggle_display_switch.width() + 22 , btn_y)
+            
+            # Position warning to bottom center of video
+            warning_x = bottom_right_x - int(rect.width() / 2) - int(self.low_confidence_warning.width() / 2)
+            warning_y = self.toggle_display_switch.y() + int(self.low_confidence_warning.height() / 2)  # - int(2 * self.toggle_display_switch.height() / 3)
+            self.low_confidence_warning.move(warning_x, warning_y)
 
-        self.frame_player.resized.connect(update_button_position)
-        update_button_position()
-
-        # layout.addWidget(self.toggle_display_mode_button)
+        self.frame_player.resized.connect(update_frame_elements)
+        update_frame_elements()
 
         labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
 
@@ -2659,7 +2635,7 @@ class MainWindow(QMainWindow):
         # Historical items list (initially hidden)
         self.historical_items = QTableWidget()
         self.historical_items.setColumnCount(len(labels))
-        self.historical_items.setMinimumHeight(120)
+        self.historical_items.setMaximumHeight(120)
         self.historical_items.hide()
         self.historical_items.itemSelectionChanged.connect(self.show_historical_gif)
         self.historical_items.itemSelectionChanged.connect(self.set_current_label_combo)
@@ -2670,12 +2646,12 @@ class MainWindow(QMainWindow):
         # Export/Upload buttons
         button_layout = QHBoxLayout()
         self.save_changes_button = QPushButton("Save Changes")  # text will change in historical mode
+        self.edit_tracks_button = QPushButton("Edit Tracks")
+        self.edit_tracks_button.clicked.connect(self.toggle_edit_state)
         self.save_changes_button.clicked.connect(self.export_results)
-        # self.delete_track_button = QPushButton("Delete Track")
-        # self.delete_track_button.clicked.connect(self.mark_for_deletion)
         
+        button_layout.addWidget(self.edit_tracks_button)
         button_layout.addWidget(self.save_changes_button)
-        # button_layout.addWidget(self.delete_track_button)
         layout.addLayout(button_layout)
 
         # Finish Review Setup
@@ -2767,7 +2743,7 @@ class MainWindow(QMainWindow):
         # Render Historical Experiments and add to List
         self.historical_items.setRowCount(0)
         self.historical_items.clearContents()
-        self.reviewing_history = True
+        # self.reviewing_history = True
 
         if not self.current_experiment:
             self.toggle_review_buttons(enable=False)
@@ -2861,6 +2837,7 @@ class MainWindow(QMainWindow):
             self.historical_items.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
             self.historical_items.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             self.historical_items.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            self.historical_items.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
             self.historical_items.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
 
             self.switch_detection_list(show_historical=True)
@@ -2870,10 +2847,11 @@ class MainWindow(QMainWindow):
             
             # self.toggle_review_buttons(enable=detections_present)
             self.toggle_edit_state(set_state=False)
+            self.show_confidence_warning()
 
         except Exception as e:
             print(f"Error while building historical list: {e}")
-            self.switch_detection_list(show_historical=False)
+            self.switch_detection_list(show_historical=True)
             self.reviewing_history = False
 
             self.switch_detection_list(show_historical=True)
@@ -2971,13 +2949,19 @@ class MainWindow(QMainWindow):
         self.toggle_banner_buttons(review=False)
         
     def show_confidence_warning(self):
-        print(self.current_detection_index)
-        print(self.sorted_tracks)
-        _, track = self.sorted_tracks[self.current_detection_index]
-        if track['longest_conf'] < .65:
-            self.low_confidence_warning.setVisible(True)
+        if self.reviewing_history:
+            row = self.historical_items.currentRow()
+            conf = self.historical_items.item(row, 4).text()
+            if float(conf) < self.low_confidence_threshold:
+                self.low_confidence_warning.setVisible(True)
+            else:
+                self.low_confidence_warning.setVisible(False)
         else:
-            self.low_confidence_warning.setVisible(False)
+            _, track = self.sorted_tracks[self.current_detection_index]
+            if track['longest_conf'] < self.low_confidence_threshold:
+                self.low_confidence_warning.setVisible(True)
+            else:
+                self.low_confidence_warning.setVisible(False)
 
     def update_timer(self):
         self.elapsed_time += 1
@@ -3453,17 +3437,6 @@ class FramePlayer(QLabel):
             remaining_seconds = int(seconds % 60)
             return f"{minutes} minutes {remaining_seconds} seconds"
 
-    def format_time(self, seconds: float) -> str:
-        """Format seconds into a readable time string."""
-        if seconds < 60:
-            return f"{seconds:.2f} seconds"
-        elif seconds < 120:
-            return f"1 minute {seconds % 60:.0f} seconds"
-        else:
-            minutes = int(seconds // 60)
-            remaining_seconds = int(seconds % 60)
-            return f"{minutes} minutes {remaining_seconds} seconds"
-
     def finish_processing(self):
         self.is_processing = False
         self.timer.stop()
@@ -3527,6 +3500,12 @@ class FramePlayer(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.resized.emit()
+        if self._movie:
+            # Scale
+            frame = self._movie.currentPixmap()
+            frame_ratio = frame.width() / frame.height()
+            max_height = int(self.width() / frame_ratio)
+            self.setFixedHeight(min(int(500), max_height))
         self.update()
 
     def clear_frame(self):
@@ -3540,8 +3519,10 @@ class FramePlayer(QLabel):
     def content_rect(self):
         """
         Returns the QRect of the actually displayed pixmap/movie frame
-        inside the widget, after aspect-ratio scaling and centering.
+        inside the widget, reflecting the enforced resizeEvent behavior.
         """
+
+        # --- determine original frame size ---
         if self._static_pixmap:
             frame_size = self._static_pixmap.size()
         elif self._movie:
@@ -3551,6 +3532,27 @@ class FramePlayer(QLabel):
             frame_size = frame.size()
         else:
             return QRect()
+
+        widget_w = self.width()
+        widget_h = self.height()
+        # actual frame aspect ratio
+        frame_ratio = frame_size.width() / frame_size.height()
+
+        # scale to full widget width (this matches resizeEvent)
+        expected_height = int(widget_w / frame_ratio)
+
+        if expected_height <= widget_h:
+            # full frame fits vertically → centered vertically
+            x = 0
+            y = (widget_h - expected_height) // 2
+            return QRect(x, y, widget_w, expected_height)
+        else:
+            # (unlikely now) frame is taller → letterboxed horizontally
+            scaled_width = int(widget_h * frame_ratio)
+            x = (widget_w - scaled_width) // 2
+            y = 0
+            return QRect(x, y, scaled_width, widget_h)
+
 
         widget_size = self.size()
         scaled = frame_size.scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
