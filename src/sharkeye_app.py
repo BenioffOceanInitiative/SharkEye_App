@@ -1491,7 +1491,7 @@ class MainWindow(QMainWindow):
         self.banner_left_button.setToolTip("Previous Experiments")
         
         self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
-        self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
+        self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
         
         logo_label = QLabel()
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1563,7 +1563,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.setToolTip("Previous Experiments")
             
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
-            self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", False))
+            self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
 
     def setup_content_widget(self):
         # Create a container for the rest of the content
@@ -2040,18 +2040,6 @@ class MainWindow(QMainWindow):
                 delete_btn.clicked.connect(delete_row)
                 self.video_list.setCellWidget(row_position, 1, delete_btn)
         self.update_remove_buttons()
-        
-        new_files_added = 0
-        for file_path in video_files:
-            if file_path not in current_files:
-                file_name = os.path.basename(file_path)
-                item = QListWidgetItem(file_name)  # No emoji for new items
-                item.setData(Qt.ItemDataRole.UserRole, file_path)
-                self.video_list.addItem(item)
-                current_files.add(file_path)
-                new_files_added += 1
-        
-        self.update_remove_buttons()
 
     def remove_selected_videos(self):
         for item in self.video_list.selectedItems():
@@ -2089,12 +2077,11 @@ class MainWindow(QMainWindow):
             # Save GIFs for each detection
             self.save_detection_gif(self.current_output_dir)
             # Show first detection if available
-            if self.sorted_tracks:
-                self.show_detection(0)
             self.finish_processing()
             # Automatically show review widget after processing
             self.stack_widget.setCurrentWidget(self.review_widget)
             # Display most recent detections
+            self.reviewing_history = False
             self.toggle_banner_buttons()
             self.switch_detection_list(show_historical=True)
             self.setup_review_dropdown()
@@ -2255,27 +2242,24 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            if self.reviewing_history:
-                row = self.historical_items.currentRow()
-                if row < 0:
-                    QMessageBox.warning(self, "Mark for Deletion", "No track selected.")
-                    return
-
-                experiment_disp = self.historical_items.item(row, 0).text()
-                experiment = format_experiment_date(experiment_disp, to_human=False)
-                video_basename = self.historical_items.item(row, 1).text()
-                track_id = self.historical_items.item(row, 2).text()
-                csv_name = f"{Path(video_basename)}.csv"
-
-                key = (experiment, csv_name, int(track_id))
-                self.historical_label_changes[key] = "Delete"
-
-                # Remove the row from the QTableWidget
-                self.historical_items.removeRow(row)
-                self.historical_items.selectRow(max(0, row - 1))
-                self.show_historical_gif()
-            else:
+            row = self.historical_items.currentRow()
+            if row < 0:
+                QMessageBox.warning(self, "Mark for Deletion", "No track selected.")
                 return
+
+            experiment_disp = self.historical_items.item(row, 0).text()
+            experiment = format_experiment_date(experiment_disp, to_human=False)
+            video_basename = self.historical_items.item(row, 1).text()
+            track_id = self.historical_items.item(row, 2).text()
+            csv_name = f"{Path(video_basename)}.csv"
+
+            key = (experiment, csv_name, int(track_id))
+            self.historical_label_changes[key] = "Delete"
+
+            # Remove the row from the QTableWidget
+            self.historical_items.removeRow(row)
+            self.historical_items.selectRow(max(0, row - 1))
+            self.show_historical_gif()
     
     def delete_track(self, experiment, csv_name, track_id):
         """
@@ -2389,37 +2373,36 @@ class MainWindow(QMainWindow):
             #         # self.detection_list.visualItemRect(self.detection_list.item(row, 0)), False
 
     def update_label(self):
-        print(self.label_combo.previous_text)
-        if self.reviewing_history:
-            row = self.historical_items.currentRow()
-            if row < 0:
-                return
-
-            # Get experiment, video, track_id from the cells
-            experiment_disp = self.historical_items.item(row, 0).text()
-            
-            experiment = format_experiment_date(experiment_disp, to_human=False)
-            video_basename = self.historical_items.item(row, 1).text()
-            track_id = self.historical_items.item(row, 2).text()
-            csv_name = f"{Path(video_basename)}.csv"
-            print(csv_name)
-
-            key = (experiment, csv_name, int(track_id))
-            new_label = self.label_combo.currentText()
-            print(new_label)
-            print(self.label_combo.currentIndex()) 
-            self.historical_label_changes[key] = new_label 
-            print(self.historical_label_changes)
-            
-            if self.historical_label_changes[key] == None:
-                pass
-            if self.historical_label_changes[key] == self.label_combo.previous_text:
-                del self.historical_label_changes[key]
+        #if self.reviewing_history:
+        row = self.historical_items.currentRow()
+        if row < 0:
             return
+
+        # Get experiment, video, track_id from the cells
+        experiment_disp = self.historical_items.item(row, 0).text()
         
-        if not self.sorted_tracks:
-            print("Error: No sorted tracks available. Cannot update label.")
-            return
+        experiment = format_experiment_date(experiment_disp, to_human=False)
+        video_basename = self.historical_items.item(row, 1).text()
+        track_id = self.historical_items.item(row, 2).text()
+        csv_name = f"{Path(video_basename)}.csv"
+        print(csv_name)
+
+        key = (experiment, csv_name, int(track_id))
+        new_label = self.label_combo.currentText()
+        print(new_label)
+        print(self.label_combo.currentIndex()) 
+        self.historical_label_changes[key] = new_label 
+        print(self.historical_label_changes)
+        
+        if self.historical_label_changes[key] == None:
+            pass
+        if self.historical_label_changes[key] == self.label_combo.previous_text:
+            del self.historical_label_changes[key]
+        return
+        
+        # if not self.sorted_tracks:
+        #     print("Error: No sorted tracks available. Cannot update label.")
+        #     return
 
         new_label = self.label_combo.currentText()
         key, track = self.sorted_tracks[self.current_detection_index]
@@ -2467,6 +2450,7 @@ class MainWindow(QMainWindow):
         self.stack_widget.setCurrentWidget(self.review_widget)
         self.setup_review_dropdown()
         self.render_historical_experiments()
+        self.toggle_dropdown_display()
         self.toggle_banner_buttons(review=True)        
 
     def toggle_edit_state(self, set_state=None):
@@ -2490,40 +2474,40 @@ class MainWindow(QMainWindow):
         
     def toggle_display_mode(self):
         # Historical mode: always show mask overlay if available
-        if self.reviewing_history:
-            if self.gif_active:
-                row = self.historical_items.currentRow()  # Toggle should be disabled in historical mode
-                if row < 0:
-                    return
-                experiment_disp = self.historical_items.item(row, 0).text()
-                experiment = format_experiment_date(experiment_disp, to_human=False)
-                video_basename = self.historical_items.item(row, 1).text()
-                track_id = self.historical_items.item(row, 2).text()
-                mask_dir = Path(get_results_dir()) / experiment / "masks"
-                mask_filename = f"{video_basename}_{track_id}.jpg"
-                mask_path = mask_dir / mask_filename
+        # if self.reviewing_history:
+        if self.gif_active:
+            row = self.historical_items.currentRow()  # Toggle should be disabled in historical mode
+            if row < 0:
+                return
+            experiment_disp = self.historical_items.item(row, 0).text()
+            experiment = format_experiment_date(experiment_disp, to_human=False)
+            video_basename = self.historical_items.item(row, 1).text()
+            track_id = self.historical_items.item(row, 2).text()
+            mask_dir = Path(get_results_dir()) / experiment / "masks"
+            mask_filename = f"{video_basename}_{track_id}.jpg"
+            mask_path = mask_dir / mask_filename
 
-                if mask_path.exists():
-                    mask_overlay = cv2.imread(str(mask_path))
-                    frame_rgb = cv2.cvtColor(mask_overlay, cv2.COLOR_BGR2RGB)
-                    height, width, channel = frame_rgb.shape
-                    bytes_per_line = 3 * width
-                    q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                    pixmap = QPixmap.fromImage(q_image)
-                    scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                    self.frame_player.set_static_pixmap(scaled_pixmap)
-                    # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
-                else:
-                    dlg = QMessageBox(self)
-                    dlg.setWindowTitle("Alert")
-                    dlg.setText("Error: No mask drawn for this track")
-                    dlg.exec()
-                # Do NOT start/stop timer in historical mode
-                self.gif_active = False
-                return
+            if mask_path.exists():
+                mask_overlay = cv2.imread(str(mask_path))
+                frame_rgb = cv2.cvtColor(mask_overlay, cv2.COLOR_BGR2RGB)
+                height, width, channel = frame_rgb.shape
+                bytes_per_line = 3 * width
+                q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(q_image)
+                scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
+                self.frame_player.set_static_pixmap(scaled_pixmap)
+                # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
             else:
-                self.show_historical_gif()
-                return
+                dlg = QMessageBox(self)
+                dlg.setWindowTitle("Alert")
+                dlg.setText("Error: No mask drawn for this track")
+                dlg.exec()
+            # Do NOT start/stop timer in historical mode
+            self.gif_active = False
+            return
+        else:
+            self.show_historical_gif()
+            return
         # Non-historical mode: toggle between mask overlay and animation
         if self.frame_player.timer.isActive():
             self.frame_player.timer.stop()
@@ -2841,7 +2825,7 @@ class MainWindow(QMainWindow):
             self.historical_items.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
 
             self.switch_detection_list(show_historical=True)
-            self.reviewing_history = True
+            # self.reviewing_history = True
 
             detections_present = self.historical_items.rowCount() > 0
             
@@ -2851,11 +2835,11 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             print(f"Error while building historical list: {e}")
-            self.switch_detection_list(show_historical=True)
-            self.reviewing_history = False
+            # self.switch_detection_list(show_historical=True)
+            # self.reviewing_history = False
 
-            self.switch_detection_list(show_historical=True)
-            self.reviewing_history = True
+            # self.switch_detection_list(show_historical=True)
+            # self.reviewing_history = True
 
     def setup_review_dropdown(self):
         experiments_root = get_results_dir()
@@ -2949,19 +2933,19 @@ class MainWindow(QMainWindow):
         self.toggle_banner_buttons(review=False)
         
     def show_confidence_warning(self):
-        if self.reviewing_history:
-            row = self.historical_items.currentRow()
-            conf = self.historical_items.item(row, 4).text()
-            if float(conf) < self.low_confidence_threshold:
-                self.low_confidence_warning.setVisible(True)
-            else:
-                self.low_confidence_warning.setVisible(False)
+        # if self.reviewing_history:
+        row = self.historical_items.currentRow()
+        conf = self.historical_items.item(row, 4).text()
+        if float(conf) < self.low_confidence_threshold:
+            self.low_confidence_warning.setVisible(True)
         else:
-            _, track = self.sorted_tracks[self.current_detection_index]
-            if track['longest_conf'] < self.low_confidence_threshold:
-                self.low_confidence_warning.setVisible(True)
-            else:
-                self.low_confidence_warning.setVisible(False)
+            self.low_confidence_warning.setVisible(False)
+        # else:
+        #     _, track = self.sorted_tracks[self.current_detection_index]
+        #     if track['longest_conf'] < self.low_confidence_threshold:
+        #         self.low_confidence_warning.setVisible(True)
+        #     else:
+        #         self.low_confidence_warning.setVisible(False)
 
     def update_timer(self):
         self.elapsed_time += 1
@@ -3004,9 +2988,9 @@ class MainWindow(QMainWindow):
         print("Video order updated:", self.video_queue)
 
     def export_results(self):
-        if self.reviewing_history:
-            self._save_historical_label_changes()
-            return
+        # if self.reviewing_history:
+        self._save_historical_label_changes()
+        return
     
         if not self.sorted_tracks:
             QMessageBox.warning(self, "No Data", "There are no results to export.")
