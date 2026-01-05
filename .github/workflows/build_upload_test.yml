@@ -27,7 +27,7 @@ jobs:
       - name: Authenticate Service Account Credentials 
         uses: 'google-github-actions/auth@v3'
         with:
-          credentials_json: '${{ secrets.ACTIONS_SERVICE_ACCOUNT }}'
+          credentials_json: '${{secrets.ACTIONS_SERVICE_ACCOUNT}}'
    
       - name: Upload ZIP to Bucket
-        run: python update_build_in_bucket.py
+        run: python src/update_build_in_bucket.py
