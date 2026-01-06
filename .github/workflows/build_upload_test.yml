@@ -28,10 +28,6 @@ jobs:
         uses: 'google-github-actions/auth@v3'
         with:
           credentials_json: '${{secrets.ACTIONS_SERVICE_ACCOUNT}}'
-     
-      - name: Inspect google package
-        run: |
-          python -c "import google, inspect; print('google module:', inspect.getfile(google) if hasattr(google, '__file__') else 'namespace package'); print('google path:', list(getattr(google, '__path__', [])))"
 
       - name: Upload ZIP to Bucket
         run: python src/update_build_in_bucket.py
