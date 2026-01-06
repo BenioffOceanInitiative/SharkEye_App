@@ -16,14 +16,7 @@ dask==2025.7.0
 filelock==3.18.0
 fonttools==4.58.0
 fsspec==2025.3.2
-google-api-core==2.28.1
-google-auth==2.45.0
-google-cloud-core==2.5.0
 google-cloud-storage==3.7.0
-google-crc32c==1.8.0
-google-resumable-media==2.8.0
-googleapis-common-protos==1.72.0
-grpcio==1.76.0
 idna==3.10
 imageio==2.37.0
 importlib_metadata==8.7.0
@@ -94,4 +87,5 @@ ultralytics-thop==2.0.14
 urllib3==2.4.0
 Werkzeug==3.1.4
 zipp==3.23.0
+
 
