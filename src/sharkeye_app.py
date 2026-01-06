@@ -187,6 +187,8 @@ class SettingsDialog(QDialog):
 
     def switch_category(self, index):
         self.pages.setCurrentIndex(index)
+        if self.pages.currentWidget() in (self.cloud_feature_page, self.historical_settings_page):
+            self.pages.currentWidget().populate_experiment_table()
 
     def closeEvent(self, event):
         self.drone_settings_page.save_settings()
@@ -1490,8 +1492,8 @@ class MainWindow(QMainWindow):
         )
         self.banner_left_button.setToolTip("Previous Experiments")
         
-        self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
         self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
+        self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
         
         logo_label = QLabel()
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1561,10 +1563,9 @@ class MainWindow(QMainWindow):
                 "color: white; background: transparent; border: none; font-size: 18px;"
             )
             self.banner_left_button.setToolTip("Previous Experiments")
-            
-            self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
+        
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
-
+            self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
     def setup_content_widget(self):
         # Create a container for the rest of the content
         self.content_widget = QWidget()
@@ -2131,6 +2132,7 @@ class MainWindow(QMainWindow):
         popup.accept()
         self.reviewing_history = False
         self.switch_detection_list(show_historical=True)
+        self.toggle_dropdown_display()
         self.go_to_review_history()
 
     def show_detection(self, index): # Not in Use
@@ -2163,7 +2165,7 @@ class MainWindow(QMainWindow):
 
     def update_detection_list(self):
         # Use a table format for the detection list, matching the historical items table
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
         self.detection_list.setRowCount(0)
         self.detection_list.clearContents()
         self.detection_list.setHorizontalHeaderLabels(labels)
@@ -2450,7 +2452,6 @@ class MainWindow(QMainWindow):
         self.stack_widget.setCurrentWidget(self.review_widget)
         self.setup_review_dropdown()
         self.render_historical_experiments()
-        self.toggle_dropdown_display()
         self.toggle_banner_buttons(review=True)        
 
     def toggle_edit_state(self, set_state=None):
@@ -2607,7 +2608,7 @@ class MainWindow(QMainWindow):
         self.frame_player.resized.connect(update_frame_elements)
         update_frame_elements()
 
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
 
         self.detection_list = QTableWidget()
         self.detection_list.setColumnCount(len(labels))
@@ -2701,8 +2702,8 @@ class MainWindow(QMainWindow):
         else:
             # Get the selected row index
             row = self.historical_items.currentRow()
-            if row < 0:
-                return
+        if row < 0:
+            return
 
         experiment = format_experiment_date(self.historical_items.item(row, 0).text(), to_human=False)  # first column
         video_basename = self.historical_items.item(row, 1).text()  # second column
@@ -2710,6 +2711,7 @@ class MainWindow(QMainWindow):
         gif_dir = Path(get_results_dir()) / experiment / "tracking_gifs"
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
+        
         if gif_path.exists():
             # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
             self.toggle_display_switch.reset_position()
@@ -2727,19 +2729,19 @@ class MainWindow(QMainWindow):
         # Render Historical Experiments and add to List
         self.historical_items.setRowCount(0)
         self.historical_items.clearContents()
-        # self.reviewing_history = True
-
-        if not self.current_experiment:
+        
+        # Return if dropdown is empty
+        exp_disp = self.review_dropdown.currentText()
+        if not (self.current_experiment and exp_disp):
             self.toggle_review_buttons(enable=False)
             return
 
-        exp_disp = self.review_dropdown.currentText()
         # Extract only the date part (before the first parenthesis, if present)
         exp_date = exp_disp.split(' (')[0].strip()
         self.current_experiment = format_experiment_date(exp_date, to_human=False)
 
         experiments_root = get_results_dir()
-        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
 
         try:
             # newest-first
@@ -2800,6 +2802,10 @@ class MainWindow(QMainWindow):
                                 if col == 4 and conf_longest < 0.65:
                                     cell.setForeground(QColor('red'))
                                 self.historical_items.setItem(row_position, col, cell)
+                        
+                        # Hide "Experiment" and "ID" Columns
+                        self.historical_items.setColumnHidden(0, True)
+                        self.historical_items.setColumnHidden(2, True)
 
                         # Create delete button
                         del_button = QPushButton("")
@@ -2811,6 +2817,7 @@ class MainWindow(QMainWindow):
                         self.historical_items.item(row_position, 0).setData(
                             Qt.ItemDataRole.UserRole, (self.current_experiment, video_basename, track_id)
                         )
+
                     except Exception as e:
                         print(f"Error creating historical row item from {csv_path}: {e}")
                 
@@ -2832,6 +2839,7 @@ class MainWindow(QMainWindow):
             # self.toggle_review_buttons(enable=detections_present)
             self.toggle_edit_state(set_state=False)
             self.show_confidence_warning()
+            self.toggle_dropdown_display()
 
         except Exception as e:
             print(f"Error while building historical list: {e}")
@@ -2857,7 +2865,7 @@ class MainWindow(QMainWindow):
         self.current_experiment = format_experiment_date(self.review_dropdown.currentText(), to_human=False)
     
     def toggle_dropdown_display(self):
-        if self.reviewing_history:  
+        if self.reviewing_history == True:  
             self.review_dropdown.show()
         else:
             self.review_dropdown.hide()
