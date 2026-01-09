@@ -23,6 +23,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip install pyinstaller
+          pip show google-cloud-storage
+          python3.11.4 -m pip install --upgrade google-cloud-storage
+          
   
       - name: Authenticate Service Account Credentials 
         uses: 'google-github-actions/auth@v3'
