@@ -2397,6 +2397,11 @@ class MainWindow(QMainWindow):
         track_id = self.historical_items.item(row, 2).text()
         csv_name = f"{Path(video_basename)}.csv"
         print(csv_name)
+# Traceback (most recent call last):
+#   File "C:\Users\legop\Desktop\GitHub\SharkEye_App\src\SharkEye_App.py", line 2402, in update_label
+#     new_label = self.label_combo.currentText()
+#                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+# RuntimeError: wrapped C/C++ object of type QComboBox has been deleted
         key = (experiment, csv_name, int(track_id))
         new_label = self.label_combo.currentText()
         print(new_label)
