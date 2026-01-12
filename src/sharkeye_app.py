@@ -1499,9 +1499,9 @@ class MainWindow(QMainWindow):
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_label.setScaledContents(False)
         logo_label.setFixedHeight(40)
-
+    
         logo_path = resource_path('assets/images/logo-white.png')
-
+        
         pixmap = QPixmap(logo_path)
         dpr = logo_label.devicePixelRatioF()
 
@@ -1553,8 +1553,11 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_home)
 
             self.banner_right_button.setText("")
+            self.banner_right_button.setIcon(QIcon())
+            self.banner_right_button.setFixedSize(40, 40)
             self.banner_right_button.setEnabled(False)
-            self.banner_right_button.hide()
+            self.banner_right_button.setToolTip("")
+            # self.banner_right_button.hide()
         else:
             # Home Screen
             self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
@@ -1566,6 +1569,12 @@ class MainWindow(QMainWindow):
         
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
+
+            self.banner_right_button.setText("")
+            self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+            self.banner_right_button.setEnabled(True)
+            self.banner_right_button.setToolTip("Settings")
+
     def setup_content_widget(self):
         # Create a container for the rest of the content
         self.content_widget = QWidget()
@@ -2388,7 +2397,11 @@ class MainWindow(QMainWindow):
         track_id = self.historical_items.item(row, 2).text()
         csv_name = f"{Path(video_basename)}.csv"
         print(csv_name)
-
+# Traceback (most recent call last):
+#   File "C:\Users\legop\Desktop\GitHub\SharkEye_App\src\SharkEye_App.py", line 2402, in update_label
+#     new_label = self.label_combo.currentText()
+#                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+# RuntimeError: wrapped C/C++ object of type QComboBox has been deleted
         key = (experiment, csv_name, int(track_id))
         new_label = self.label_combo.currentText()
         print(new_label)
@@ -2669,7 +2682,7 @@ class MainWindow(QMainWindow):
         Set self.label_combo to the QComboBox found in the currently selected row.
         Works for both historical (historical_items) and current detections (detection_list).
         """
-        table = self.historical_items if getattr(self, "reviewing_history", False) else self.detection_list
+        table = self.historical_items # if getattr(self, "reviewing_history", False) else self.detection_list
         if table is None:
             print("No table")
             return
