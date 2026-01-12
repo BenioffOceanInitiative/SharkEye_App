@@ -10,7 +10,7 @@ jobs:
       - name: Checkout source (with Git LFS)
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 0
 
       - name: Setup Python
@@ -32,5 +32,8 @@ jobs:
         with:
           credentials_json: '${{secrets.ACTIONS_SERVICE_ACCOUNT}}'
 
+      - name: Download Model Weights
+        run: python -m model_weights/download_models_from_gcs.py
+      
       - name: Upload ZIP to Bucket
         run: python update_build_in_bucket.py
