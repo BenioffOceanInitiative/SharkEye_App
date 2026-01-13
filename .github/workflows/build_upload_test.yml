@@ -1,42 +1,38 @@
-name: Test File Upload
+name: Run GCS Scripts
 
-on: workflow_dispatch
+on:
+  workflow_dispatch
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-
+  run-scripts:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+    
     steps:
-      - name: Checkout source (with Git LFS)
+      - name: Checkout code
         uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          lfs: false
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11.4"
+          python-version: '3.11'
           cache: 'pip'
-
+      
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
-          pip show google-cloud-storage
-          pip install --upgrade google-cloud-storage
-          pip show google-cloud-storage
-          python -c "import sys; print(sys.executable)"
-          python -m pip list
-
-      - name: Authenticate Service Account Credentials 
-        uses: 'google-github-actions/auth@v3'
+      
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
         with:
-          credentials_json: '${{secrets.ACTIONS_SERVICE_ACCOUNT}}'
-
-      - name: Download Model Weights
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+      
+      - name: Run download_models_from_gcs.py
         run: python model_weights/download_models_from_gcs.py
       
-      - name: Upload ZIP to Bucket
+      - name: Run update_build_in_bucket.py
         run: python update_build_in_bucket.py
