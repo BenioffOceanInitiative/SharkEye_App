@@ -34,7 +34,7 @@ jobs:
           credentials_json: '${{secrets.ACTIONS_SERVICE_ACCOUNT}}'
 
       - name: Download Model Weights
-        run: python -m model_weights/download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
       
       - name: Upload ZIP to Bucket
         run: python update_build_in_bucket.py
