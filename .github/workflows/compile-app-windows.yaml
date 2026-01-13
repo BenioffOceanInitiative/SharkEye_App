@@ -28,6 +28,11 @@ jobs:
           pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
           pip install pyinstaller
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+          
       - name: Run download_models_from_gcs.py
         run: python model_weights/download_models_from_gcs.py
         
