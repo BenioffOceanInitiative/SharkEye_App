@@ -26,8 +26,9 @@ jobs:
           pip show google-cloud-storage
           python -m pip install --upgrade google-cloud-storage
           pip show google-cloud-storage
-          
-  
+          python -c "import sys; print(sys.executable)"
+          python -m pip list
+
       - name: Authenticate Service Account Credentials 
         uses: 'google-github-actions/auth@v3'
         with:
