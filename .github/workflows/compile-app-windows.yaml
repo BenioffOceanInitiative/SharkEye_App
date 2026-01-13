@@ -4,36 +4,18 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch 
 
 jobs:
   build-windows:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source (with Git LFS)
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 0
-
-      - name: Ensure LFS files are pulled
-        shell: pwsh
-        run: |
-          git lfs install
-          git lfs pull
-          if (Test-Path .gitmodules) {
-            git submodule update --init --recursive
-            git -c submodule.recurse=true lfs pull
-          }
-
-      - name: Verify SAM weights (not an LFS pointer)
-        shell: pwsh
-        run: |
-          $path = "model_weights/sam_vit_b_01ec64.pth"
-          if (-not (Test-Path $path)) { throw "Missing weights at $path. Did LFS fetch run?" }
-          $size = (Get-Item $path).Length
-          if ($size -lt 314572800) { throw "Weights too small ($size bytes) — likely a Git LFS pointer." }
-          Write-Host "Weights OK: $path ($size bytes)"
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -43,9 +25,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
           pip install pyinstaller
 
+      - name: Run download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
+        
       - name: Build with PyInstaller spec
         run: pyinstaller SharkEye.spec
 
@@ -63,10 +48,14 @@ jobs:
           Write-Host "Created $zipName"
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
-      - name: Upload ZIP to Google Drive
-        uses: willo32/google-drive-upload-action@v1
-        with:
-          target: ${{ env.ZIP_NAME }}
-          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
-          name: ${{ env.ZIP_NAME }}
+      # - name: Upload ZIP to Google Drive
+      #   uses: willo32/google-drive-upload-action@v1
+      #   with:
+      #     target: ${{ env.ZIP_NAME }}
+      #     credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+      #     parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+      #     name: ${{ env.ZIP_NAME }}
+
+      - name: Upload build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+
