@@ -2,26 +2,26 @@
 
 import os, sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
-try:
-    # PyInstaller >= 6.3
-    from PyInstaller.utils.hooks import collect_dynamic_libs
-except Exception:
-    # Fallback name in some versions
-    from PyInstaller.utils.hooks import collect_binaries as collect_dynamic_libs
+from PyInstaller.utils.hooks import (
+    collect_submodules,
+    collect_data_files,
+    collect_dynamic_libs,
+    get_package_paths,
+)
 
 block_cipher = None
 
-# ---------- robust paths ----------
+# ---------- paths ----------
 try:
     HERE = Path(__file__).resolve().parent
 except NameError:
     HERE = Path.cwd()
-SRC = HERE / "src"                                   # your source dir
-ENTRY = SRC / "sharkeye_app.py"                      # your main script
+
+SRC   = HERE / "src"
+ENTRY = SRC / "sharkeye_app.py"
 
 # ---------- hidden imports ----------
-hidden_imports = []
+hidden_imports  = []
 hidden_imports += collect_submodules("PyQt6.QtCore")
 hidden_imports += collect_submodules("PyQt6.QtGui")
 hidden_imports += collect_submodules("PyQt6.QtWidgets")
@@ -30,34 +30,42 @@ hidden_imports += collect_submodules("ultralytics")
 hidden_imports += collect_submodules("segment_anything")
 hidden_imports += collect_submodules("scipy")
 hidden_imports += collect_submodules("tensorboard")
-# If you truly use these, uncomment; otherwise leave out to avoid build errors
-# hidden_imports += ["lapx", "dask"]
+
+hidden_imports += [
+    "torch.cuda",
+    "torch.cuda.amp",
+    "torch.backends.cudnn",
+    "torch.backends.cuda",
+    "torch._C",
+]
 
 # ---------- data files ----------
 datas  = []
 datas += collect_data_files("PyQt6.QtCore")
 datas += collect_data_files("PyQt6.QtGui")
-datas += collect_data_files("PyQt6.QtWidgets") 
-datas += collect_data_files("PyQt6.QtSvgWidgets")                # Qt plugins/resources
+datas += collect_data_files("PyQt6.QtWidgets")
+datas += collect_data_files("PyQt6.QtSvgWidgets")
 datas += collect_data_files("ultralytics")
-datas += collect_data_files("torch")
-datas += collect_data_files("certifi")               # CA bundle for requests
+datas += collect_data_files("certifi")
 datas += collect_data_files("tensorboard")
 
-# your app assets + model weights
 datas += [
-    (str(HERE / "assets" / "images"),       "assets/images"),
-    (str(HERE / "assets" / "logo"),         "assets/logo"),
+    (str(HERE / "assets" / "images"), "assets/images"),
+    (str(HERE / "assets" / "logo"), "assets/logo"),
     (str(HERE / "model_weights" / "runs-detect-train-weights-best.pt"), "model_weights"),
-    (str(HERE / "model_weights" / "sam_vit_b_01ec64.pth"),              "model_weights"),
+    (str(HERE / "model_weights" / "sam_vit_b_01ec64.pth"), "model_weights"),
 ]
 
-# ---------- native binaries (DLLs/SOs) ----------
+# ---------- native binaries ----------
 binaries  = []
-binaries += collect_dynamic_libs("cv2")              # includes ffmpeg dlls
+binaries += collect_dynamic_libs("cv2")
 binaries += collect_dynamic_libs("numpy")
 binaries += collect_dynamic_libs("scipy")
 binaries += collect_dynamic_libs("torch")
+
+torch_base, _ = get_package_paths("torch")
+for dll in Path(torch_base).rglob("nvrtc64_*.dll"):
+    binaries.append((str(dll), "."))
 
 # ---------- icon ----------
 if sys.platform.startswith("win"):
@@ -69,14 +77,16 @@ else:
 
 a = Analysis(
     [str(ENTRY)],
-    pathex=[str(SRC)],                # make 'src' importable (utility, segmentation, etc.)
+    pathex=[str(SRC)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[str(HERE)],
-    hooksconfig={},
-    runtime_hooks=[],                 # you can add a runtime hook file here if needed
-    excludes=['PyQt6.QtBluetooth', 'PyQt6.QtNfc'],
+    runtime_hooks=[],
+    excludes=[
+        "PyQt6.QtBluetooth",
+        "PyQt6.QtNfc",
+    ],
     noarchive=False,
 )
 
@@ -88,11 +98,11 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="SharkEye",
-    debug=False,                      # set True while diagnosing
+    debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,                        # <-- DO NOT UPX torch/Qt/scipy dlls
-    console=True,                     # <-- True for debugging; set False for release
+    upx=False,
+    console=True,
     icon=icon_file,
 )
 
@@ -108,15 +118,9 @@ if sys.platform.startswith("darwin"):
         info_plist={
             "NSHighResolutionCapable": "True",
             "NSPrincipalClass": "NSApplication",
-            "NSAppleScriptEnabled": False,
+            "LSBackgroundOnly": False,
             "CFBundleShortVersionString": "1.0.0",
             "CFBundleVersion": "1.0.0",
-            "LSBackgroundOnly": False,
-            "CFBundleDocumentTypes": [],
-            "NSCameraUsageDescription": "This app requires camera access to process video files.",
-            "NSPhotoLibraryUsageDescription": "This app requires access to the photo library to process video files.",
-            "CFBundleIconFile": "SharkEye.icns",
-            "CFBundleIconName": "SharkEye",
         },
     )
 else:
@@ -126,7 +130,6 @@ else:
         a.zipfiles,
         a.datas,
         strip=False,
-        upx=False,                     # keep UPX off here too
-        upx_exclude=[],
+        upx=False,
         name="SharkEye",
     )
