@@ -20,7 +20,13 @@ jobs:
         with:
           lfs: false
           fetch-depth: 0
-
+      
+      - name: Setup Python (arm64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.4"
+          architecture: "arm64"
+          
       - name: Confirm runner and Python architecture
         shell: bash
         run: |
