@@ -21,17 +21,6 @@ jobs:
           lfs: false
           fetch-depth: 0
 
-      - name: Ensure LFS files are pulled
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git lfs install
-          git lfs pull
-          if [ -f .gitmodules ]; then
-            git submodule update --init --recursive
-            git -c submodule.recurse=true lfs pull
-          fi
-
       - name: Confirm runner and Python architecture
         shell: bash
         run: |
