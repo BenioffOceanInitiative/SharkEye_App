@@ -46,7 +46,10 @@ def main(build_path: Path):
     blob_path = build_path.name
     blob = bucket.blob(blob_path)
     blob.upload_from_filename(build_path)
-    print(f"{target_folder} Build Uploaded Successfully. Previous {target_folder} build moved to {new_archive_path}")
+    if current_build:
+        print(f"{target_folder} Build Uploaded Successfully. Previous {target_folder} build moved to {new_archive_path}")
+    else:
+        print(f"{target_folder} Build Uploaded Successfully.")
 
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Upload ")

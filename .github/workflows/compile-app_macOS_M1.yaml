@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build-macos-apple:
@@ -14,10 +15,10 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"  # ensure arm64 wheels resolve cleanly
 
     steps:
-      - name: Checkout source (with Git LFS)
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 0
 
       - name: Ensure LFS files are pulled
@@ -30,28 +31,6 @@ jobs:
             git submodule update --init --recursive
             git -c submodule.recurse=true lfs pull
           fi
-
-      - name: Verify SAM weights (not an LFS pointer)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          path="model_weights/sam_vit_b_01ec64.pth"
-          if [ ! -f "$path" ]; then
-            echo "Missing weights at $path. Did LFS fetch run?" >&2
-            exit 1
-          fi
-          size=$(stat -f%z "$path")
-          if [ "$size" -lt 314572800 ]; then
-            echo "Weights too small ($size bytes) — likely a Git LFS pointer." >&2
-            exit 1
-          fi
-          echo "Weights OK: $path ($size bytes)"
-
-      - name: Setup Python (arm64)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11.4"
-          architecture: "arm64"
 
       - name: Confirm runner and Python architecture
         shell: bash
@@ -70,19 +49,27 @@ jobs:
           pip install -r requirements.txt
           pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+          
+      - name: Run download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
+        
       - name: Clean build outputs
         shell: bash
         run: |
           set -euxo pipefail
           rm -rf build dist __pycache__
 
-      - name: Build with PyInstaller spec
+      - name: Build ARM64 with PyInstaller spec
         shell: bash
         run: |
           set -euxo pipefail
           pyinstaller --clean --noconfirm SharkEye.spec
 
-      - name: List dist contents
+      - name: List ARM64 dist contents
         shell: bash
         run: |
           set -euxo pipefail
@@ -96,7 +83,7 @@ jobs:
             file dist/SharkEye/* || true
           fi
 
-      - name: Create ZIP archive
+      - name: Create ARM64 ZIP archive
         shell: bash
         run: |
           set -euxo pipefail
@@ -111,13 +98,97 @@ jobs:
             echo "No known build output found" >&2
             exit 1
           fi
-          echo "ZIP_NAME=$zipName" >> "$GITHUB_ENV"
+          echo "ZIP_NAME_ARM64=$zipName" >> "$GITHUB_ENV"
           echo "Created $zipName"
 
-      - name: Upload ZIP to Google Drive
-        uses: willo32/google-drive-upload-action@v1
-        with:
-          target: ${{ env.ZIP_NAME }}
-          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
-          name: ${{ env.ZIP_NAME }}
+      - name: Clean build outputs for Intel build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf build dist __pycache__
+
+      - name: Setup Homebrew environment for Intel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Homebrew is typically already installed on GitHub Actions runners
+          # For Intel builds under Rosetta, we use /usr/local (Intel path)
+          if [ -d "/usr/local/bin" ]; then
+            export PATH="/usr/local/bin:$PATH"
+          fi
+
+      - name: Install x86_64 Python via Homebrew
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Install Python 3.11 under Rosetta 2 (Intel architecture)
+          arch -x86_64 /bin/bash -c 'if ! command -v brew &> /dev/null; then /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; fi'
+          arch -x86_64 /bin/bash -c 'brew install python@3.11 || brew upgrade python@3.11 || true'
+          # Find the Intel Python path (under Rosetta, Homebrew uses /usr/local)
+          INTEL_PYTHON=$(arch -x86_64 /bin/bash -c 'brew --prefix python@3.11')/bin/python3
+          if [ ! -f "$INTEL_PYTHON" ]; then
+            # Fallback: try system Python under Rosetta
+            INTEL_PYTHON=$(arch -x86_64 which python3)
+          fi
+          echo "INTEL_PYTHON=$INTEL_PYTHON" >> "$GITHUB_ENV"
+          echo "Intel Python path: $INTEL_PYTHON"
+
+      - name: Confirm Intel Python architecture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          arch -x86_64 "${{ env.INTEL_PYTHON }}" -c "import platform, sys; print('Python:', sys.version); print('Machine:', platform.machine()); print('Arch tuple:', platform.architecture())"
+          py_machine=$(arch -x86_64 "${{ env.INTEL_PYTHON }}" -c "import platform; print(platform.machine())")
+          [ "$py_machine" = "x86_64" ] || (echo "Unexpected Python machine: $py_machine" >&2; exit 1)
+
+      - name: Install dependencies for Intel build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          arch -x86_64 "${{ env.INTEL_PYTHON }}" -m pip install --upgrade pip wheel
+          arch -x86_64 "${{ env.INTEL_PYTHON }}" -m pip install -r requirements.txt
+          arch -x86_64 "${{ env.INTEL_PYTHON }}" -m pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
+
+      - name: Build Intel with PyInstaller spec
+        shell: bash
+        run: |
+          set -euxo pipefail
+          arch -x86_64 "${{ env.INTEL_PYTHON }}" -m PyInstaller --clean --noconfirm SharkEye.spec
+
+      - name: List Intel dist contents
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ls -lah dist || true
+          if [ -d "dist/SharkEye.app" ]; then
+            du -sh dist/SharkEye.app || true
+            ls -lah "dist/SharkEye.app/Contents/MacOS" || true
+            file "dist/SharkEye.app/Contents/MacOS/"* || true
+          elif [ -d "dist/SharkEye" ]; then
+            ls -lah dist/SharkEye || true
+            file dist/SharkEye/* || true
+          fi
+
+      - name: Create Intel ZIP archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          date=$(date +"%Y%m%d")
+          zipName="SharkEye_macOS_Intel_$date.zip"
+          # If PyInstaller created an .app bundle
+          if [ -d "dist/SharkEye.app" ]; then
+            zip -r "$zipName" "dist/SharkEye.app"
+          elif [ -d "dist/SharkEye" ]; then
+            zip -r "$zipName" "dist/SharkEye"
+          else
+            echo "No known build output found" >&2
+            exit 1
+          fi
+          echo "ZIP_NAME_INTEL=$zipName" >> "$GITHUB_ENV"
+          echo "Created $zipName"
+
+      - name: Upload ARM64 build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"
+
+      - name: Upload Intel build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_INTEL }}"
