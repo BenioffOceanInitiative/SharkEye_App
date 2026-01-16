@@ -53,14 +53,14 @@ jobs:
           Write-Host "Created $zipName"
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
-      # - name: Upload ZIP to Google Drive
-      #   uses: willo32/google-drive-upload-action@v1
-      #   with:
-      #     target: ${{ env.ZIP_NAME }}
-      #     credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-      #     parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
-      #     name: ${{ env.ZIP_NAME }}
+      - name: Upload ZIP to Google Drive
+        uses: willo32/google-drive-upload-action@v1
+        with:
+          target: ${{ env.ZIP_NAME }}
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+          name: ${{ env.ZIP_NAME }}
 
-      - name: Upload build to Google Cloud Bucket
-        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+      # - name: Upload build to Google Cloud Bucket
+      #   run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
 
