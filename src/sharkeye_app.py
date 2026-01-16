@@ -1406,8 +1406,7 @@ class MainWindow(QMainWindow):
         self.setup_review_widget()
 
     def setup_model(self):
-        device = torch.device('cpu') if getattr(sys, 'frozen', False) else \
-         torch.device('cuda' if torch.cuda.is_available() else
+        device = torch.device('cuda' if torch.cuda.is_available() else
                       'mps' if torch.backends.mps.is_available() else 'cpu')
         print(f"Using device: {device}")
         self.model = YOLO(MODEL_PATH).to(device)
