@@ -82,9 +82,9 @@ jobs:
           zipName="SharkEye_macOS_Intel_$date.zip"
           # If PyInstaller created an .app bundle
           if [ -d "dist/SharkEye.app" ]; then
-            zip -r "$zipName" "dist/SharkEye.app"
+            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye.app "$zipName"
           elif [ -d "dist/SharkEye" ]; then
-            zip -r "$zipName" "dist/SharkEye"
+            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye "$zipName"
           else
             echo "No known build output found" >&2
             exit 1
