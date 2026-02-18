@@ -38,7 +38,11 @@ jobs:
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
+      
+          # Force safe NumPy version for macOS Intel
+          pip install "numpy==1.26.4"
+      
+          pip install -r requirements.txt --no-deps
           pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
 
       - name: Clean build outputs
