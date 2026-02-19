@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
                              QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
-                             QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout)
+                             QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint
 from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter
 from PyQt6.QtSvgWidgets import QSvgWidget
@@ -33,6 +33,7 @@ import shutil
 import tempfile
 import io
 import imageio
+from PIL import Image
 import pandas as pd
 import math
 from pathlib import Path
@@ -165,6 +166,7 @@ class SettingsDialog(QDialog):
         self.category_list.addItem("Past Experiments")
         self.category_list.addItem("Confidence Threshold")
         self.category_list.addItem("Cloud Features")
+        self.category_list.addItem("Accessibility")
         self.category_list.setFixedWidth(150)
         self.category_list.currentRowChanged.connect(self.switch_category)
         main_layout.addWidget(self.category_list)
@@ -175,10 +177,12 @@ class SettingsDialog(QDialog):
         self.historical_settings_page = HistoricalExperimentsPage()
         self.confidence_settings_page = ConfidencePage(self.settings_obj)
         self.cloud_feature_page = CloudUploadPage(self.settings_obj)
+        self.accessibility_page = AccessibilityPage(self.settings_obj)
         self.pages.addWidget(self.drone_settings_page)
         self.pages.addWidget(self.historical_settings_page)
         self.pages.addWidget(self.confidence_settings_page)
         self.pages.addWidget(self.cloud_feature_page)
+        self.pages.addWidget(self.accessibility_page)
 
         main_layout.addWidget(self.pages)
         self.setLayout(main_layout)
@@ -818,6 +822,143 @@ class ConfidencePage(QWidget):
         self.min_frames_input.setText(self.settings_obj.value("min_frames"))
         QMessageBox.information(self, "Reset", "Confidence threshold reset to 0.40 and Minimum Frames reset to 5")
 
+class AccessibilityPage(QWidget):
+    """Page containing accessibility settings for bounding box and text display"""
+    def __init__(self, settings_obj, parent=None):
+        super().__init__(parent)
+        self.settings_obj = settings_obj
+        
+        # Load current settings or use defaults
+        default_color = (255, 96, 31)  # Neon orange in RGB
+        color_str = self.settings_obj.value("annotation_color", f"{default_color[0]},{default_color[1]},{default_color[2]}")
+        color_parts = color_str.split(",")
+        self.annotation_color = tuple(int(c.strip()) for c in color_parts) if len(color_parts) == 3 else default_color
+        
+        self.box_thickness = int(self.settings_obj.value("box_thickness", "2"))
+        self.text_thickness = int(self.settings_obj.value("text_thickness", "2"))
+        self.text_scale = float(self.settings_obj.value("text_scale", "2.0"))
+
+        form_layout = QGridLayout(self)
+        form_layout.setContentsMargins(10, 10, 10, 10)
+        form_layout.setVerticalSpacing(10)
+        form_layout.setHorizontalSpacing(6)
+        form_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Color picker for annotation color
+        color_label = QLabel("Annotation Color (RGB):")
+        self.color_button = QPushButton()
+        self.color_button.setFixedSize(80, 30)
+        self.update_color_button()
+        self.color_button.clicked.connect(self.pick_color)
+        form_layout.addWidget(color_label, 0, 0)
+        form_layout.addWidget(self.color_button, 0, 1)
+
+        # Box thickness
+        box_thickness_label = QLabel("Box Thickness:")
+        self.box_thickness_input = QLineEdit(str(self.box_thickness))
+        self.box_thickness_input.setValidator(QIntValidator(1, 20))
+        form_layout.addWidget(box_thickness_label, 1, 0)
+        form_layout.addWidget(self.box_thickness_input, 1, 1)
+
+        # Text thickness
+        text_thickness_label = QLabel("Text Thickness:")
+        self.text_thickness_input = QLineEdit(str(self.text_thickness))
+        self.text_thickness_input.setValidator(QIntValidator(1, 20))
+        form_layout.addWidget(text_thickness_label, 2, 0)
+        form_layout.addWidget(self.text_thickness_input, 2, 1)
+
+        # Text scale
+        text_scale_label = QLabel("Text Scale:")
+        self.text_scale_input = QLineEdit(str(self.text_scale))
+        self.text_scale_input.setValidator(QDoubleValidator(0.1, 10.0, 1))
+        form_layout.addWidget(text_scale_label, 3, 0)
+        form_layout.addWidget(self.text_scale_input, 3, 1)
+
+        # Buttons
+        save_btn = QPushButton("Save")
+        reset_btn = QPushButton("Reset to Default")
+
+        save_btn.clicked.connect(self.on_save)
+        reset_btn.clicked.connect(self.on_reset)
+
+        form_layout.addWidget(reset_btn, 4, 0)
+        form_layout.addWidget(save_btn, 4, 1)
+
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+    def update_color_button(self):
+        """Update the color button to show the current color"""
+        color = QColor(self.annotation_color[0], self.annotation_color[1], self.annotation_color[2])
+        self.color_button.setStyleSheet(f"background-color: rgb({self.annotation_color[0]}, {self.annotation_color[1]}, {self.annotation_color[2]});")
+
+    def pick_color(self):
+        """Open color picker dialog"""
+        current_color = QColor(self.annotation_color[0], self.annotation_color[1], self.annotation_color[2])
+        color = QColorDialog.getColor(current_color, self, "Select Annotation Color")
+        if color.isValid():
+            self.annotation_color = (color.red(), color.green(), color.blue())
+            self.update_color_button()
+
+    def on_save(self):
+        """Save accessibility settings"""
+        # Validate box thickness
+        try:
+            box_thick = int(self.box_thickness_input.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter an integer for Box Thickness.")
+            return
+        if box_thick < 1 or box_thick > 20:
+            QMessageBox.warning(self, "Invalid Range", "Box Thickness must be between 1 and 20.")
+            return
+
+        # Validate text thickness
+        try:
+            text_thick = int(self.text_thickness_input.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter an integer for Text Thickness.")
+            return
+        if text_thick < 1 or text_thick > 20:
+            QMessageBox.warning(self, "Invalid Range", "Text Thickness must be between 1 and 20.")
+            return
+
+        # Validate text scale
+        try:
+            text_scale_val = float(self.text_scale_input.text().strip())
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a number for Text Scale.")
+            return
+        if text_scale_val < 0.1 or text_scale_val > 10.0:
+            QMessageBox.warning(self, "Invalid Range", "Text Scale must be between 0.1 and 10.0.")
+            return
+
+        # Save settings
+        color_str = f"{self.annotation_color[0]},{self.annotation_color[1]},{self.annotation_color[2]}"
+        self.settings_obj.setValue("annotation_color", color_str)
+        self.settings_obj.setValue("box_thickness", str(box_thick))
+        self.settings_obj.setValue("text_thickness", str(text_thick))
+        self.settings_obj.setValue("text_scale", str(text_scale_val))
+        
+        self.box_thickness = box_thick
+        self.text_thickness = text_thick
+        self.text_scale = text_scale_val
+        
+        QMessageBox.information(self, "Saved", "Accessibility settings saved successfully.")
+
+    def on_reset(self):
+        """Reset to default values"""
+        default_color = (255, 96, 31)  # Neon orange
+        self.annotation_color = default_color
+        self.box_thickness = 2
+        self.text_thickness = 2
+        self.text_scale = 2.0
+        
+        self.update_color_button()
+        self.box_thickness_input.setText("2")
+        self.text_thickness_input.setText("2")
+        self.text_scale_input.setText("2.0")
+        
+        QMessageBox.information(self, "Reset", "Accessibility settings reset to defaults.")
+
 class CloudUploadPage(HistoricalExperimentsPage):
     """ Page containing settings related to uploading experiments to Google Cloud Bucket"""
     def __init__(self, settings_obj, parent=None):
@@ -980,12 +1121,12 @@ class CustomTracker:
         track = self.tracks[track_id]
         
         # Store frame with bounding box
-        frame_with_box = frame.copy()
-        cv2.rectangle(frame_with_box, 
-                     (int(x - w/2), int(y - h/2)), 
-                     (int(x + w/2), int(y + h/2)), 
-                     (0, 255, 0), 2)
-        track['track_frames'].append(frame_with_box)
+        # frame_with_box = frame.copy()
+        # cv2.rectangle(frame_with_box, 
+        #              (int(x - w/2), int(y - h/2)), 
+        #              (int(x + w/2), int(y + h/2)), 
+        #              (0, 255, 0), 2)
+        # track['track_frames'].append(frame_with_box)
         
         track['positions'].append((x, y, w, h))
         track['confidences'].append(confidence)
@@ -1068,9 +1209,13 @@ class CustomTracker:
                 
                 # Save frame with bounding box
                 boxed_frame = longest_frame.copy()
-                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
+                # Get annotation settings
+                annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
+                annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
+                
+                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), annotation_color_bgr, box_thickness)
                 label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
                 bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
                 cv2.imwrite(bounding_box_path, boxed_frame)
                 mask_path = os.path.join(output_dir, 'masks', filename)
@@ -1108,10 +1253,24 @@ class CustomTracker:
                    if len(track['positions']) >= self.min_frames 
                    and np.mean(track['confidences']) > self.confidence_threshold)
 
+def get_annotation_settings(settings_obj):
+    """Get annotation color, thickness, and scale from settings"""
+    default_color = (255, 96, 31)  # Neon orange in RGB
+    color_str = settings_obj.value("annotation_color", f"{default_color[0]},{default_color[1]},{default_color[2]}")
+    color_parts = color_str.split(",")
+    annotation_color = tuple(int(c.strip()) for c in color_parts) if len(color_parts) == 3 else default_color
+    
+    box_thickness = int(settings_obj.value("box_thickness", "2"))
+    text_thickness = int(settings_obj.value("text_thickness", "2"))
+    text_scale = float(settings_obj.value("text_scale", "2.0"))
+    
+    return annotation_color, box_thickness, text_thickness, text_scale
+
 class VideoProcessingWorker(QObject):
     progress_update = pyqtSignal(int)
     processing_complete = pyqtSignal(dict, str)
     frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
+    progress_status_changed = pyqtSignal(str)  # current process summary for MainWindow.progress_status
 
     def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
         super().__init__()
@@ -1127,6 +1286,7 @@ class VideoProcessingWorker(QObject):
         self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
         
     def run(self):
+        self.progress_status_changed.emit("Running Inference")
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -1173,12 +1333,6 @@ class VideoProcessingWorker(QObject):
                 detections = [(float(x), float(y), float(w), float(h), confidence) 
                                for (x, y, w, h), confidence in zip(boxes, confidences) 
                                if confidence > self.detection_threshold]
-                
-            #     passes_requirements = (num_frames >= self.min_frames) and (avg_confidence > self.confidence_threshold)
-            # if not passes_requirements:
-            #     print(f"Track detected below minimum requirements: num_frames = {num_frames}, avg_confidence = {avg_confidence}")
-            #     continue                
-            # print("This should only appear for valid tracks")
 
             has_detection = bool(detections)
             if has_detection:
@@ -1210,8 +1364,14 @@ class VideoProcessingWorker(QObject):
         
         if not QThread.currentThread().isInterruptionRequested():
             # Only save results if not interrupted
+            self.progress_status_changed.emit("Running Segmentation")
             custom_tracker.save_best_frames(self.output_dir, self.video_path)
+            self.progress_status_changed.emit("Saving detection results")
             self.save_detections_csv(custom_tracker.tracks, os.path.join(self.output_dir, 'detection_results'))
+            self.progress_status_changed.emit("Uploading frames to cloud")
+            print(self.upload_frames_for_training(custom_tracker.tracks, export_locally = True, annotation_format = 'yolo'))
+            self.progress_status_changed.emit("Saving GIFs")
+            self.save_detection_gif(custom_tracker.tracks, self.output_dir)
             self.processing_finished(custom_tracker.tracks)
 
     @staticmethod
@@ -1228,6 +1388,7 @@ class VideoProcessingWorker(QObject):
         return frame_with_boxes
 
     def processing_finished(self, tracks):
+        self.progress_status_changed.emit("")
         self.progress_update.emit(100)
         self.processing_complete.emit(tracks, os.path.basename(self.video_path))
 
@@ -1261,7 +1422,299 @@ class VideoProcessingWorker(QObject):
                     'Confidence of Longest Length': track['longest_conf'],
                     'Label': 'Shark',
                 })
-            print("Done saving csv")
+            print("Done saving csv")       
+        
+    def save_detection_gif(self, tracks, output_dir, annotation_color=None): 
+        """
+        Save detection tracks as GIFs with bounding boxes and labels.
+        
+        Args:
+            tracks: Dictionary of tracks to save
+            output_dir: Directory to save GIFs
+            annotation_color: RGB tuple for bounding box and text color (optional, uses settings if None)
+        """
+        print("Saving Track results as GIFs")
+        gifs_dir = os.path.join(output_dir, "tracking_gifs")
+        os.makedirs(gifs_dir, exist_ok=True)
+        
+        # Get annotation settings
+        if annotation_color is None:
+            annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
+        else:
+            box_thickness = int(self.settings_obj.value("box_thickness", "2"))
+            text_thickness = int(self.settings_obj.value("text_thickness", "2"))
+            text_scale = float(self.settings_obj.value("text_scale", "2.0"))
+        
+        # Convert RGB to BGR for OpenCV (OpenCV uses BGR format)
+        annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
+        
+        for index, (key, track) in enumerate(list(tracks.items())):
+            # Use the bounding box frames for the track
+            track_frames = []
+            for frame_idx, (pos, frame) in enumerate(zip(track['positions'], track['frames'])):
+                x, y, w, h = pos
+                frame_with_box = frame.copy()
+                cv2.rectangle(frame_with_box,
+                            (int(x - w/2), int(y - h/2)),
+                            (int(x + w/2), int(y + h/2)),
+                            annotation_color_bgr, box_thickness)
+
+                feet, inches = divmod(track['lengths'][frame_idx], 1)
+                length_str = f"{int(feet)}ft{int(inches * 12)}in"
+
+                label = f"Shark: {track['confidences'][frame_idx]:.2f}"
+                cv2.putText(frame_with_box, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
+                
+                track_frames.append(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))  # Convert to RGB for imageio
+            
+            if track_frames:
+                gif_filename = f"{Path(self.video_path).name}_{key}.gif"
+                gif_path = os.path.join(gifs_dir, gif_filename)
+                
+                # Convert numpy arrays to PIL Images
+                pil_frames = [Image.fromarray(frame) for frame in track_frames]
+                
+                # Create a combined image to build palette from all frames
+                # This ensures the palette includes colors from all frames
+                combined_width = max(f.width for f in pil_frames)
+                combined_height = sum(f.height for f in pil_frames)
+                combined_image = Image.new('RGB', (combined_width, combined_height))
+                
+                y_offset = 0
+                for frame in pil_frames:
+                    combined_image.paste(frame, (0, y_offset))
+                    y_offset += frame.height
+                
+                # Quantize the combined image to create a palette
+                # Use 255 colors to leave room for transparency if needed
+                quantized_combined = combined_image.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+                palette = quantized_combined.getpalette()
+                
+                # Ensure annotation color is in the palette
+                annotation_color_rgb = annotation_color
+                palette_rgb = [(palette[i], palette[i+1], palette[i+2]) 
+                              for i in range(0, min(255 * 3, len(palette)), 3)]
+                
+                # Find closest palette entry
+                min_dist = float('inf')
+                color_idx = 0
+                for idx, color in enumerate(palette_rgb):
+                    dist = sum((a - b) ** 2 for a, b in zip(color, annotation_color_rgb))
+                    if dist < min_dist:
+                        min_dist = dist
+                        color_idx = idx
+                
+                # If annotation color is not close enough (threshold: 100), replace closest entry
+                if min_dist > 100:
+                    palette[color_idx * 3] = annotation_color_rgb[0]
+                    palette[color_idx * 3 + 1] = annotation_color_rgb[1]
+                    palette[color_idx * 3 + 2] = annotation_color_rgb[2]
+                
+                # Create a palette image to use for quantization
+                palette_image = Image.new('P', (1, 1))
+                palette_image.putpalette(palette)
+                
+                # Convert all frames to use the same palette (no dithering to preserve colors)
+                quantized_frames = []
+                for frame in pil_frames:
+                    quantized = frame.quantize(palette=palette_image, dither=Image.Dither.NONE)
+                    quantized_frames.append(quantized)
+                
+                # Save as GIF
+                quantized_frames[0].save(
+                    gif_path,
+                    save_all=True,
+                    append_images=quantized_frames[1:],
+                    duration=100,  # milliseconds (0.1 seconds = 100ms)
+                    loop=0,
+                    optimize=False
+                )
+                print(f"Saved GIF: {gif_path}")
+
+            del track['frames']
+    
+    def upload_frames_for_training(
+        self,
+        tracks,
+        export_locally: bool = False,
+        exclude_images: bool = False,
+        annotation_format: str = "coco",
+    ):
+        """
+        Bundle all track frames and annotations into a zip, then upload or save locally.
+
+        Args:
+            tracks (dict): Mapping of track_id -> track dict as produced by CustomTracker.
+            export_locally (bool): If True, save the zip to disk instead of uploading.
+            exclude_images (bool): If True, do not include any image files in the zip.
+            annotation_format (str): "coco" for a single COCO JSON, or "yolo" for one
+                .txt per image (class_id cx cy w h, normalized 0-1).
+
+        Returns:
+            (success: bool, message: str)
+        """
+        api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
+        fmt = (annotation_format or "coco").strip().lower()
+        if fmt not in ("coco", "yolo"):
+            return False, f"Unsupported annotation_format: {annotation_format!r}. Use 'coco' or 'yolo'."
+
+        # Shared category list: same names for COCO categories and YOLO obj.names (index = YOLO label_id, id = COCO category_id)
+        category_names = [
+            "great white shark", "kelp", "human", "surfer", "dolphin",
+            "bat ray", "bird", "boat", "seal", "kayaker",
+        ]
+        num_classes = len(category_names)
+
+        # COCO skeleton (used only when fmt == "coco")
+        coco = {
+            "licenses": [{"name": "", "id": 0, "url": ""}],
+            "info": {
+                "contributor": "",
+                "date_created": "",
+                "description": "",
+                "url": "",
+                "version": "",
+                "year": "",
+            },
+            "categories": [
+                {"id": i + 1, "name": name, "supercategory": ""}
+                for i, name in enumerate(category_names)
+            ],
+            "images": [],
+            "annotations": [],
+        }
+
+        image_id = 1
+        annotation_id = 1
+
+        buffer = io.BytesIO()
+        yolo_subset = "train"  # valid subset: train | valid
+        yolo_data_dir = f"obj_{yolo_subset}_data"
+        yolo_train_paths = []  # paths for train.txt (only when fmt == "yolo")
+
+        try:
+            with zipfile.ZipFile(buffer, "w") as zipf:
+                video_stem = Path(getattr(self, "video_path", "video")).stem
+
+                for track_id, track in tracks.items():
+                    positions = track.get("positions")
+                    frames = track.get("frames")
+
+                    if positions is None or frames is None:
+                        continue
+
+                    for frame_idx, (pos, frame) in enumerate(zip(positions, frames)):
+                        x, y, w, h = pos
+
+                        if frame is None:
+                            continue
+                        try:
+                            height, width = frame.shape[:2]
+                        except Exception:
+                            continue
+
+                        x_min = int(x - w / 2)
+                        y_min = int(y - h / 2)
+                        box_w = int(w)
+                        box_h = int(h)
+
+                        x_min = max(0, x_min)
+                        y_min = max(0, y_min)
+                        if x_min >= width or y_min >= height:
+                            continue
+                        box_w = min(box_w, width - x_min)
+                        box_h = min(box_h, height - y_min)
+                        if box_w <= 0 or box_h <= 0:
+                            continue
+
+                        image_basename = f"{video_stem}_track{track_id}_frame{frame_idx:04d}"
+                        if fmt == "yolo":
+                            image_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".jpg")
+                            label_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".txt")
+                        else:
+                            image_filename = image_basename + ".jpg"
+                            image_path_in_zip = os.path.join("images", image_filename)
+
+                        if not exclude_images:
+                            success, encoded = cv2.imencode(".jpg", frame)
+                            if not success:
+                                continue
+                            zipf.writestr(image_path_in_zip, encoded.tobytes())
+                            if fmt == "yolo":
+                                yolo_train_paths.append(image_path_in_zip)
+
+                        if fmt == "coco":
+                            coco["images"].append(
+                                {
+                                    "id": image_id,
+                                    "width": int(width),
+                                    "height": int(height),
+                                    "file_name": image_filename,
+                                    "license": 0,
+                                    "flickr_url": "",
+                                    "coco_url": "",
+                                    "date_captured": 0,
+                                }
+                            )
+                            coco["annotations"].append(
+                                {
+                                    "id": annotation_id,
+                                    "image_id": image_id,
+                                    "category_id": 1,
+                                    "segmentation": [],
+                                    "area": float(box_w * box_h),
+                                    "bbox": [float(x_min), float(y_min), float(box_w), float(box_h)],
+                                    "iscrowd": 0,
+                                    "attributes": {
+                                        "occluded": False,
+                                        "rotation": 0.0,
+                                        "track_id": track_id,
+                                        "keyframe": True,
+                                    },
+                                }
+                            )
+                            image_id += 1
+                            annotation_id += 1
+                        else:
+                            # YOLO: one .txt per image, "label_id cx cy rw rh" normalized [0, 1]
+                            cx_norm = x / width
+                            cy_norm = y / height
+                            rw = w / width
+                            rh = h / height
+                            label_line = f"0 {cx_norm:.6f} {cy_norm:.6f} {rw:.6f} {rh:.6f}\n"
+                            zipf.writestr(label_path_in_zip, label_line)
+
+                if fmt == "coco":
+                    zipf.writestr("instances_default.json", json.dumps(coco))
+                elif fmt == "yolo":
+                    # train.txt: one path per line (obj_train_data/image1.jpg)
+                    zipf.writestr("train.txt", "\n".join(yolo_train_paths) + ("\n" if yolo_train_paths else ""))
+                    # obj.names: same names as COCO categories, one per line (index = label_id)
+                    zipf.writestr("obj.names", "\n".join(category_names) + "\n")
+                    # obj.data
+                    obj_data = f"classes = {num_classes}\nnames = obj.names\ntrain = train.txt\n"
+                    zipf.writestr("obj.data", obj_data)
+
+            # Decide whether to save locally or upload
+            if export_locally:
+                export_dir = get_results_dir()
+                os.makedirs(export_dir, exist_ok=True)
+                export_path = os.path.join(export_dir, f"{video_stem}_training_frames.zip")
+                with open(export_path, "wb") as f:
+                    f.write(buffer.getvalue())
+                return True, f"Training frames zip saved to {export_path}"
+            else:
+                buffer.seek(0)
+                files = {
+                    "file": (f"{Path(self.output_dir).name}_{video_stem}.zip", buffer, "application/zip"),
+                }
+                response = requests.post(api_url, files=files, params = {'request': 'training_data'})
+                response.raise_for_status()
+                return True, "Training frames uploaded successfully"
+        except requests.RequestException as e:
+            return False, f"Failed to upload training frames: {str(e)}"
+        except Exception as e:
+            return False, f"An unexpected error occurred while uploading training frames: {str(e)}"
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -1308,7 +1761,8 @@ def add_experiment_info(experiment_path: Path):
     if not os.path.isdir(gif_dir):
         return "(0 video, 0 sharks)"
 
-    gif_files = [f for f in os.listdir(gif_dir) if f.lower().endswith(".gif")]
+    gif_files = [f for f in os.listdir(gif_dir) if f.lower().endswith((".mp4", ".gif"))]
+    # print(gif_files)
     video_names = set()
     for f in gif_files:
         # Example gif filename: "clip.mp4_1.gif" or "TRIMMED_2023-05-05_Transect_DJI_0516.mp4_1.gif"
@@ -1450,6 +1904,13 @@ class MainWindow(QMainWindow):
         self.gif_active = False
         self.current_flight_location = None
         self.low_confidence_threshold = .65
+        self.progress_status = None  # string summarizing current process (Running Inference, Uploading Frames, etc.)
+
+    def set_progress_status(self, status: str):
+        """Update progress_status and the progress status label when present."""
+        self.progress_status = status if status else None
+        if getattr(self, "progress_status_label", None) is not None:
+            self.progress_status_label.setText(status or "")
 
     def init_ui(self):
         self.central_widget = QWidget()
@@ -1732,11 +2193,23 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignBottom)
 
+        # Progress status bar
+        self.progress_status_label = QLabel(self.progress_status or "")
+        self.progress_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.progress_status_label.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self.progress_status_label.hide()
+
         # Timer label (initially hidden)
         self.timer_label = QLabel("00:00:00")
-        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        # self.timer_label.setAlignment()
         self.timer_label.hide()
+
+        # Layout for progress information
+        self.progress_info = QHBoxLayout()
+        self.progress_info.addWidget(self.progress_status_label)
+        self.progress_info.addWidget(self.timer_label)
+        # self.progress_info.setSizePolicy(QSizePolicy.Policy.Expanding)
 
         # Reparent the existing widgets into the dialog so live updates continue
         self.cancel_processsing_button = QPushButton("Cancel Processing")
@@ -1744,13 +2217,15 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(self.frame_display)
         layout.addWidget(self.progress_bar)
-        layout.addWidget(self.timer_label)
+        layout.addLayout(self.progress_info)
+        # layout.addWidget(self.timer_label)
         layout.addWidget(self.cancel_processsing_button)
 
         dlg.setLayout(layout)
         dlg.resize(800, 600)
         self.frame_display.show()
         self.progress_bar.show()
+        self.progress_status_label.show()
         self.timer_label.show()
         
         self.progress_bar.setValue(0)
@@ -1758,6 +2233,7 @@ class MainWindow(QMainWindow):
         self.timer.start(1000)
         self.elapsed_time = 0
         self.update_timer()
+        self.set_progress_status("Running Inference")
 
         # Disable Homescreen Buttons While Processing
         self.progress_display_dialog = dlg
@@ -1876,7 +2352,7 @@ class MainWindow(QMainWindow):
 
         self.update_video_list_emoji()
         self.prepare_frame_display()
-
+        
         self.bounding_boxes_dir = os.path.join(self.current_output_dir, 'bounding_boxes')
         self.false_positives_dir = os.path.join(self.current_output_dir, 'false_positives')
         
@@ -1898,6 +2374,7 @@ class MainWindow(QMainWindow):
         self.processing_worker.frame_processed.connect(self.update_frame_display, Qt.ConnectionType.QueuedConnection)
         self.processing_worker.progress_update.connect(self.update_progress, Qt.ConnectionType.QueuedConnection)
         self.processing_worker.processing_complete.connect(self.processing_complete, Qt.ConnectionType.QueuedConnection)
+        self.processing_worker.progress_status_changed.connect(self.set_progress_status, Qt.ConnectionType.QueuedConnection)
         self.processing_thread.started.connect(self.processing_worker.run)
 
     def update_video_list_emoji(self):
@@ -1989,8 +2466,10 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.hide()
         self.timer_label.hide()
+        self.progress_status_label.hide()
         self.timer.stop()
         self.frame_display.hide()
+        self.set_progress_status("")
 
         # Reset video list items to clean state (no emojis)
         for i in range(self.video_list.rowCount()):
@@ -2084,8 +2563,6 @@ class MainWindow(QMainWindow):
             self.sort_tracks()
             # Update detection list
             self.update_detection_list()
-            # Save GIFs for each detection
-            self.save_detection_gif(self.current_output_dir)
             # Show first detection if available
             self.finish_processing()
             # Automatically show review widget after processing
@@ -2097,27 +2574,6 @@ class MainWindow(QMainWindow):
             self.setup_review_dropdown()
             self.render_historical_experiments()
             self.toggle_edit_state(set_state=True)
-    
-    def save_detection_gif(self, output_dir):
-        print("Saving Track results as GIFs")
-        gifs_dir = os.path.join(output_dir, "tracking_gifs")
-        for key, track in self.sorted_tracks:
-            # Use the bounding box frames for the track
-            track_frames = []
-            for pos, frame in zip(track['positions'], track['frames']):
-                x, y, w, h = pos
-                frame_with_box = frame.copy()
-                cv2.rectangle(frame_with_box,
-                            (int(x - w/2), int(y - h/2)),
-                            (int(x + w/2), int(y + h/2)),
-                            (0, 255, 0), 2)
-                track_frames.append(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))  # Convert to RGB for imageio
-
-            if track_frames:
-                gif_filename = f"{key}.gif"
-                gif_path = os.path.join(gifs_dir, gif_filename)
-                imageio.mimsave(gif_path, track_frames, fps=10)
-                print(f"Saved GIF: {gif_path}")
 
     def finish_processing(self):
         self.is_processing = False
@@ -2397,11 +2853,6 @@ class MainWindow(QMainWindow):
         track_id = self.historical_items.item(row, 2).text()
         csv_name = f"{Path(video_basename)}.csv"
         print(csv_name)
-# Traceback (most recent call last):
-#   File "C:\Users\legop\Desktop\GitHub\SharkEye_App\src\SharkEye_App.py", line 2402, in update_label
-#     new_label = self.label_combo.currentText()
-#                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# RuntimeError: wrapped C/C++ object of type QComboBox has been deleted
         key = (experiment, csv_name, int(track_id))
         new_label = self.label_combo.currentText()
         print(new_label)
@@ -2722,21 +3173,34 @@ class MainWindow(QMainWindow):
         video_basename = self.historical_items.item(row, 1).text()  # second column
         track_id = self.historical_items.item(row, 2).text()  # third column
         gif_dir = Path(get_results_dir()) / experiment / "tracking_gifs"
+        
+        # Try MP4 first (new format), then fall back to GIF (legacy format)
+        mp4_name = f"{video_basename}_{track_id}.mp4"
+        mp4_path = gif_dir / mp4_name
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         
-        if gif_path.exists():
+        if mp4_path.exists():
+            # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
+            self.toggle_display_switch.reset_position()
+            self.toggle_display_switch.update()
+            self.frame_player.set_gif(str(mp4_path))
+        elif gif_path.exists():
             # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
             self.toggle_display_switch.reset_position()
             self.toggle_display_switch.update()
             self.frame_player.set_gif(str(gif_path))
         else:
-            alt = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
-            if alt.exists():
-                self.frame_player.set_gif(str(alt))
+            # Try alternative naming (without extension in basename)
+            alt_mp4 = gif_dir / f"{Path(video_basename).stem}_{track_id}.mp4"
+            alt_gif = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
+            if alt_mp4.exists():
+                self.frame_player.set_gif(str(alt_mp4))
+            elif alt_gif.exists():
+                self.frame_player.set_gif(str(alt_gif))
             else:
                 self.frame_player.clear()
-                self.frame_player.setText(f"GIF not found:\n{gif_name}")
+                self.frame_player.setText(f"Video not found:\n{mp4_name} or {gif_name}")
 
     def render_historical_experiments(self):
         # Render Historical Experiments and add to List
@@ -2969,10 +3433,11 @@ class MainWindow(QMainWindow):
         #         self.low_confidence_warning.setVisible(False)
 
     def update_timer(self):
-        self.elapsed_time += 1
-        hours, remainder = divmod(self.elapsed_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        self.timer_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        if self.timer_label:
+            self.elapsed_time += 1
+            hours, remainder = divmod(self.elapsed_time, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            self.timer_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
 
     def generate_filename(self, track, new_label):
         return f"{track['video_name']}_{new_label.lower()}{track['unique_id']}_time{track['time']}_det{track['detections']}_avgConf{int(track['avg_conf']*100):02d}_bestConf{int(track['best_conf']*100):02d}_len{track['length'].replace('ft', 'ft').replace('in', 'in')}.jpg"
@@ -3508,9 +3973,10 @@ class FramePlayer(QLabel):
         if self._movie:
             # Scale
             frame = self._movie.currentPixmap()
-            frame_ratio = frame.width() / frame.height()
-            max_height = int(self.width() / frame_ratio)
-            self.setFixedHeight(min(int(500), max_height))
+            if not frame.isNull():
+                frame_ratio = frame.width() / frame.height()
+                max_height = int(self.width() / frame_ratio)
+                self.setFixedHeight(min(int(500), max_height))
         self.update()
 
     def clear_frame(self):

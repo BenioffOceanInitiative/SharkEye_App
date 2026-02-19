@@ -152,6 +152,7 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
     """ Takes in a segmentation mask in the form of a boolean numpy array and returns the length of
     the longest line within the mask. If draw_line is True, will display the mask and the calculated line"""
     mask = np.squeeze(mask) # Adjust dimensions
+    start_time = time.time()
     cleaned_mask = largest_region(mask)
     points = np.argwhere(cleaned_mask)
 
@@ -170,7 +171,8 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
                     
     longest_line = best_pair
     max_length = max_dist
-
+    end_time = time.time()
+    print(f"Elapsed time to find length {(start_time - end_time)}")
     # Visualization
     if draw_line:
         fig, ax = plt.subplots(figsize=(8, 8))
