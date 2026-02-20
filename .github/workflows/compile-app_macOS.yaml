@@ -39,7 +39,8 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
-          pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
+          pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8" "numpy<2"
+          pip show numpy
 
       - name: Clean build outputs
         shell: bash
@@ -73,6 +74,12 @@ jobs:
           elif [ -d "dist/SharkEye" ]; then
             ls -lah dist/SharkEye || true
           fi
+
+      - name: Test Headless build
+        run: python src/sharkeye_app.py --input_dir .\sample_data\
+
+      - name: Delete test results
+        run: rm -rf headless_predictions
 
       - name: Create ZIP archive
         shell: bash
