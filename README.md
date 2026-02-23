@@ -21,7 +21,7 @@ python model_weights/download_models_from_gcs.py
 
 Start App
 ```
-python src/sharkeye.py
+python src/sharkeye_app.py
 ```
 
 # PyInstaller app
