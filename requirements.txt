@@ -1,4 +1,4 @@
-﻿absl-py==2.3.1
+absl-py==2.3.1
 albucore==0.0.24
 albumentations==2.0.8
 altgraph==0.17.4
@@ -41,7 +41,7 @@ path==17.1.0
 pefile==2023.2.7
 pillow==11.2.1
 proto-plus==1.27.0
-protobuf==6.33.1
+protobuf==6.33.5
 psutil==7.0.0
 py-cpuinfo==9.0.0
 pyasn1==0.6.1
