@@ -8,3 +8,4 @@ scikit-image
 dask
 tqdm
 pandas
+PyQt6_SwitchControl
