@@ -23,3 +23,6 @@ segmentation_comparison/
 src/find_flight_data.pys
 Sharkeye Todo.md
 src/sharkeye todo.txt
+.vscode/settings.json
+runs/detect/runs/detect/data/args.yaml
+runs/detect/runs/detect/src/args.yaml
