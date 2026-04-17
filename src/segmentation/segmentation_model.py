@@ -63,15 +63,14 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
     sam_checkpoint = resource_path(checkpoint_path)
     model_type = model_types[checkpoint_path.name]
 
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 
     # Build the model without auto-loading weights
     sam = sam_model_registry[model_type](checkpoint=None)
 
     # PyTorch 2.6 compatibility: explicitly allow pickle ONLY for trusted weights
-    # (official SAM weights are fine). This mimics pre-2.6 behavior.
-    ckpt = torch.load(sam_checkpoint, map_location="cpu", weights_only=False)
+    # (official SAM weights are fine). This mimics pre-2.6 behavior.    
+    ckpt = torch.load(sam_checkpoint, map_location=device, weights_only=False)
 
     # Some checkpoints wrap the tensors under 'state_dict'
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
@@ -87,7 +86,6 @@ def run_prediction(image, bbox, checkpoint_path: Path = Path("model_weights/sam_
 
     predictor = SamPredictor(sam)
     predictor.set_image(image)
-
 
     if cropped:
         h, w, _ = image.shape
@@ -154,6 +152,7 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
     """ Takes in a segmentation mask in the form of a boolean numpy array and returns the length of
     the longest line within the mask. If draw_line is True, will display the mask and the calculated line"""
     mask = np.squeeze(mask) # Adjust dimensions
+    start_time = time.time()
     cleaned_mask = largest_region(mask)
     points = np.argwhere(cleaned_mask)
 
@@ -172,7 +171,8 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
                     
     longest_line = best_pair
     max_length = max_dist
-
+    end_time = time.time()
+    print(f"Elapsed time to find length {(start_time - end_time)}")
     # Visualization
     if draw_line:
         fig, ax = plt.subplots(figsize=(8, 8))
