@@ -13,6 +13,7 @@
 /venv/
 /DJI_0091_Trim_1/
 
+Sharkeye Todo.md
 sharkeye_log.txt
 .DS_Store
 app.log
@@ -21,8 +22,12 @@ videos_with_flight_data.csv
 headless_predictions/
 segmentation_comparison/
 src/find_flight_data.pys
-Sharkeye Todo.md
 src/sharkeye todo.txt
 .vscode/settings.json
 runs/detect/runs/detect/data/args.yaml
 runs/detect/runs/detect/src/args.yaml
+model_weights/runs-detect-train-weights-best.pt
+model_weights/sam_vit_b_01ec64.pth
+model_weights/train6-weights-best.pt
+model_weights/train7-weights-best.pt
+model_weights/train8-weights-best.pt

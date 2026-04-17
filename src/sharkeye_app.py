@@ -38,7 +38,7 @@ import pandas as pd
 import math
 from pathlib import Path
 from segmentation.segmentation_model import run_prediction, calculate_shark_length_from_pixel, find_pixel_length, draw_mask
-from segment_anything import sam_model_registry, SamPredictor 
+from segment_anything import sam_model_registry, SamPredictor
 import ast
 
 # Add these constants for length calculation
@@ -1925,8 +1925,7 @@ class MainWindow(QMainWindow):
         self.setup_review_widget()
 
     def setup_model(self):
-        device = torch.device('cpu') if getattr(sys, 'frozen', False) else \
-         torch.device('cuda' if torch.cuda.is_available() else
+        device = torch.device('cuda' if torch.cuda.is_available() else
                       'mps' if torch.backends.mps.is_available() else 'cpu')
         print(f"Using device: {device}")
         self.model = YOLO(MODEL_PATH).to(device)
@@ -3107,6 +3106,22 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown()
         self.review_dropdown.currentIndexChanged.connect(self.render_historical_experiments)
 
+    def update_button_position(self):
+        if self.frame_player and self.toggle_display_mode_button:
+            rect = self.frame_player.content_rect()
+            if rect.isNull():
+                return
+
+            # Convert from frame_player-local coords → global → back to parent coords
+            top_left = self.frame_player.mapToParent(rect.topLeft())
+            
+            # Position button near bottom-right inside the actual content rect
+            btn_x = top_left.x() + rect.width() - self.toggle_display_mode_button.width() - 13
+            btn_y = top_left.y() + rect.height() - self.toggle_display_mode_button.height() - 38
+
+            self.toggle_display_mode_button.move(btn_x, btn_y)
+
+        # layout.addWidget(self.toggle_display_mode_button)
     def switch_detection_list(self, show_historical=False):
         current_list = self.historical_items if show_historical else self.detection_list
         other_list = self.detection_list if show_historical else self.historical_items
@@ -3150,7 +3165,7 @@ class MainWindow(QMainWindow):
             return
 
         # Assign and preserve previous text for change detection
-        self.label_combo = combo
+        self.label_combo = combo # 
 
     def show_historical_gif(self):
         self.gif_active = True
@@ -4034,25 +4049,98 @@ class FramePlayer(QLabel):
         return QRect(x, y, scaled.width(), scaled.height())
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
+    def __init__(self, video_path, model, output_dir):
+        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.video_path = video_path
+        self.model = model
+        self.output_dir = output_dir
+        self.detection_threshold = float(self.settings_obj.value("confidence_threshold"))
+        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
+    
     progress_update = 0
     processing_complete = {}
+
+    @staticmethod
+    def save_best_frames(output_dir, video_path, tracks):
+        """Save best frames for each significant track"""
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        
+        images_saved = 0
+        
+        for track_id, track in tracks.items():
+            print("Starting new track")
+            num_frames = len(track['positions'])
+            avg_confidence = np.mean(track['confidences'])
+
+            longest_frame = track['longest_frame']
+            longest_timestamp = track['longest_timestamp']
+            longest_confidence = track['longest_conf']
+            longest_length = track['longest_length']
+            
+            if longest_frame is not None:
+                timestamp_str = CustomTracker._format_timestamp_filename(longest_timestamp)
+                
+                x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
+                
+                # Use segmentation model to generate lengths
+                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
+                
+                track['longest_length'] = pixel_length
+                longest_length = track['longest_length']
+
+                mask_overlay = draw_mask(mask, longest_frame)
+                track['mask_overlay'] = mask_overlay
+
+                length_str = f"{pixel_length:.2f}px"
+                
+                avg_conf_int = int(avg_confidence * 100)
+                longest_conf_int = int(longest_confidence * 100)
+                
+                filename = f"{Path(video_path).name}_{track_id}.jpg"
+                
+                # Save original frame
+                cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+                
+                # Save frame with bounding box
+                boxed_frame = longest_frame.copy()
+                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
+                label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
+                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+                bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
+                cv2.imwrite(bounding_box_path, boxed_frame)
+                mask_path = os.path.join(output_dir, 'masks', filename)
+                cv2.imwrite(mask_path, mask_overlay)
+                
+                # Update the track with the path to the bounding box image
+                track['image_path'] = bounding_box_path
+                
+                images_saved += 1
+
+        print(f"Shark Images Saved: {images_saved}")
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        
+
         custom_tracker = CustomTracker()
-        
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "masks"), exist_ok=True)
 
         min_frame_skip, max_frame_skip = 10, 60
         frame_skip = min_frame_skip
         consecutive_empty_frames = 0
         max_empty_frames = 1 * fps
-        detection_threshold = 0.4
+        
+        # self.detection_threshold = 0.4
 
         frame_num = 0
         while frame_num < total_frames:
@@ -4070,7 +4158,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
 
                 detections = [(float(x), float(y), float(w), float(h), confidence) 
                                for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > detection_threshold]
+                               if confidence > self.detection_threshold]
 
             has_detection = bool(detections)
             if has_detection:
@@ -4099,30 +4187,32 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             self.progress_update = int((frame_num + 1) / total_frames * 100) 
 
         cap.release()
-        custom_tracker.save_best_frames(self.output_dir, self.video_path)
+        self.save_best_frames(self.output_dir, self.video_path, tracks=custom_tracker.tracks)
 
-        all_track_info = [] 
+        all_track_info = []
 
         for track_id, track in custom_tracker.tracks.items():
             meets_thresholds = (len(track['confidences']) >= 10 and 
                                 np.mean(track['confidences']) > 0.4)
-            
-            track_info = {   
-                'Video name': self.video_path.name, 
+    
+            track_info = {
+                'video_name': self.video_path,
                 'Track Id': track_id,
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                 'Highest Confidence': max(track['confidences']),
                 'Average Confidence': np.mean(track['confidences']),
                 'Lowest Confidence': min(track['confidences']),
-                'Longest Length': max(track['lengths']),
-                'Highest Confidence Length': track['best_length'],
+                'Longest Length': max(track['lengths']),  
+                'Highest Confidence Length': track['longest_length'], # 
                 'Number of Detections': len(track['confidences']),
-                'Meets Thresholds': meets_thresholds
+                'Meets Thresholds': meets_thresholds,
+                'Confidence of Longest Length': track['longest_conf'],
+                'Label': 'Shark',
             }
 
             all_track_info.append(track_info)
-        
-        return all_track_info           
+    
+        return all_track_info            
 
 def mass_prediction(video_path, current_output_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
@@ -4140,7 +4230,7 @@ def mass_prediction(video_path, current_output_dir):
 
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
-    parser.add_argument('--testing', action = 'store_true', help='Enable testrun of app for headless environment')
+    parser.add_argument('--testing', action='store_true', help='Enables testing for app in headless environment')
     parser.add_argument('--input_dir', type=str, required=False, help='Directory containing .mp4 videos to process')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
     return parser.parse_args()
@@ -4148,6 +4238,9 @@ def parse_args():
 def main():
     args = parse_args()
     if args.testing:
+        print('Testing')
+        os.environ["QT_DEBUG_PLUGINS"] = "1"
+        os.environ["QT_QPA_PLATFORM"] = "minimal"
         multiprocessing.freeze_support()
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(True)
@@ -4191,23 +4284,49 @@ def main():
             print("No valid tracks were found.")
 
 if __name__ == '__main__':
+    args = parse_args()
+    if args.input_dir and args.output_dir:
+        input_dir = Path(args.input_dir)
+        output_dir = Path(args.output_dir)
+        video_paths = input_dir.rglob("*.mp4")
+        if not video_paths:
+            print(f"No .mp4 videos found in {input_dir}")
+            exit(1)
 
-    multiprocessing.freeze_support()
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
-    
-    app_icon_path = {
-        'win32': 'assets/logo/SharkEye.ico',
-        'darwin': 'assets/logo/SharkEye.icns'
-    }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-    app_icon_path = {
-        'win32': 'assets/logo/SharkEye.ico',
-        'darwin': 'assets/logo/SharkEye.icns'
-    }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-    
-    app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-    app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-    
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+        # Run prediction
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+
+        # Save results to CSV
+        if results:
+            csv_path = output_dir / "output.csv"
+            with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            print(f"Results saved to {csv_path}")
+        else:
+            print("No valid tracks were found.")
+    else:
+        if args.testing:
+            os.environ["QT_DEBUG_PLUGINS"] = "1"
+            os.environ["QT_QPA_PLATFORM"] = "minimal"
+        multiprocessing.freeze_support()
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(True)
+        
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        app_icon_path = {
+            'win32': 'assets/logo/SharkEye.ico',
+            'darwin': 'assets/logo/SharkEye.icns'
+        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
+        
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
+        
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec())

@@ -1,0 +1,38 @@
+name: Run GCS Scripts
+
+on:
+  workflow_dispatch
+
+jobs:
+  run-scripts:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+      
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+      
+      - name: Run download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
+      
+      - name: Run update_build_in_bucket.py
+        run: python update_build_in_bucket.py

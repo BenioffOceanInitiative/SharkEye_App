@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   build-macos-apple:
@@ -14,45 +15,18 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"  # ensure arm64 wheels resolve cleanly
 
     steps:
-      - name: Checkout source (with Git LFS)
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false
           fetch-depth: 0
-
-      - name: Ensure LFS files are pulled
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git lfs install
-          git lfs pull
-          if [ -f .gitmodules ]; then
-            git submodule update --init --recursive
-            git -c submodule.recurse=true lfs pull
-          fi
-
-      - name: Verify SAM weights (not an LFS pointer)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          path="model_weights/sam_vit_b_01ec64.pth"
-          if [ ! -f "$path" ]; then
-            echo "Missing weights at $path. Did LFS fetch run?" >&2
-            exit 1
-          fi
-          size=$(stat -f%z "$path")
-          if [ "$size" -lt 314572800 ]; then
-            echo "Weights too small ($size bytes) — likely a Git LFS pointer." >&2
-            exit 1
-          fi
-          echo "Weights OK: $path ($size bytes)"
-
+      
       - name: Setup Python (arm64)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11.4"
           architecture: "arm64"
-
+          
       - name: Confirm runner and Python architecture
         shell: bash
         run: |
@@ -67,22 +41,31 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip wheel
           # If you use torch, prefer CPU+MPS wheels on Apple Silicon.
+          pip install torch==2.5.1
           pip install -r requirements.txt
           pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8"
 
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+          
+      - name: Run download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
+        
       - name: Clean build outputs
         shell: bash
         run: |
           set -euxo pipefail
           rm -rf build dist __pycache__
 
-      - name: Build with PyInstaller spec
+      - name: Build ARM64 with PyInstaller spec
         shell: bash
         run: |
           set -euxo pipefail
           pyinstaller --clean --noconfirm SharkEye.spec
 
-      - name: List dist contents
+      - name: List ARM64 dist contents
         shell: bash
         run: |
           set -euxo pipefail
@@ -96,7 +79,7 @@ jobs:
             file dist/SharkEye/* || true
           fi
 
-      - name: Create ZIP archive
+      - name: Create ARM64 ZIP archive
         shell: bash
         run: |
           set -euxo pipefail
@@ -104,20 +87,15 @@ jobs:
           zipName="SharkEye_macOS_Silicon_$date.zip"
           # If PyInstaller created an .app bundle
           if [ -d "dist/SharkEye.app" ]; then
-            zip -r "$zipName" "dist/SharkEye.app"
+            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye.app "$zipName"
           elif [ -d "dist/SharkEye" ]; then
-            zip -r "$zipName" "dist/SharkEye"
+            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye "$zipName"
           else
             echo "No known build output found" >&2
             exit 1
           fi
-          echo "ZIP_NAME=$zipName" >> "$GITHUB_ENV"
+          echo "ZIP_NAME_ARM64=$zipName" >> "$GITHUB_ENV"
           echo "Created $zipName"
 
-      - name: Upload ZIP to Google Drive
-        uses: willo32/google-drive-upload-action@v1
-        with:
-          target: ${{ env.ZIP_NAME }}
-          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
-          name: ${{ env.ZIP_NAME }}
+      - name: Upload ARM64 build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"
