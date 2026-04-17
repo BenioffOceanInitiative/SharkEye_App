@@ -2031,7 +2031,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon("assets/images/gear-fill.svg"))
+            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
             self.banner_right_button.setEnabled(True)
             self.banner_right_button.setToolTip("Settings")
 
@@ -2935,6 +2935,9 @@ class MainWindow(QMainWindow):
         self.historical_items.setEnabled(enable)
         self.save_changes_button.setEnabled(enable)
         self.toggle_display_switch.setEnabled(enable)
+        self.toggle_display_switch.setChecked(enable)
+        self.mask_icon.setVisible(enable)
+        self.box_icon.setVisible(enable)
         
     def toggle_display_mode(self):
         # Historical mode: always show mask overlay if available

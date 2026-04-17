@@ -2,7 +2,7 @@
 
 import os, sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, copy_metadata
 try:
     # PyInstaller >= 6.3
     from PyInstaller.utils.hooks import collect_dynamic_libs
@@ -43,6 +43,7 @@ datas += collect_data_files("ultralytics")
 datas += collect_data_files("torch")
 datas += collect_data_files("certifi")               # CA bundle for requests
 datas += collect_data_files("tensorboard")
+datas += copy_metadata("imageio")
 
 # your app assets + model weights
 datas += [
