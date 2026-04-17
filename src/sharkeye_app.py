@@ -3044,32 +3044,8 @@ class MainWindow(QMainWindow):
         self.low_confidence_warning.setScaledContents(True)
         self.low_confidence_warning.setVisible(False)
 
-        def update_frame_elements():
-            rect = self.frame_player.content_rect()
-            if rect.isNull():
-                return
-            
-            self.low_confidence_warning.adjustSize()
-
-            # Extract bottom right coordinates2
-            bottom_right_x = rect.x() + rect.width()
-            bottom_right_y = self.frame_player_container.geometry().y() + rect.height()
-            
-            # Position button near bottom-right of video
-            btn_x = bottom_right_x - self.mask_icon.width() - 7
-            btn_y = bottom_right_y - self.mask_icon.height() - 4
-
-            self.mask_icon.move(btn_x , btn_y)
-            self.toggle_display_switch.move(self.mask_icon.x() - self.toggle_display_switch.width() - 9 , btn_y)
-            self.box_icon.move(self.toggle_display_switch.x() - self.toggle_display_switch.width() + 22 , btn_y)
-            
-            # Position warning to bottom center of video
-            warning_x = bottom_right_x - int(rect.width() / 2) - int(self.low_confidence_warning.width() / 2)
-            warning_y = self.toggle_display_switch.y() + int(self.low_confidence_warning.height() / 2)  # - int(2 * self.toggle_display_switch.height() / 3)
-            self.low_confidence_warning.move(warning_x, warning_y)
-
-        self.frame_player.resized.connect(update_frame_elements)
-        update_frame_elements()
+        self.frame_player.resized.connect(self.update_frame_elements)
+        self.update_frame_elements()
 
         labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
 
@@ -3122,6 +3098,37 @@ class MainWindow(QMainWindow):
             self.toggle_display_mode_button.move(btn_x, btn_y)
 
         # layout.addWidget(self.toggle_display_mode_button)
+
+    def update_frame_elements(self):
+        if not hasattr(self, "frame_player"):
+            return
+
+        rect = self.frame_player.content_rect()
+        if rect.isNull():
+            # Fallback before first frame is ready: use full frame_player area.
+            rect = self.frame_player.rect()
+            if rect.isNull():
+                return
+
+        self.low_confidence_warning.adjustSize()
+
+        # Extract bottom right coordinates.
+        bottom_right_x = rect.x() + rect.width()
+        bottom_right_y = rect.y() + rect.height()
+
+        # Position button near bottom-right of video.
+        btn_x = bottom_right_x - self.mask_icon.width() - 7
+        btn_y = bottom_right_y - self.mask_icon.height() - 4
+
+        self.mask_icon.move(btn_x, btn_y)
+        self.toggle_display_switch.move(self.mask_icon.x() - self.toggle_display_switch.width() - 9, btn_y)
+        self.box_icon.move(self.toggle_display_switch.x() - self.toggle_display_switch.width() + 22, btn_y)
+
+        # Position warning to bottom center of video.
+        warning_x = bottom_right_x - int(rect.width() / 2) - int(self.low_confidence_warning.width() / 2)
+        warning_y = self.toggle_display_switch.y() + int(self.low_confidence_warning.height() / 2)
+        self.low_confidence_warning.move(warning_x, warning_y)
+
     def switch_detection_list(self, show_historical=False):
         current_list = self.historical_items if show_historical else self.detection_list
         other_list = self.detection_list if show_historical else self.historical_items
@@ -3200,19 +3207,27 @@ class MainWindow(QMainWindow):
             self.toggle_display_switch.reset_position()
             self.toggle_display_switch.update()
             self.frame_player.set_gif(str(mp4_path))
+            self.update_frame_elements()
+            QTimer.singleShot(0, self.update_frame_elements)
         elif gif_path.exists():
             # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
             self.toggle_display_switch.reset_position()
             self.toggle_display_switch.update()
             self.frame_player.set_gif(str(gif_path))
+            self.update_frame_elements()
+            QTimer.singleShot(0, self.update_frame_elements)
         else:
             # Try alternative naming (without extension in basename)
             alt_mp4 = gif_dir / f"{Path(video_basename).stem}_{track_id}.mp4"
             alt_gif = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
             if alt_mp4.exists():
                 self.frame_player.set_gif(str(alt_mp4))
+                self.update_frame_elements()
+                QTimer.singleShot(0, self.update_frame_elements)
             elif alt_gif.exists():
                 self.frame_player.set_gif(str(alt_gif))
+                self.update_frame_elements()
+                QTimer.singleShot(0, self.update_frame_elements)
             else:
                 self.frame_player.clear()
                 self.frame_player.setText(f"Video not found:\n{mp4_name} or {gif_name}")
@@ -3947,6 +3962,17 @@ class FramePlayer(QLabel):
 
     def set_gif(self, path: str):
         self._static_pixmap = None
+
+        movie = QMovie(path)
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+        frame_count = movie.frameCount()
+
+        # Very short animations look jittery; show only the center frame instead.
+        if 0 < frame_count < 5:
+            middle_index = frame_count // 2
+            if movie.jumpToFrame(middle_index):
+                self.set_static_pixmap(movie.currentPixmap())
+                return
 
         movie = QMovie(path)
         movie.setCacheMode(QMovie.CacheMode.CacheAll)

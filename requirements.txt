@@ -9,3 +9,4 @@ dask
 tqdm
 pandas
 PyQt6_SwitchControl
+google-cloud-storage
