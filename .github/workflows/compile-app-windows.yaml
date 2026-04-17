@@ -61,6 +61,6 @@ jobs:
           parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
           name: ${{ env.ZIP_NAME }}
 
-      # - name: Upload build to Google Cloud Bucket
-      #   run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+      - name: Upload build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
 
