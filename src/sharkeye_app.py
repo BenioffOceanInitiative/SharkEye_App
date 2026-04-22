@@ -2068,6 +2068,12 @@ class MainWindow(QMainWindow):
         self.drone_select.clear()
         self.drone_select.addItems(drone_names)
 
+        last_drone_type = self.settings_obj.value("last_drone_type")
+        if last_drone_type:
+            idx = self.drone_select.findText(str(last_drone_type))
+            if idx >= 0:
+                self.drone_select.setCurrentIndex(idx)
+
     def setup_home_page(self):
         layout = QVBoxLayout(self.home_widget)
 
@@ -2277,8 +2283,9 @@ class MainWindow(QMainWindow):
             item = self.video_list.item(i, 0)
             item.setText(item.text().replace('🔎 ', '').replace('✅ ', ''))
 
-        # Save last flight location
+        # Save last flight location and last selected drone model
         self.settings_obj.setValue("last_flight_location", self.flight_location_input.text())
+        self.settings_obj.setValue("last_drone_type", self.drone_select.currentText())
 
         self.video_queue = [self.video_list.item(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.video_list.rowCount())]
         self.current_video_index = 0
@@ -2311,11 +2318,13 @@ class MainWindow(QMainWindow):
                     "\n".join([f"{w}x{h}" for w, h in valid_resolutions])
                 )
                 # Reset UI
-                self.is_processing = False
-                self.process_button.setText("Process Videos")
-                self.process_button.setEnabled(True)
-                self.remove_all_button.setEnabled(self.video_list.rowCount() > 0)
-                return
+                self.cancel_processing()
+                return 
+                # self.is_processing = False
+                # self.process_button.setText("Process Videos")
+                # self.process_button.setEnabled(True)
+                # self.remove_all_button.setEnabled(self.video_list.rowCount() > 0)
+                # return
     
         self.process_next_video()
 
