@@ -20,6 +20,8 @@ app.log
 2023_2023-12-02_Transect_Dec-2nd-2023-03-54PM-Flight-Airdata.csv
 videos_with_flight_data.csv
 headless_predictions/
+headless_predictions_2/
+sample_data/
 segmentation_comparison/
 src/find_flight_data.pys
 src/sharkeye todo.txt
