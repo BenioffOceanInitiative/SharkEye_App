@@ -244,7 +244,7 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
     longest_line = best_pair
     max_length = max_dist
     end_time = time.time()
-    print(f"Elapsed time to find length {(start_time - end_time)}")
+    print(f"Elapsed time to find length {(end_time - start_time)}")
     # Visualization
     if draw_line:
         fig, ax = plt.subplots(figsize=(8, 8))

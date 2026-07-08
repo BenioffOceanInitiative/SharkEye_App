@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
@@ -16,7 +16,7 @@ from PyQt6_SwitchControl import SwitchControl
 import cv2
 import torch
 from ultralytics import YOLO
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 from collections import defaultdict, deque
 from scipy.optimize import linear_sum_assignment
@@ -33,6 +33,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 import shutil
 import tempfile
 import io
+import time
 import imageio
 from PIL import Image
 import pandas as pd
@@ -69,6 +70,28 @@ def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
     painter.fillRect(pixmap.rect(), color)
     painter.end()
     return QIcon(pixmap)
+
+
+def is_dark_mode() -> bool:
+    """Best-effort detection of the OS/app dark color scheme."""
+    app = QApplication.instance()
+    if app is None:
+        return False
+    try:
+        scheme = app.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return True
+        if scheme == Qt.ColorScheme.Light:
+            return False
+    except (AttributeError, TypeError):
+        pass
+    # Fallback for older Qt: infer from the window background lightness.
+    return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def theme_icon_color() -> QColor:
+    """Icon tint that keeps contrast in both light and dark mode."""
+    return QColor("white") if is_dark_mode() else QColor("#4a4a4a")
 
 
 DEFAULT_DETECTION_LABELS = [
@@ -1393,12 +1416,12 @@ class CustomTracker:
     @staticmethod
     def _format_timestamp(milliseconds):
         """Format timestamp in MM:SS format for CSV"""
-        return datetime.utcfromtimestamp(milliseconds / 1000).strftime("%M:%S")
+        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M:%S")
 
     @staticmethod
     def _format_timestamp_filename(milliseconds):
         """Format timestamp in MMSS format for filename"""
-        return datetime.utcfromtimestamp(milliseconds / 1000).strftime("%M%S")
+        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M%S")
 
     def save_best_frames(self, output_dir, video_path):
         """Save best frames for each significant track"""
@@ -1505,11 +1528,251 @@ def get_annotation_settings(settings_obj):
     
     return annotation_color, box_thickness, text_thickness, text_scale
 
+
+def encode_track_gifs(gif_payload, output_dir, video_name, annotation_color,
+                      box_thickness, text_thickness, text_scale):
+    """Encode per-track detection GIFs from a self-contained payload.
+
+    `gif_payload` maps track key -> {'frames', 'positions', 'lengths', 'confidences'}.
+    This is pure CPU/IO work and is safe to run on a background thread because the
+    payload owns its own frame buffers (no shared state with the UI's track dicts).
+    """
+    gifs_dir = os.path.join(output_dir, "tracking_gifs")
+    os.makedirs(gifs_dir, exist_ok=True)
+
+    # Convert RGB to BGR for OpenCV (OpenCV uses BGR format)
+    annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
+
+    for key, track in gif_payload.items():
+        track_frames = []
+        for frame_idx, (pos, frame) in enumerate(zip(track['positions'], track['frames'])):
+            x, y, w, h = pos
+            frame_with_box = frame.copy()
+            cv2.rectangle(frame_with_box,
+                        (int(x - w/2), int(y - h/2)),
+                        (int(x + w/2), int(y + h/2)),
+                        annotation_color_bgr, box_thickness)
+
+            label = f"Shark: {track['confidences'][frame_idx]:.2f}"
+            cv2.putText(frame_with_box, label, (int(x - w/2), int(y - h/2) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
+
+            track_frames.append(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))
+
+        if track_frames:
+            gif_filename = f"{video_name}_{key}.gif"
+            gif_path = os.path.join(gifs_dir, gif_filename)
+
+            pil_frames = [Image.fromarray(frame) for frame in track_frames]
+
+            # Build a shared palette from all frames so colors stay stable
+            combined_width = max(f.width for f in pil_frames)
+            combined_height = sum(f.height for f in pil_frames)
+            combined_image = Image.new('RGB', (combined_width, combined_height))
+
+            y_offset = 0
+            for frame in pil_frames:
+                combined_image.paste(frame, (0, y_offset))
+                y_offset += frame.height
+
+            quantized_combined = combined_image.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
+            palette = quantized_combined.getpalette()
+
+            # Ensure the annotation color survives quantization
+            annotation_color_rgb = annotation_color
+            palette_rgb = [(palette[i], palette[i+1], palette[i+2])
+                          for i in range(0, min(255 * 3, len(palette)), 3)]
+
+            min_dist = float('inf')
+            color_idx = 0
+            for idx, color in enumerate(palette_rgb):
+                dist = sum((a - b) ** 2 for a, b in zip(color, annotation_color_rgb))
+                if dist < min_dist:
+                    min_dist = dist
+                    color_idx = idx
+
+            if min_dist > 100:
+                palette[color_idx * 3] = annotation_color_rgb[0]
+                palette[color_idx * 3 + 1] = annotation_color_rgb[1]
+                palette[color_idx * 3 + 2] = annotation_color_rgb[2]
+
+            palette_image = Image.new('P', (1, 1))
+            palette_image.putpalette(palette)
+
+            quantized_frames = []
+            for frame in pil_frames:
+                quantized = frame.quantize(palette=palette_image, dither=Image.Dither.NONE)
+                quantized_frames.append(quantized)
+
+            quantized_frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=quantized_frames[1:],
+                duration=100,
+                loop=0,
+                optimize=False
+            )
+            print(f"Saved GIF: {gif_path}")
+
+        # Free the frame buffers as we go
+        track['frames'] = None
+
+
+def export_training_frames_locally(payload, video_stem, annotation_format="yolo"):
+    """Bundle per-track frames + annotations into a training zip under the results dir.
+
+    Extracted from the old `VideoProcessingWorker.upload_frames_for_training` (local
+    export path) so it can run off the worker/UI thread. Operates on the self-contained
+    post-processing payload (track key -> {'frames', 'positions', ...}), so it shares no
+    mutable state with the tracks handed to the UI.
+    """
+    fmt = (annotation_format or "yolo").strip().lower()
+    if fmt not in ("coco", "yolo"):
+        print(f"Unsupported annotation_format {annotation_format!r}; skipping training export")
+        return
+
+    category_names = [
+        "great white shark", "kelp", "human", "surfer", "dolphin",
+        "bat ray", "bird", "boat", "seal", "kayaker",
+    ]
+    num_classes = len(category_names)
+
+    coco = {
+        "licenses": [{"name": "", "id": 0, "url": ""}],
+        "info": {"contributor": "", "date_created": "", "description": "",
+                 "url": "", "version": "", "year": ""},
+        "categories": [{"id": i + 1, "name": name, "supercategory": ""}
+                       for i, name in enumerate(category_names)],
+        "images": [],
+        "annotations": [],
+    }
+    image_id = 1
+    annotation_id = 1
+    buffer = io.BytesIO()
+    yolo_data_dir = "obj_train_data"
+    yolo_train_paths = []
+
+    try:
+        with zipfile.ZipFile(buffer, "w") as zipf:
+            for track_id, track in payload.items():
+                positions = track.get("positions")
+                frames = track.get("frames")
+                if positions is None or frames is None:
+                    continue
+
+                for frame_idx, (pos, frame) in enumerate(zip(positions, frames)):
+                    x, y, w, h = pos
+                    if frame is None:
+                        continue
+                    try:
+                        height, width = frame.shape[:2]
+                    except Exception:
+                        continue
+
+                    x_min = max(0, int(x - w / 2))
+                    y_min = max(0, int(y - h / 2))
+                    box_w = int(w)
+                    box_h = int(h)
+                    if x_min >= width or y_min >= height:
+                        continue
+                    box_w = min(box_w, width - x_min)
+                    box_h = min(box_h, height - y_min)
+                    if box_w <= 0 or box_h <= 0:
+                        continue
+
+                    image_basename = f"{video_stem}_track{track_id}_frame{frame_idx:04d}"
+                    success, encoded = cv2.imencode(".jpg", frame)
+                    if not success:
+                        continue
+
+                    if fmt == "yolo":
+                        image_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".jpg")
+                        label_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".txt")
+                        zipf.writestr(image_path_in_zip, encoded.tobytes())
+                        yolo_train_paths.append(image_path_in_zip)
+                        cx_norm = x / width
+                        cy_norm = y / height
+                        rw = w / width
+                        rh = h / height
+                        zipf.writestr(label_path_in_zip,
+                                      f"0 {cx_norm:.6f} {cy_norm:.6f} {rw:.6f} {rh:.6f}\n")
+                    else:
+                        image_filename = image_basename + ".jpg"
+                        zipf.writestr(os.path.join("images", image_filename), encoded.tobytes())
+                        coco["images"].append({
+                            "id": image_id, "width": int(width), "height": int(height),
+                            "file_name": image_filename, "license": 0, "flickr_url": "",
+                            "coco_url": "", "date_captured": 0,
+                        })
+                        coco["annotations"].append({
+                            "id": annotation_id, "image_id": image_id, "category_id": 1,
+                            "segmentation": [], "area": float(box_w * box_h),
+                            "bbox": [float(x_min), float(y_min), float(box_w), float(box_h)],
+                            "iscrowd": 0,
+                            "attributes": {"occluded": False, "rotation": 0.0,
+                                           "track_id": track_id, "keyframe": True},
+                        })
+                        image_id += 1
+                        annotation_id += 1
+
+            if fmt == "coco":
+                zipf.writestr("instances_default.json", json.dumps(coco))
+            else:
+                zipf.writestr("train.txt", "\n".join(yolo_train_paths) + ("\n" if yolo_train_paths else ""))
+                zipf.writestr("obj.names", "\n".join(category_names) + "\n")
+                zipf.writestr("obj.data", f"classes = {num_classes}\nnames = obj.names\ntrain = train.txt\n")
+
+        export_dir = get_results_dir()
+        os.makedirs(export_dir, exist_ok=True)
+        export_path = os.path.join(export_dir, f"{video_stem}_training_frames.zip")
+        with open(export_path, "wb") as f:
+            f.write(buffer.getvalue())
+        print(f"Training frames zip saved to {export_path}")
+    except Exception as e:
+        print(f"Training frame export failed: {e}")
+
+
+class PostProcessJob(QRunnable):
+    """Runs the per-video CPU/IO post-processing (training-frame export + GIF encoding)
+    on a background thread pool so the next video's inference isn't blocked."""
+
+    def __init__(self, payload, output_dir, video_name, annotation_color,
+                 box_thickness, text_thickness, text_scale):
+        super().__init__()
+        self.payload = payload
+        self.output_dir = output_dir
+        self.video_name = video_name
+        self.annotation_color = annotation_color
+        self.box_thickness = box_thickness
+        self.text_thickness = text_thickness
+        self.text_scale = text_scale
+
+    def run(self):
+        video_stem = Path(self.video_name).stem
+        t_export = t_gif = -1.0
+        try:
+            t0 = time.perf_counter()
+            export_training_frames_locally(self.payload, video_stem, annotation_format="yolo")
+            t_export = time.perf_counter() - t0
+        except Exception as e:
+            print(f"Async training-frame export failed: {e}")
+        try:
+            t0 = time.perf_counter()
+            encode_track_gifs(self.payload, self.output_dir, self.video_name,
+                              self.annotation_color, self.box_thickness,
+                              self.text_thickness, self.text_scale)
+            t_gif = time.perf_counter() - t0
+        except Exception as e:
+            print(f"Async GIF encoding failed: {e}")
+        print(f"[timing] {self.video_name}: (background) export={t_export:.2f}s gif={t_gif:.2f}s")
+
+
 class VideoProcessingWorker(QObject):
     progress_update = pyqtSignal(int)
     processing_complete = pyqtSignal(dict, str)
     frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
     progress_status_changed = pyqtSignal(str)  # current process summary for MainWindow.progress_status
+    postproc_ready = pyqtSignal(dict, str, str)  # (payload, output_dir, video_name) for async export + GIF encoding
 
     def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
         super().__init__()
@@ -1552,6 +1815,7 @@ class VideoProcessingWorker(QObject):
         # self.detection_threshold = 0.4
 
         frame_num = 0
+        infer_start = time.perf_counter()
         while frame_num < total_frames:
             if QThread.currentThread().isInterruptionRequested():
                 print("Processing interrupted")
@@ -1599,19 +1863,55 @@ class VideoProcessingWorker(QObject):
             frame_num += frame_skip
             self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
 
+        infer_time = time.perf_counter() - infer_start
         cap.release()
-        
+
         if not QThread.currentThread().isInterruptionRequested():
             # Only save results if not interrupted
             self.progress_status_changed.emit("Running Segmentation")
+            seg_start = time.perf_counter()
             custom_tracker.save_best_frames(self.output_dir, self.video_path)
+            seg_time = time.perf_counter() - seg_start
+
             self.progress_status_changed.emit("Saving detection results")
+            csv_start = time.perf_counter()
             self.save_detections_csv(custom_tracker.tracks, os.path.join(self.output_dir, 'detection_results'))
-            self.progress_status_changed.emit("Uploading frames to cloud")
-            print(self.upload_frames_for_training(custom_tracker.tracks, export_locally = True, annotation_format = 'yolo'))
-            self.progress_status_changed.emit("Saving GIFs")
-            self.save_detection_gif(custom_tracker.tracks, self.output_dir)
+            csv_time = time.perf_counter() - csv_start
+
+            # Defer the CPU/IO post-processing (training-frame export + GIF encoding) to
+            # a background pool so the next video's inference can start immediately. Move
+            # the frame buffers out of the tracks first so the UI's copy and the
+            # background job never share mutable state.
+            self.progress_status_changed.emit("Finalizing")
+            payload = self._extract_postproc_payload(custom_tracker.tracks)
+            self.postproc_ready.emit(payload, self.output_dir, Path(self.video_path).name)
+
+            # Per-phase timing breakdown (export + GIF are timed in the background job).
+            print(f"[timing] {Path(self.video_path).name}: inference={infer_time:.1f}s "
+                  f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
+                  f"(export+gif deferred to background)")
             self.processing_finished(custom_tracker.tracks)
+
+    def _extract_postproc_payload(self, tracks):
+        """Move frame buffers out of `tracks` into a standalone payload for async
+        post-processing (training-frame export + GIF encoding).
+
+        `frames` is removed from each track (post-processing consumed/deleted it anyway);
+        positions/lengths/confidences are copied so the returned payload shares no
+        mutable state with the tracks handed to the UI thread.
+        """
+        payload = {}
+        for key, track in tracks.items():
+            frames = track.pop('frames', None)
+            if frames is None or len(frames) == 0:
+                continue
+            payload[key] = {
+                'frames': frames,
+                'positions': list(track.get('positions', [])),
+                'lengths': list(track.get('lengths', [])),
+                'confidences': list(track.get('confidences', [])),
+            }
+        return payload
 
     @staticmethod
     def draw_bounding_boxes(frame, detections):
@@ -1663,7 +1963,11 @@ class VideoProcessingWorker(QObject):
                 })
             print("Done saving csv")       
         
-    def save_detection_gif(self, tracks, output_dir, annotation_color=None): 
+    # TODO: DEAD CODE — GIF encoding now runs asynchronously via the module-level
+    # `encode_track_gifs()` / `PostProcessJob` (dispatched from the worker's
+    # `postproc_ready` signal). This synchronous method is no longer called; remove
+    # it once the async path is confirmed working on-device to avoid two GIF paths.
+    def save_detection_gif(self, tracks, output_dir, annotation_color=None):
         """
         Save detection tracks as GIFs with bounding boxes and labels.
         
@@ -1772,6 +2076,11 @@ class VideoProcessingWorker(QObject):
 
             del track['frames']
     
+    # TODO: DEAD CODE (local-export path) — training-frame export now runs
+    # asynchronously via the module-level `export_training_frames_locally()` /
+    # `PostProcessJob`. This method is retained only for its cloud-upload branch
+    # (export_locally=False), which currently has no caller. Remove or wire up
+    # once the async path is confirmed on-device.
     def upload_frames_for_training(
         self,
         tracks,
@@ -2183,10 +2492,8 @@ class MainWindow(QMainWindow):
         combo.addItems(items)
         if current_label:
             combo.setCurrentText(current_label)
-            print(f"current_label provided passing {current_label}")
         elif items:
             combo.setCurrentIndex(0)
-            print(f"current_label not provided")
 
     def refresh_label_combos(self):
         for table in (self.detection_list, self.historical_items):
@@ -2223,6 +2530,11 @@ class MainWindow(QMainWindow):
         self.processed_videos = 0
         self.processing_thread = None
         self.processing_worker = None
+        # Background pool for per-video post-processing (training-frame export + GIF
+        # encoding); capped at 1 so it doesn't starve inference.
+        self.postproc_pool = QThreadPool(self)
+        self.postproc_pool.setMaxThreadCount(1)
+        self._awaiting_first_frame = False
         self.api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
         self.is_uploading = False
         self.upload_thread = None
@@ -2262,6 +2574,15 @@ class MainWindow(QMainWindow):
                       'mps' if torch.backends.mps.is_available() else 'cpu')
         print(f"Using device: {device}")
         self.model = YOLO(MODEL_PATH).to(device)
+        # Warm up the model with one dummy inference so the first real video doesn't
+        # pay the one-time kernel-compilation cost mid-run (which showed up as a
+        # multi-second blank preview on the very first video).
+        try:
+            warmup_frame = np.zeros((ORIGINAL_HEIGHT, ORIGINAL_WIDTH, 3), dtype=np.uint8)
+            self.model(warmup_frame, classes=[0], verbose=False)
+            print("Model warmup complete")
+        except Exception as e:
+            print(f"Model warmup skipped: {e}")
 
     def setup_signal_handlers(self):
         signal.signal(signal.SIGINT, signal_handler)
@@ -2719,7 +3040,14 @@ class MainWindow(QMainWindow):
 
         self.update_video_list_emoji()
         self.prepare_frame_display()
-        
+
+        # Show an indeterminate (busy) bar until this video's first frame arrives.
+        # This covers the model-warmup / video-open gap where the timer was running
+        # but no frame had been displayed yet.
+        self._awaiting_first_frame = True
+        if getattr(self, "progress_bar", None) is not None:
+            self.progress_bar.setRange(0, 0)
+
         self.bounding_boxes_dir = os.path.join(self.current_output_dir, 'bounding_boxes')
         self.false_positives_dir = os.path.join(self.current_output_dir, 'false_positives')
         
@@ -2742,7 +3070,17 @@ class MainWindow(QMainWindow):
         self.processing_worker.progress_update.connect(self.update_progress, Qt.ConnectionType.QueuedConnection)
         self.processing_worker.processing_complete.connect(self.processing_complete, Qt.ConnectionType.QueuedConnection)
         self.processing_worker.progress_status_changed.connect(self.set_progress_status, Qt.ConnectionType.QueuedConnection)
+        self.processing_worker.postproc_ready.connect(self.dispatch_postproc_job, Qt.ConnectionType.QueuedConnection)
         self.processing_thread.started.connect(self.processing_worker.run)
+
+    def dispatch_postproc_job(self, payload, output_dir, video_name):
+        """Queue per-video post-processing (export + GIF) on the background pool so the next video can start inference."""
+        if not payload:
+            return
+        annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
+        job = PostProcessJob(payload, output_dir, video_name, annotation_color,
+                             box_thickness, text_thickness, text_scale)
+        self.postproc_pool.start(job)
 
     def update_video_list_emoji(self):
         for i in range(self.video_list.rowCount()):
@@ -2927,6 +3265,10 @@ class MainWindow(QMainWindow):
         if self.current_video_index < len(self.video_queue):
             self.process_video(self.video_queue[self.current_video_index])
         else:
+            # Let the last video's background post-processing (export + GIF) finish
+            # writing to disk before building the review page (which loads the GIFs).
+            self.set_progress_status("Finalizing")
+            self.postproc_pool.waitForDone()
             # Sort tracks before showing review widget
             self.sort_tracks()
             # Update detection list
@@ -3019,14 +3361,13 @@ class MainWindow(QMainWindow):
                 video_basename = Path(track['video_name']).name
                 track_id = track['unique_id']
                 timestamp = track['longest_timestamp'] if 'longest_timestamp' in track else track['timestamps'][0]
-                time_str = datetime.utcfromtimestamp(timestamp / 1000).strftime("%M:%S")
+                time_str = datetime.fromtimestamp(timestamp / 1000, timezone.utc).strftime("%M:%S")
                 conf_longest = track.get('longest_conf', 0.0)
                 len_high_conf = track.get('longest_length', 0.0)
                 label = self.historical_label_changes.get(
                     (getattr(self, "current_experiment", ""), track['video_name'], track['csv_name'], track_id),
                     track.get('label', 'Shark'),
                 )
-                print(label)
 
                 row_position = self.detection_list.rowCount()
                 self.detection_list.insertRow(row_position)
@@ -3044,7 +3385,7 @@ class MainWindow(QMainWindow):
                         combo = QComboBox()
                         self.populate_label_combo(combo, label)
                         combo.currentIndexChanged.connect(
-                            lambda _index, idx=index, combo=combo: self._update_label(idx, combo)
+                            lambda _index, idx=index, combo=combo: self._update_label_from_table(idx, combo)
                         )
                         self.detection_list.setCellWidget(row_position, col, combo)
                     else:
@@ -3200,10 +3541,15 @@ class MainWindow(QMainWindow):
     def highlight_current_detection(self):
         # For QTableWidget, select the row corresponding to current_detection_index
         for row in range(self.detection_list.rowCount()):
-            index = self.detection_list.item(row, 0).data(Qt.ItemDataRole.UserRole) + 1
+            item = self.detection_list.item(row, 0)
+            if item is None:
+                continue
+            index = item.data(Qt.ItemDataRole.UserRole)
+            if index is None:
+                continue
             if index == self.current_detection_index:
                 self.detection_list.selectRow(row)
-                self.detection_list.scrollToItem(self.detection_list.item(row, 0))
+                self.detection_list.scrollToItem(item)
             # else:
             #     self.detection_list.selectRow(row)
             #     #self.detection_list.setRangeSelected(
@@ -3228,12 +3574,16 @@ class MainWindow(QMainWindow):
         #     print("Error: No sorted tracks available. Cannot update label.")
         #     return
 
-        # Update the detection list to reflect the new label
-        self.update_detection_list()
-        
-        # Ensure the current detection remains selected
-        # self.show_detection(self.current_detection_index)
-        self.show_historical_gif()
+        # Refresh the preview for the newly-labeled selection. The visible historical
+        # table already reflects the change (the user edited its combo directly), so
+        # we only refresh the GIF/MP4 preview here. We deliberately do NOT rebuild the
+        # hidden detection_list from sorted_tracks — that was pointless (the table is
+        # hidden), noisy, and dropped to "0 tracks" when viewing history without a
+        # fresh inference. Guarded so a relabel can never take down the app.
+        try:
+            self.show_historical_gif()
+        except Exception as e:
+            print(f"Error refreshing preview after label change: {e}")
         
     def sort_tracks(self):
         print("Sorting tracks...")
@@ -3436,7 +3786,7 @@ class MainWindow(QMainWindow):
         self.experiment_note_button = QPushButton()
         self.experiment_note_button.setIcon(colored_svg_icon(
             resource_path("assets/images/pencil-fill.svg"),
-            QColor("#4a4a4a"),
+            theme_icon_color(),
         ))
         self.experiment_note_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.experiment_note_button.setStyleSheet("QPushButton { border: none; background: transparent; }")
@@ -3610,9 +3960,7 @@ class MainWindow(QMainWindow):
             return
 
         row = table.currentRow()
-        print(row)
         if row < 0:
-            print("No rows")
             return
 
         combo = table.cellWidget(row, 6)
@@ -3766,7 +4114,7 @@ class MainWindow(QMainWindow):
 
                         # Create delete button
                         del_button = QPushButton("")
-                        del_button.setIcon(QIcon(resource_path("assets/images/trash-fill.svg")))
+                        del_button.setIcon(colored_svg_icon(resource_path("assets/images/trash-fill.svg"), theme_icon_color()))
                         del_button.setStyleSheet("background: transparent; border: none;")
                         del_button.clicked.connect(self.mark_for_deletion)
                         self.historical_items.setCellWidget(row_position, 7, del_button)
@@ -4026,6 +4374,11 @@ class MainWindow(QMainWindow):
         return f"{track['video_name']}_{new_label.lower()}{track['unique_id']}_time{track['time']}_det{track['detections']}_avgConf{int(track['avg_conf']*100):02d}_bestConf{int(track['best_conf']*100):02d}_len{track['length'].replace('ft', 'ft').replace('in', 'in')}.jpg"
 
     def update_frame_display(self, frame):
+        # First frame of this video arrived — switch the busy bar back to determinate.
+        if getattr(self, "_awaiting_first_frame", False):
+            self._awaiting_first_frame = False
+            if getattr(self, "progress_bar", None) is not None:
+                self.progress_bar.setRange(0, 100)
         height, width, channel = frame.shape
         bytes_per_line = 3 * width
         q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
@@ -4084,7 +4437,7 @@ class MainWindow(QMainWindow):
                 
                 for _, track in self.sorted_tracks:
                     timestamp = track['longest_timestamp']
-                    time_str = datetime.utcfromtimestamp(timestamp / 1000).strftime('%M:%S')
+                    time_str = datetime.fromtimestamp(timestamp / 1000, timezone.utc).strftime('%M:%S')
                     
                     writer.writerow({
                         'video_name': track['video_name'],
