@@ -5,7 +5,7 @@ import argparse
 import cv2
 import torch
 from ultralytics import YOLO
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 from collections import defaultdict, deque
 from scipy.optimize import linear_sum_assignment
@@ -180,12 +180,12 @@ class CustomTracker:
     @staticmethod
     def _format_timestamp(milliseconds):
         """Format timestamp in MM:SS format for CSV"""
-        return datetime.utcfromtimestamp(milliseconds / 1000).strftime("%M:%S")
+        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M:%S")
 
     @staticmethod
     def _format_timestamp_filename(milliseconds):
         """Format timestamp in MMSS format for filename"""
-        return datetime.utcfromtimestamp(milliseconds / 1000).strftime("%M%S")
+        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M%S")
 
     def save_best_frames(self, output_dir, video_path):
         """Save best frames for each significant track"""
