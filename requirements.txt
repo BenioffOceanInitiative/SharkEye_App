@@ -1,6 +1,3 @@
-torch
-torchaudio
-torchvision
 ultralytics
 lapx
 PyQt6
