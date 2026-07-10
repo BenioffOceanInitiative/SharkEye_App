@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette
-from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette  # TODO: remove QPalette — unused (moved to theme.py)
+from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
     
@@ -60,38 +60,22 @@ ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
 
-def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
-    renderer = QSvgRenderer(svg_path)
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    painter.fillRect(pixmap.rect(), color)
-    painter.end()
-    return QIcon(pixmap)
+# Frame sampling / detection parsing (shared with the headless processors).
+from frame_sampling import iter_sampled_frames, parse_detections, downscale_for_preview
 
-
-def is_dark_mode() -> bool:
-    """Best-effort detection of the OS/app dark color scheme."""
-    app = QApplication.instance()
-    if app is None:
-        return False
-    try:
-        scheme = app.styleHints().colorScheme()
-        if scheme == Qt.ColorScheme.Dark:
-            return True
-        if scheme == Qt.ColorScheme.Light:
-            return False
-    except (AttributeError, TypeError):
-        pass
-    # Fallback for older Qt: infer from the window background lightness.
-    return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
-
-
-def theme_icon_color() -> QColor:
-    """Icon tint that keeps contrast in both light and dark mode."""
-    return QColor("white") if is_dark_mode() else QColor("#4a4a4a")
+# Theming: colors, icon tints, and reusable style snippets live in theme.py so styling
+# decisions stay in one place and adapt to the OS light/dark palette.
+from theme import (
+    apply_theme,
+    banner_icon,
+    banner_surface_style,
+    colored_svg_icon,
+    is_dark_mode,
+    theme_icon_color,
+    warning_text_color,
+    BANNER_BUTTON,
+    FLAT_ICON_BUTTON,
+)
 
 
 DEFAULT_DETECTION_LABELS = [
@@ -1006,7 +990,7 @@ class DetectionLabelsPage(QWidget):
 
         delete_btn = QPushButton("")
         delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
-        delete_btn.setStyleSheet("background: transparent; border: none;")
+        delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
         delete_btn.clicked.connect(self.delete_label_row)
         self.label_table.setCellWidget(row_position, 1, delete_btn)
 
@@ -1768,7 +1752,7 @@ class VideoProcessingWorker(QObject):
         self.progress_status_changed.emit("Running Inference")
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1784,65 +1768,44 @@ class VideoProcessingWorker(QObject):
         os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "masks"), exist_ok=True)
 
-        min_frame_skip, max_frame_skip = 10, 60
-        frame_skip = min_frame_skip
-        consecutive_empty_frames = 0
-        max_empty_frames = 1 * fps
-        
-        # self.detection_threshold = 0.4
-
-        frame_num = 0
         frames_sampled = 0
         total_detections = 0
         infer_start = time.perf_counter()
-        while frame_num < total_frames:
-            if QThread.currentThread().isInterruptionRequested():
-                print("Processing interrupted")
-                break
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Sequential forward sampling (no per-frame keyframe seeking); the stride adapts
+        # based on whether the previous frame had a detection.
+        sampler = iter_sampled_frames(cap)
+        had_detection = None
+        try:
+            while True:
+                frame_num, frame = sampler.send(had_detection)
 
-            results = self.model(frame, classes=[0], verbose=False)
-            frames_sampled += 1
+                if QThread.currentThread().isInterruptionRequested():
+                    print("Processing interrupted")
+                    break
 
-            detections = []
-            if results[0].boxes is not None and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xywh.cpu()
-                confidences = results[0].boxes.conf.cpu().tolist()
+                results = self.model(frame, classes=[0], verbose=False)
+                frames_sampled += 1
 
-                detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > self.detection_threshold]
+                detections = parse_detections(results, self.detection_threshold)
+                had_detection = bool(detections)
 
-            has_detection = bool(detections)
-            if has_detection:
-                timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
-                total_detections += len(detections)
-                active_tracks = custom_tracker.update(detections, frame, timestamp)
+                if had_detection:
+                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    total_detections += len(detections)
+                    custom_tracker.update(detections, frame, timestamp)
+                    preview = self.draw_bounding_boxes(frame, detections)
+                else:
+                    preview = frame
 
-                # Draw bounding boxes on the frame
-                frame_with_boxes = self.draw_bounding_boxes(frame, detections)
+                # Downscale before the color conversion/emit: the live preview widget is
+                # far smaller than a source frame, so shipping full 4K wastes CPU.
+                preview = downscale_for_preview(preview)
+                self.frame_processed.emit(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
 
-                # Emit the processed frame with bounding boxes
-                self.frame_processed.emit(cv2.cvtColor(frame_with_boxes, cv2.COLOR_BGR2RGB))
-                
-                consecutive_empty_frames = 0
-                frame_skip = min_frame_skip
-            else:
-                # Emit the frame without bounding boxes
-                self.frame_processed.emit(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                
-                consecutive_empty_frames += frame_skip
-
-            # Increase frame skip more aggressively
-            if consecutive_empty_frames >= max_empty_frames:
-                frame_skip = min(max_frame_skip, frame_skip * 2)
-
-            frame_num += frame_skip
-            self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
+                self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
+        except StopIteration:
+            pass
 
         infer_time = time.perf_counter() - infer_start
         cap.release()
@@ -1956,119 +1919,6 @@ class VideoProcessingWorker(QObject):
                 })
             print("Done saving csv")       
         
-    # TODO: DEAD CODE — detection clips now render asynchronously as MP4 via the
-    # module-level `encode_track_clips()` / `PostProcessJob` (dispatched from the
-    # worker's `postproc_ready` signal). This synchronous GIF method is no longer
-    # called; remove it once the async path is confirmed working on-device.
-    def save_detection_gif(self, tracks, output_dir, annotation_color=None):
-        """
-        Save detection tracks as GIFs with bounding boxes and labels.
-        
-        Args:
-            tracks: Dictionary of tracks to save
-            output_dir: Directory to save GIFs
-            annotation_color: RGB tuple for bounding box and text color (optional, uses settings if None)
-        """
-        print("Saving Track results as GIFs")
-        gifs_dir = os.path.join(output_dir, "tracking_gifs")
-        os.makedirs(gifs_dir, exist_ok=True)
-        
-        # Get annotation settings
-        if annotation_color is None:
-            annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
-        else:
-            box_thickness = int(self.settings_obj.value("box_thickness", "2"))
-            text_thickness = int(self.settings_obj.value("text_thickness", "2"))
-            text_scale = float(self.settings_obj.value("text_scale", "2.0"))
-        
-        # Convert RGB to BGR for OpenCV (OpenCV uses BGR format)
-        annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
-        
-        for index, (key, track) in enumerate(list(tracks.items())):
-            # Use the bounding box frames for the track
-            track_frames = []
-            for frame_idx, (pos, frame) in enumerate(zip(track['positions'], track['frames'])):
-                x, y, w, h = pos
-                frame_with_box = frame.copy()
-                cv2.rectangle(frame_with_box,
-                            (int(x - w/2), int(y - h/2)),
-                            (int(x + w/2), int(y + h/2)),
-                            annotation_color_bgr, box_thickness)
-
-                feet, inches = divmod(track['lengths'][frame_idx], 1)
-                length_str = f"{int(feet)}ft{int(inches * 12)}in"
-
-                label = f"Shark: {track['confidences'][frame_idx]:.2f}"
-                cv2.putText(frame_with_box, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
-                
-                track_frames.append(cv2.cvtColor(frame_with_box, cv2.COLOR_BGR2RGB))  # Convert to RGB for imageio
-            
-            if track_frames:
-                gif_filename = f"{Path(self.video_path).name}_{key}.gif"
-                gif_path = os.path.join(gifs_dir, gif_filename)
-                
-                # Convert numpy arrays to PIL Images
-                pil_frames = [Image.fromarray(frame) for frame in track_frames]
-                
-                # Create a combined image to build palette from all frames
-                # This ensures the palette includes colors from all frames
-                combined_width = max(f.width for f in pil_frames)
-                combined_height = sum(f.height for f in pil_frames)
-                combined_image = Image.new('RGB', (combined_width, combined_height))
-                
-                y_offset = 0
-                for frame in pil_frames:
-                    combined_image.paste(frame, (0, y_offset))
-                    y_offset += frame.height
-                
-                # Quantize the combined image to create a palette
-                # Use 255 colors to leave room for transparency if needed
-                quantized_combined = combined_image.quantize(colors=255, method=Image.Quantize.MEDIANCUT)
-                palette = quantized_combined.getpalette()
-                
-                # Ensure annotation color is in the palette
-                annotation_color_rgb = annotation_color
-                palette_rgb = [(palette[i], palette[i+1], palette[i+2]) 
-                              for i in range(0, min(255 * 3, len(palette)), 3)]
-                
-                # Find closest palette entry
-                min_dist = float('inf')
-                color_idx = 0
-                for idx, color in enumerate(palette_rgb):
-                    dist = sum((a - b) ** 2 for a, b in zip(color, annotation_color_rgb))
-                    if dist < min_dist:
-                        min_dist = dist
-                        color_idx = idx
-                
-                # If annotation color is not close enough (threshold: 100), replace closest entry
-                if min_dist > 100:
-                    palette[color_idx * 3] = annotation_color_rgb[0]
-                    palette[color_idx * 3 + 1] = annotation_color_rgb[1]
-                    palette[color_idx * 3 + 2] = annotation_color_rgb[2]
-                
-                # Create a palette image to use for quantization
-                palette_image = Image.new('P', (1, 1))
-                palette_image.putpalette(palette)
-                
-                # Convert all frames to use the same palette (no dithering to preserve colors)
-                quantized_frames = []
-                for frame in pil_frames:
-                    quantized = frame.quantize(palette=palette_image, dither=Image.Dither.NONE)
-                    quantized_frames.append(quantized)
-                
-                # Save as GIF
-                quantized_frames[0].save(
-                    gif_path,
-                    save_all=True,
-                    append_images=quantized_frames[1:],
-                    duration=100,  # milliseconds (0.1 seconds = 100ms)
-                    loop=0,
-                    optimize=False
-                )
-                print(f"Saved GIF: {gif_path}")
-
-            del track['frames']
-    
     # TODO: DEAD CODE (local-export path) — training-frame export now runs
     # asynchronously via the module-level `export_training_frames_locally()` /
     # `PostProcessJob`. This method is retained only for its cloud-upload branch
@@ -2585,18 +2435,18 @@ class MainWindow(QMainWindow):
     def setup_home_banner(self):
         # Banner container with left/right buttons and centered logo
         banner_widget = QWidget()
-        banner_widget.setStyleSheet("background-color: #1d2633;")
+        banner_widget.setStyleSheet(banner_surface_style())
         banner_layout = QHBoxLayout(banner_widget)
         banner_layout.setContentsMargins(20, 8, 20, 8)
         banner_layout.setSpacing(8)
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = QPushButton()
-        self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
+        self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
-            "color: white; background: transparent; border: none; font-size: 18px;"
+            BANNER_BUTTON
         )
         self.banner_left_button.setToolTip("Previous Experiments")
         
@@ -2623,12 +2473,12 @@ class MainWindow(QMainWindow):
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
-        self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
+        self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
         self.banner_right_button.setStyleSheet(
-            "color: white; background: transparent; border: none; font-size: 18px;"
+            BANNER_BUTTON
         )
         self.banner_right_button.setToolTip("Settings")
 
@@ -2656,7 +2506,7 @@ class MainWindow(QMainWindow):
         if review == True:
             # Review Window
             self.banner_left_button.setText("")
-            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/house-fill.svg")))
+            self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/house-fill.svg")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
 
@@ -2672,10 +2522,10 @@ class MainWindow(QMainWindow):
             # self.banner_right_button.hide()
         else:
             # Home Screen
-            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
+            self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
-                "color: white; background: transparent; border: none; font-size: 18px;"
+                BANNER_BUTTON
             )
             self.banner_left_button.setToolTip("Previous Experiments")
         
@@ -2683,7 +2533,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
+            self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
             self.banner_right_button.setEnabled(True)
             self.banner_right_button.setToolTip("Settings")
 
@@ -3226,7 +3076,7 @@ class MainWindow(QMainWindow):
                 # Second column: delete button
                 delete_btn = QPushButton("")
                 delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
-                delete_btn.setStyleSheet("background: transparent; border: none;")
+                delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
                 def delete_row():
                     button = self.sender()
                     if button:
@@ -3839,7 +3689,7 @@ class MainWindow(QMainWindow):
         self.low_confidence_warning = QLabel(
             "⚠️ Low confidence in this detection. Please review before saving!",
             parent=self.frame_player)
-        self.low_confidence_warning.setStyleSheet("color: #FFFFFF")
+        self.low_confidence_warning.setStyleSheet(f"color: {warning_text_color()};")
         self.low_confidence_warning.setScaledContents(True)
         self.low_confidence_warning.setVisible(False)
 
@@ -4118,7 +3968,7 @@ class MainWindow(QMainWindow):
                         # Create delete button
                         del_button = QPushButton("")
                         del_button.setIcon(colored_svg_icon(resource_path("assets/images/trash-fill.svg"), theme_icon_color()))
-                        del_button.setStyleSheet("background: transparent; border: none;")
+                        del_button.setStyleSheet(FLAT_ICON_BUTTON)
                         del_button.clicked.connect(self.mark_for_deletion)
                         self.historical_items.setCellWidget(row_position, 7, del_button)
 
@@ -5142,7 +4992,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -5155,56 +5005,25 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "masks"), exist_ok=True)
 
-        min_frame_skip, max_frame_skip = 10, 60
-        frame_skip = min_frame_skip
-        consecutive_empty_frames = 0
-        max_empty_frames = 1 * fps
-        
-        # self.detection_threshold = 0.4
+        # Sequential forward sampling (no per-frame keyframe seeking). No preview is
+        # emitted in the headless path, so no color conversion is done.
+        sampler = iter_sampled_frames(cap)
+        had_detection = None
+        try:
+            while True:
+                frame_num, frame = sampler.send(had_detection)
 
-        frame_num = 0
-        while frame_num < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret:
-                break
+                results = self.model(frame, classes=[0], verbose=False)
+                detections = parse_detections(results, self.detection_threshold)
+                had_detection = bool(detections)
 
-            results = self.model(frame, classes=[0], verbose=False)
+                if had_detection:
+                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    custom_tracker.update(detections, frame, timestamp)
 
-            detections = []
-            if results[0].boxes is not None and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xywh.cpu()
-                confidences = results[0].boxes.conf.cpu().tolist()
-
-                detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > self.detection_threshold]
-
-            has_detection = bool(detections)
-            if has_detection:
-                timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
-                active_tracks = custom_tracker.update(detections, frame, timestamp)
-                
-                # Draw bounding boxes on the frame
-                frame_with_boxes = self.draw_bounding_boxes(frame, detections)
-                
-                # Emit the processed frame with bounding boxes
-                frame_processed = cv2.cvtColor(frame_with_boxes, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames = 0
-                frame_skip = min_frame_skip
-            else:
-                # Emit the frame without bounding boxes
-                frame_processed = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames += frame_skip
-
-            # Increase frame skip more aggressively
-            if consecutive_empty_frames >= max_empty_frames:
-                frame_skip = min(max_frame_skip, frame_skip * 2)
-
-            frame_num += frame_skip
-            self.progress_update = int((frame_num + 1) / total_frames * 100) 
+                self.progress_update = int((frame_num + 1) / total_frames * 100)
+        except StopIteration:
+            pass
 
         cap.release()
         self.save_best_frames(self.output_dir, self.video_path, tracks=custom_tracker.tracks)
@@ -5264,6 +5083,7 @@ def main():
         multiprocessing.freeze_support()
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(True)
+        apply_theme(app)
         
         app_icon_path = {
             'win32': 'assets/logo/SharkEye.ico',
@@ -5334,6 +5154,7 @@ if __name__ == '__main__':
         multiprocessing.freeze_support()
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(True)
+        apply_theme(app)
         
         app_icon_path = {
             'win32': 'assets/logo/SharkEye.ico',

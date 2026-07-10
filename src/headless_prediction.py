@@ -13,6 +13,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
+from frame_sampling import iter_sampled_frames, parse_detections
 import signal
 import json
 import requests
@@ -290,7 +291,7 @@ class HeadlessVideoProcessor():
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
         
         custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
         
@@ -299,55 +300,26 @@ class HeadlessVideoProcessor():
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'masks'), exist_ok=True)
 
-        min_frame_skip, max_frame_skip = 10, 60
-        frame_skip = min_frame_skip
-        consecutive_empty_frames = 0
-        max_empty_frames = 1 * fps
         detection_threshold = 0.4
 
-        frame_num = 0
-        while frame_num < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Sequential forward sampling (no per-frame keyframe seeking); no preview needed.
+        sampler = iter_sampled_frames(cap)
+        had_detection = None
+        try:
+            while True:
+                frame_num, frame = sampler.send(had_detection)
 
-            results = self.model(frame, classes=[0], verbose=False)
+                results = self.model(frame, classes=[0], verbose=False)
+                detections = parse_detections(results, detection_threshold)
+                had_detection = bool(detections)
 
-            detections = []
-            if results[0].boxes is not None and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xywh.cpu()
-                confidences = results[0].boxes.conf.cpu().tolist()
+                if had_detection:
+                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    custom_tracker.update(detections, frame, timestamp)
 
-                detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > detection_threshold]
-
-            has_detection = bool(detections)
-            if has_detection:
-                timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
-                active_tracks = custom_tracker.update(detections, frame, timestamp)
-                
-                # Draw bounding boxes on the frame
-                frame_with_boxes = self.draw_bounding_boxes(frame, detections)
-                
-                # Emit the processed frame with bounding boxes
-                frame_processed = cv2.cvtColor(frame_with_boxes, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames = 0
-                frame_skip = min_frame_skip
-            else:
-                # Emit the frame without bounding boxes
-                frame_processed = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames += frame_skip
-
-            # Increase frame skip more aggressively
-            if consecutive_empty_frames >= max_empty_frames:
-                frame_skip = min(max_frame_skip, frame_skip * 2)
-
-            frame_num += frame_skip
-            self.progress_update = int((frame_num + 1) / total_frames * 100) 
+                self.progress_update = int((frame_num + 1) / total_frames * 100)
+        except StopIteration:
+            pass
 
         cap.release()
         custom_tracker.save_best_frames(self.output_dir, self.video_path)

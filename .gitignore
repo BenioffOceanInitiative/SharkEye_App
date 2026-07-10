@@ -3,6 +3,7 @@
 /videos/
 /build/
 /dist/
+/runs/
 /src/__pycache__/
 /src/results/
 /src/segmentation/data
