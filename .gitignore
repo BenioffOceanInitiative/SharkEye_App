@@ -33,3 +33,4 @@ model_weights/sam_vit_b_01ec64.pth
 model_weights/train6-weights-best.pt
 model_weights/train7-weights-best.pt
 model_weights/train8-weights-best.pt
+CUSTOM_TRACKER_BREAKDOWN.md

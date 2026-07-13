@@ -51,6 +51,7 @@ datas += [
     (str(HERE / "assets" / "logo"),         "assets/logo"),
     (str(HERE / "model_weights" / "runs-detect-train-weights-best.pt"), "model_weights"),
     (str(HERE / "model_weights" / "sam_vit_b_01ec64.pth"),              "model_weights"),
+    (str(HERE / "docs"), "docs"),
 ]
 
 # ---------- native binaries (DLLs/SOs) ----------

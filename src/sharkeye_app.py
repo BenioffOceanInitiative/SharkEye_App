@@ -6,7 +6,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QFileDialog, QListWidget, QListWidgetItem, QLabel, QComboBox, 
                              QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
-                             QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog)
+                             QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
+                             QMenuBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool
 from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette
 from PyQt6.QtSvg import QSvgRenderer
@@ -24,6 +25,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
+from help_docs_window import HelpDocsWindow
 import signal
 import json
 import requests
@@ -60,38 +62,31 @@ ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
 
-def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
+def svg_icon(svg_path: str, size: int = 16, color: QColor | None = None) -> QIcon:
+    """Render an SVG via QSvgRenderer. Avoids QIcon(path) which triggers
+    'QImage::QImage(), XPM is not supported' on Qt6 without the SVG icon plugin."""
     renderer = QSvgRenderer(svg_path)
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     renderer.render(painter)
-    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-    painter.fillRect(pixmap.rect(), color)
+    if color is not None:
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), color)
     painter.end()
     return QIcon(pixmap)
 
 
-def is_dark_mode() -> bool:
-    """Best-effort detection of the OS/app dark color scheme."""
-    app = QApplication.instance()
-    if app is None:
-        return False
-    try:
-        scheme = app.styleHints().colorScheme()
-        if scheme == Qt.ColorScheme.Dark:
-            return True
-        if scheme == Qt.ColorScheme.Light:
-            return False
-    except (AttributeError, TypeError):
-        pass
-    # Fallback for older Qt: infer from the window background lightness.
-    return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
+def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
+    return svg_icon(svg_path, size=size, color=color)
 
 
 def theme_icon_color() -> QColor:
-    """Icon tint that keeps contrast in both light and dark mode."""
-    return QColor("white") if is_dark_mode() else QColor("#4a4a4a")
+    """Icon tint that matches the active UI palette for readable contrast."""
+    app = QApplication.instance()
+    if app is None:
+        return QColor("#4a4a4a")
+    return app.palette().color(QPalette.ColorRole.WindowText)
 
 
 DEFAULT_DETECTION_LABELS = [
@@ -1005,7 +1000,7 @@ class DetectionLabelsPage(QWidget):
         self.label_table.setItem(row_position, 0, item)
 
         delete_btn = QPushButton("")
-        delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
+        delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
         delete_btn.setStyleSheet("background: transparent; border: none;")
         delete_btn.clicked.connect(self.delete_label_row)
         self.label_table.setCellWidget(row_position, 1, delete_btn)
@@ -1296,8 +1291,8 @@ class CustomTracker:
         self.tracks = {}
         self.next_id = 1
         self.distance_threshold = distance_threshold
-        self.min_frames = int(self.settings_obj.value("min_frames"))
-        self.confidence_threshold = float(self.settings_obj.value("confidence_threshold"))
+        self.min_frames = int(self.settings_obj.value("min_frames", "5"))
+        self.confidence_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.unique_sharks = 0
         self.last_reported_sharks = 0
         self.fov_radians = 1.274090354
@@ -1430,6 +1425,9 @@ class CustomTracker:
         images_saved = 0
         
         for track_id, track in self.tracks.items():
+            if not self.is_significant_track(track):
+                continue
+
             print("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
@@ -1509,11 +1507,19 @@ class CustomTracker:
         time_since_last_detection = track['frames_since_last_detection']
         return position_cost + time_since_last_detection * 10  # Penalize tracks that haven't been detected recently
 
+    def is_significant_track(self, track):
+        """Return True if a track meets the confidence and minimum-frame settings."""
+        return (len(track['positions']) >= self.min_frames
+                and np.mean(track['confidences']) > self.confidence_threshold)
+
+    def get_significant_tracks(self):
+        """Return only tracks that meet the confidence and minimum-frame settings."""
+        return {track_id: track for track_id, track in self.tracks.items()
+                if self.is_significant_track(track)}
+
     def _count_significant_tracks(self):
         """Count tracks that meet the criteria for being a significant detection"""
-        return sum(1 for track in self.tracks.values() 
-                   if len(track['positions']) >= self.min_frames 
-                   and np.mean(track['confidences']) > self.confidence_threshold)
+        return sum(1 for track in self.tracks.values() if self.is_significant_track(track))
 
 def get_annotation_settings(settings_obj):
     """Get annotation color, thickness, and scale from settings"""
@@ -1761,7 +1767,7 @@ class VideoProcessingWorker(QObject):
         self.drone_type = drone_type
         self.altitude = altitude
         self.flight_location = flight_location
-        self.detection_threshold = float(self.settings_obj.value("confidence_threshold"))
+        self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
         
     def run(self):
@@ -1848,6 +1854,11 @@ class VideoProcessingWorker(QObject):
         cap.release()
 
         if not QThread.currentThread().isInterruptionRequested():
+            significant_tracks = custom_tracker.get_significant_tracks()
+            filtered_count = len(custom_tracker.tracks) - len(significant_tracks)
+            if filtered_count:
+                print(f"Filtered out {filtered_count} track(s) below confidence/minimum-frame thresholds")
+
             # Only save results if not interrupted
             self.progress_status_changed.emit("Running Segmentation")
             seg_start = time.perf_counter()
@@ -1856,7 +1867,11 @@ class VideoProcessingWorker(QObject):
 
             self.progress_status_changed.emit("Saving detection results")
             csv_start = time.perf_counter()
-            self.save_detections_csv(custom_tracker.tracks, os.path.join(self.output_dir, 'detection_results'))
+            self.save_detections_csv(
+                significant_tracks,
+                os.path.join(self.output_dir, 'detection_results'),
+                custom_tracker,
+            )
             csv_time = time.perf_counter() - csv_start
 
             # Defer the CPU/IO post-processing (training-frame export + GIF encoding) to
@@ -1864,11 +1879,11 @@ class VideoProcessingWorker(QObject):
             # the frame buffers out of the tracks first so the UI's copy and the
             # background job never share mutable state.
             self.progress_status_changed.emit("Finalizing")
-            payload = self._extract_postproc_payload(custom_tracker.tracks)
+            payload = self._extract_postproc_payload(significant_tracks)
             self.postproc_ready.emit(payload, self.output_dir, Path(self.video_path).name)
 
             # Per-phase timing breakdown (export + clip are timed in the background job).
-            track_count = len(custom_tracker.tracks)
+            track_count = len(significant_tracks)
             print(f"[timing] {Path(self.video_path).name}: "
                   f"inference={infer_time:.1f}s ({frames_sampled}/{total_frames} frames, "
                   f"{total_detections} dets) segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
@@ -1883,7 +1898,7 @@ class VideoProcessingWorker(QObject):
                 'detections': total_detections,
                 'tracks': track_count,
             })
-            self.processing_finished(custom_tracker.tracks)
+            self.processing_finished(significant_tracks)
 
     def _extract_postproc_payload(self, tracks):
         """Move frame buffers out of `tracks` into a standalone payload for async
@@ -1924,7 +1939,7 @@ class VideoProcessingWorker(QObject):
         self.progress_update.emit(100)
         self.processing_complete.emit(tracks, os.path.basename(self.video_path))
 
-    def save_detections_csv(self, tracks, output_dir):
+    def save_detections_csv(self, tracks, output_dir, tracker=None):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
         print(f"Starting save to {csv_path}")
         with open(csv_path, 'w', newline='') as csvfile:
@@ -1935,9 +1950,7 @@ class VideoProcessingWorker(QObject):
             csv_writer.writeheader()
 
             for track_id, track in tracks.items():
-                # meets_thresholds = (len(track['confidences']) >= 10 and 
-                #                     np.mean(track['confidences']) > 0.4)
-                meets_thresholds = True
+                meets_thresholds = tracker.is_significant_track(track) if tracker else True
                 
                 csv_writer.writerow({
                     'video_name': self.video_path,
@@ -2562,6 +2575,33 @@ class MainWindow(QMainWindow):
         self.setup_stack_widget()
         self.setup_home_page()
         self.setup_review_widget()
+        self.setup_bottom_menu_bar()
+
+    def setup_bottom_menu_bar(self):
+        self.bottom_menu_bar = QMenuBar()
+        self.bottom_menu_bar.setNativeMenuBar(False)
+        help_action = self.bottom_menu_bar.addAction("Help")
+        help_action.triggered.connect(self.show_help_docs)
+        self.layout.addWidget(self.bottom_menu_bar)
+
+    def show_help_docs(self):
+        guide_path = resource_path("docs/USER_GUIDE_VISUAL.md")
+        if not os.path.exists(guide_path):
+            QMessageBox.warning(
+                self,
+                "Help Unavailable",
+                f"Help guide not found:\n{guide_path}",
+            )
+            return
+
+        help_window = getattr(self, "_help_docs_window", None)
+        if help_window is None or not help_window.isVisible():
+            self._help_docs_window = HelpDocsWindow(guide_path, parent=self)
+            self._help_docs_window.show()
+            return
+
+        self._help_docs_window.raise_()
+        self._help_docs_window.activateWindow()
 
     def setup_model(self):
         device = torch.device('cuda' if torch.cuda.is_available() else
@@ -2592,7 +2632,7 @@ class MainWindow(QMainWindow):
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = QPushButton()
-        self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
+        self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/clock-history.svg"), size=20, color=QColor("#FFFFFF")))
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
@@ -2623,7 +2663,7 @@ class MainWindow(QMainWindow):
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
-        self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
+        self.banner_right_button.setIcon(svg_icon(resource_path("assets/images/gear-fill.svg"), size=20, color=QColor("#FFFFFF")))
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
@@ -2656,11 +2696,12 @@ class MainWindow(QMainWindow):
         if review == True:
             # Review Window
             self.banner_left_button.setText("")
-            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/house-fill.svg")))
+            self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/house-fill.svg"), size=20, color=QColor("#FFFFFF")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
 
-            show_home = not self.confirming_detections
+            # Allow home when there is nothing to confirm (no detections)
+            show_home = (not self.confirming_detections) or (not self.sorted_tracks)
             self.banner_left_button.setVisible(show_home)
             self.banner_left_button.setEnabled(show_home)
 
@@ -2672,7 +2713,7 @@ class MainWindow(QMainWindow):
             # self.banner_right_button.hide()
         else:
             # Home Screen
-            self.banner_left_button.setIcon(QIcon(resource_path("assets/images/clock-history.svg")))
+            self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/clock-history.svg"), size=20, color=QColor("#FFFFFF")))
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
                 "color: white; background: transparent; border: none; font-size: 18px;"
@@ -2683,7 +2724,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
 
             self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon(resource_path("assets/images/gear-fill.svg")))
+            self.banner_right_button.setIcon(svg_icon(resource_path("assets/images/gear-fill.svg"), size=20, color=QColor("#FFFFFF")))
             self.banner_right_button.setEnabled(True)
             self.banner_right_button.setToolTip("Settings")
 
@@ -2698,7 +2739,7 @@ class MainWindow(QMainWindow):
         self.content_layout.addWidget(self.stack_widget)
 
         # Add the content widget to the main layout
-        self.layout.addWidget(self.content_widget)
+        self.layout.addWidget(self.content_widget, 1)
 
         self.home_widget = QWidget()
         self.review_widget = QWidget()
@@ -3225,7 +3266,7 @@ class MainWindow(QMainWindow):
                 self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
                 delete_btn = QPushButton("")
-                delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
+                delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
                 delete_btn.setStyleSheet("background: transparent; border: none;")
                 def delete_row():
                     button = self.sender()
@@ -3346,6 +3387,8 @@ class MainWindow(QMainWindow):
             
             # Show track frames in the player
             self.frame_player.set_frames(track_frames)
+            self.update_frame_elements()
+            QTimer.singleShot(0, self.update_frame_elements)
             self.show_confidence_warning()
             self.highlight_current_detection()
         else:
@@ -3656,7 +3699,8 @@ class MainWindow(QMainWindow):
         self.toggle_dropdown_display()
 
         if self.stack_widget.currentWidget() == self.review_widget:
-            show_home_button = not confirming
+            # Allow home when there is nothing to confirm (no detections)
+            show_home_button = (not confirming) or (not self.sorted_tracks)
             self.banner_left_button.setVisible(show_home_button)
             self.banner_left_button.setEnabled(show_home_button)
 
@@ -3687,6 +3731,7 @@ class MainWindow(QMainWindow):
         self.historical_items.setEnabled(enable)
         self.toggle_display_switch.setEnabled(enable)
         self.toggle_display_switch.setChecked(enable)
+        self.toggle_display_switch.setVisible(enable)
         self.mask_icon.setVisible(enable)
         self.box_icon.setVisible(enable)
         self._apply_review_ui_state()
@@ -3909,29 +3954,39 @@ class MainWindow(QMainWindow):
 
         rect = self.frame_player.content_rect()
         if rect.isNull():
-            # Fallback before first frame is ready: use full frame_player area.
-            rect = self.frame_player.rect()
-            if rect.isNull():
-                return
+            return
 
         self.low_confidence_warning.adjustSize()
 
-        # Extract bottom right coordinates.
-        bottom_right_x = rect.x() + rect.width()
-        bottom_right_y = rect.y() + rect.height()
+        # Keep overlays inset inside the displayed video area (not the full widget).
+        margin = 7
+        btn_y = rect.y() + rect.height() - self.mask_icon.height() - 4
+        btn_x = rect.x() + rect.width() - self.mask_icon.width() - margin
+        switch_x = btn_x - self.toggle_display_switch.width() - 9
+        box_x = switch_x - self.box_icon.width() - 9
 
-        # Position button near bottom-right of video.
-        btn_x = bottom_right_x - self.mask_icon.width() - 7
-        btn_y = bottom_right_y - self.mask_icon.height() - 4
+        # Clamp so the control strip never leaves the video content rect.
+        min_x = rect.x() + margin
+        if box_x < min_x:
+            shift = min_x - box_x
+            box_x += shift
+            switch_x += shift
+            btn_x += shift
 
         self.mask_icon.move(btn_x, btn_y)
-        self.toggle_display_switch.move(self.mask_icon.x() - self.toggle_display_switch.width() - 9, btn_y)
-        self.box_icon.move(self.toggle_display_switch.x() - self.toggle_display_switch.width() + 22, btn_y)
+        self.toggle_display_switch.move(switch_x, btn_y)
+        self.box_icon.move(box_x, btn_y)
+        self.box_icon.raise_()
+        self.toggle_display_switch.raise_()
+        self.mask_icon.raise_()
 
         # Position warning to bottom center of video.
-        warning_x = bottom_right_x - int(rect.width() / 2) - int(self.low_confidence_warning.width() / 2)
-        warning_y = self.toggle_display_switch.y() + int(self.low_confidence_warning.height() / 2)
+        warning_x = rect.x() + (rect.width() - self.low_confidence_warning.width()) // 2
+        warning_y = btn_y - self.low_confidence_warning.height() - 4
+        warning_x = max(rect.x() + margin, min(warning_x, rect.x() + rect.width() - self.low_confidence_warning.width() - margin))
+        warning_y = max(rect.y() + margin, warning_y)
         self.low_confidence_warning.move(warning_x, warning_y)
+        self.low_confidence_warning.raise_()
 
     def switch_detection_list(self, show_historical=False):
         current_list = self.historical_items if show_historical else self.detection_list
@@ -4860,6 +4915,7 @@ class FramePlayer(QLabel):
         else:
             self.clear()
             self.timer.stop()
+        self.resized.emit()
             
     def show_frame(self, index):
         if 0 <= index < len(self.frames):
@@ -4910,6 +4966,7 @@ class FramePlayer(QLabel):
 
         self._static_pixmap = pixmap
         self.update()
+        self.resized.emit()
 
     def set_video(self, path: str):
         """Play an MP4 clip by decoding it into frames and animating them via the
@@ -4975,6 +5032,7 @@ class FramePlayer(QLabel):
         self._movie.start()
         self._movie.finished.connect(lambda: self._movie.start())
         self.update()
+        self.resized.emit()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -5024,48 +5082,32 @@ class FramePlayer(QLabel):
     
     def content_rect(self):
         """
-        Returns the QRect of the actually displayed pixmap/movie frame
-        inside the widget, reflecting the enforced resizeEvent behavior.
+        Returns the QRect of the actually displayed pixmap/movie/frame
+        inside the widget (KeepAspectRatio, centered), matching paintEvent.
         """
+        frame_size = None
 
-        # --- determine original frame size ---
-        if self._static_pixmap:
+        if self._static_pixmap and not self._static_pixmap.isNull():
             frame_size = self._static_pixmap.size()
         elif self._movie:
             frame = self._movie.currentPixmap()
-            if frame.isNull():
-                return QRect()
-            frame_size = frame.size()
+            if not frame.isNull():
+                frame_size = frame.size()
+        elif self.frames:
+            height, width = self.frames[0].shape[:2]
+            frame_size = QSize(width, height)
         else:
+            pixmap = self.pixmap()
+            if pixmap is not None and not pixmap.isNull():
+                frame_size = pixmap.size()
+
+        if frame_size is None or frame_size.isEmpty():
             return QRect()
-
-        widget_w = self.width()
-        widget_h = self.height()
-        # actual frame aspect ratio
-        frame_ratio = frame_size.width() / frame_size.height()
-
-        # scale to full widget width (this matches resizeEvent)
-        expected_height = int(widget_w / frame_ratio)
-
-        if expected_height <= widget_h:
-            # full frame fits vertically → centered vertically
-            x = 0
-            y = (widget_h - expected_height) // 2
-            return QRect(x, y, widget_w, expected_height)
-        else:
-            # (unlikely now) frame is taller → letterboxed horizontally
-            scaled_width = int(widget_h * frame_ratio)
-            x = (widget_w - scaled_width) // 2
-            y = 0
-            return QRect(x, y, scaled_width, widget_h)
-
 
         widget_size = self.size()
         scaled = frame_size.scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
-
         x = (widget_size.width() - scaled.width()) // 2
         y = (widget_size.height() - scaled.height()) // 2
-
         return QRect(x, y, scaled.width(), scaled.height())
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
@@ -5074,20 +5116,23 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
-        self.detection_threshold = float(self.settings_obj.value("confidence_threshold"))
+        self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
     
     progress_update = 0
     processing_complete = {}
 
     @staticmethod
-    def save_best_frames(output_dir, video_path, tracks):
+    def save_best_frames(output_dir, video_path, tracks, tracker=None):
         """Save best frames for each significant track"""
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         
         images_saved = 0
         
         for track_id, track in tracks.items():
+            if tracker and not tracker.is_significant_track(track):
+                continue
+
             print("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
@@ -5207,13 +5252,18 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             self.progress_update = int((frame_num + 1) / total_frames * 100) 
 
         cap.release()
-        self.save_best_frames(self.output_dir, self.video_path, tracks=custom_tracker.tracks)
+        significant_tracks = custom_tracker.get_significant_tracks()
+        self.save_best_frames(
+            self.output_dir,
+            self.video_path,
+            tracks=significant_tracks,
+            tracker=custom_tracker,
+        )
 
         all_track_info = []
 
-        for track_id, track in custom_tracker.tracks.items():
-            meets_thresholds = (len(track['confidences']) >= 10 and 
-                                np.mean(track['confidences']) > 0.4)
+        for track_id, track in significant_tracks.items():
+            meets_thresholds = custom_tracker.is_significant_track(track)
     
             track_info = {
                 'video_name': self.video_path,
