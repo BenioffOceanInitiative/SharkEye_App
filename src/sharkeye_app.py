@@ -63,33 +63,6 @@ ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
 
-<<<<<<< HEAD
-def svg_icon(svg_path: str, size: int = 16, color: QColor | None = None) -> QIcon:
-    """Render an SVG via QSvgRenderer. Avoids QIcon(path) which triggers
-    'QImage::QImage(), XPM is not supported' on Qt6 without the SVG icon plugin."""
-    renderer = QSvgRenderer(svg_path)
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter)
-    if color is not None:
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        painter.fillRect(pixmap.rect(), color)
-    painter.end()
-    return QIcon(pixmap)
-
-
-def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
-    return svg_icon(svg_path, size=size, color=color)
-
-
-def theme_icon_color() -> QColor:
-    """Icon tint that matches the active UI palette for readable contrast."""
-    app = QApplication.instance()
-    if app is None:
-        return QColor("#4a4a4a")
-    return app.palette().color(QPalette.ColorRole.WindowText)
-=======
 # Frame sampling / detection parsing (shared with the headless processors).
 from frame_sampling import iter_sampled_frames, parse_detections, downscale_for_preview
 
@@ -106,7 +79,6 @@ from theme import (
     BANNER_BUTTON,
     FLAT_ICON_BUTTON,
 )
->>>>>>> origin/main
 
 
 DEFAULT_DETECTION_LABELS = [
@@ -1020,13 +992,8 @@ class DetectionLabelsPage(QWidget):
         self.label_table.setItem(row_position, 0, item)
 
         delete_btn = QPushButton("")
-<<<<<<< HEAD
-        delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
-        delete_btn.setStyleSheet("background: transparent; border: none;")
-=======
         delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
         delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
->>>>>>> origin/main
         delete_btn.clicked.connect(self.delete_label_row)
         self.label_table.setCellWidget(row_position, 1, delete_btn)
 
@@ -2555,11 +2522,7 @@ class MainWindow(QMainWindow):
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = QPushButton()
-<<<<<<< HEAD
-        self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/clock-history.svg"), size=20, color=QColor("#FFFFFF")))
-=======
         self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
->>>>>>> origin/main
         self.banner_left_button.setFixedSize(40, 40)
         self.banner_left_button.setFlat(True)
         self.banner_left_button.setStyleSheet(
@@ -2590,11 +2553,7 @@ class MainWindow(QMainWindow):
 
         # Right button (exposed as attribute for later connections)
         self.banner_right_button = QPushButton()
-<<<<<<< HEAD
-        self.banner_right_button.setIcon(svg_icon(resource_path("assets/images/gear-fill.svg"), size=20, color=QColor("#FFFFFF")))
-=======
         self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
->>>>>>> origin/main
         self.banner_right_button.clicked.connect(self.load_drone_settings)
         self.banner_right_button.setFixedSize(40, 40)
         self.banner_right_button.setFlat(True)
@@ -2627,11 +2586,7 @@ class MainWindow(QMainWindow):
         if review == True:
             # Review Window
             self.banner_left_button.setText("")
-<<<<<<< HEAD
-            self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/house-fill.svg"), size=20, color=QColor("#FFFFFF")))
-=======
             self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/house-fill.svg")))
->>>>>>> origin/main
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
 
@@ -2648,11 +2603,7 @@ class MainWindow(QMainWindow):
             # self.banner_right_button.hide()
         else:
             # Home Screen
-<<<<<<< HEAD
-            self.banner_left_button.setIcon(svg_icon(resource_path("assets/images/clock-history.svg"), size=20, color=QColor("#FFFFFF")))
-=======
             self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
->>>>>>> origin/main
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
                 BANNER_BUTTON
@@ -2663,11 +2614,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
 
             self.banner_right_button.setText("")
-<<<<<<< HEAD
-            self.banner_right_button.setIcon(svg_icon(resource_path("assets/images/gear-fill.svg"), size=20, color=QColor("#FFFFFF")))
-=======
             self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
->>>>>>> origin/main
             self.banner_right_button.setEnabled(True)
             self.banner_right_button.setToolTip("Settings")
 
@@ -3209,13 +3156,8 @@ class MainWindow(QMainWindow):
                 self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
                 delete_btn = QPushButton("")
-<<<<<<< HEAD
-                delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
-                delete_btn.setStyleSheet("background: transparent; border: none;")
-=======
                 delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
                 delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
->>>>>>> origin/main
                 def delete_row():
                     button = self.sender()
                     if button:

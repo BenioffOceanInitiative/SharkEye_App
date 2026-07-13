@@ -25,15 +25,6 @@ def is_dark_mode() -> bool:
     app = QApplication.instance()
     if app is None:
         return False
-    try:
-        scheme = app.styleHints().colorScheme()
-        if scheme == Qt.ColorScheme.Dark:
-            return True
-        if scheme == Qt.ColorScheme.Light:
-            return False
-    except (AttributeError, TypeError):
-        pass
-    # Fallback for older Qt: infer from the window background lightness.
     return app.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
 
