@@ -13,6 +13,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
+from frame_sampling import iter_sampled_frames, parse_detections
 import signal
 import json
 import requests
@@ -121,14 +122,15 @@ class CustomTracker:
             'unique_id': self.next_id,
             'positions': deque([(x, y, w, h)], maxlen=100),
             'confidences': deque([confidence], maxlen=100),
-            'frames': deque([frame.copy()], maxlen=100),
+            # Fresh un-mutated buffer per retrieve(); store references, not full-frame copies.
+            'frames': deque([frame], maxlen=100),
             'timestamps': deque([timestamp], maxlen=100),
             'lengths': deque([length], maxlen=100),
-            'best_frame': frame.copy(),
+            'best_frame': frame,
             'best_conf': confidence,
             'best_timestamp': timestamp,
             'best_length': length,
-            'longest_frame': frame.copy(),
+            'longest_frame': frame,
             'longest_conf': confidence, 
             'longest_timestamp': timestamp,
             'longest_length': length,         
@@ -161,13 +163,13 @@ class CustomTracker:
 
         if confidence > track['best_conf']:
             track['best_conf'] = confidence
-            track['best_frame'] = frame.copy()
+            track['best_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['best_timestamp'] = timestamp
             track['best_length'] = length
 
         if confidence > .8 and length > track['longest_length']:
             track['longest_conf'] = confidence
-            track['longest_frame'] = frame.copy()
+            track['longest_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['longest_timestamp'] = timestamp
             track['longest_length'] = length
             track['longest_position'] = (x, y, w, h)
@@ -196,10 +198,12 @@ class CustomTracker:
         for track_id, track in self.tracks.items():
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
-            
-            if num_frames >= self.min_frames and avg_confidence > self.confidence_threshold:
-                pass
-            else:
+
+            # SAM is the expensive per-track step; run it only on significant tracks.
+            # Sub-threshold tracks (likely false positives) keep their bbox-estimated
+            # length and get no mask.
+            is_significant = num_frames >= self.min_frames and avg_confidence > self.confidence_threshold
+            if not is_significant:
                 print('Track detected below threshold')
 
             longest_frame = track['longest_frame']
@@ -207,11 +211,14 @@ class CustomTracker:
             longest_confidence = track['longest_conf']
             longest_length = track['longest_length']
             longest_position = track['longest_position']
-            
-            if longest_frame is not None:
-                timestamp_str = self._format_timestamp_filename(longest_timestamp)
-                x, y, w, h = longest_position
-                
+
+            if longest_frame is None:
+                continue
+
+            timestamp_str = self._format_timestamp_filename(longest_timestamp)
+            x, y, w, h = longest_position
+
+            if is_significant:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
@@ -222,32 +229,32 @@ class CustomTracker:
                 mask_overlay = draw_mask(mask, longest_frame)
                 track['mask_overlay'] = mask_overlay
 
-                feet, inches = divmod(longest_length, 1)
-                length_str = f"{int(feet)}ft{int(inches * 12)}in"
-                
-                avg_conf_int = int(avg_confidence * 100)
-                longest_conf_int = int(longest_confidence * 100)
-                
-                filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
-                
-                # Save original frame
-                cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+            feet, inches = divmod(longest_length, 1)
+            length_str = f"{int(feet)}ft{int(inches * 12)}in"
 
-                # Save mask
+            avg_conf_int = int(avg_confidence * 100)
+            longest_conf_int = int(longest_confidence * 100)
+
+            filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
+
+            # Save original frame + bounding-box frame for every track.
+            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+
+            # Mask only exists for segmented (significant) tracks.
+            if is_significant:
                 cv2.imwrite(os.path.join(output_dir, 'masks', filename), mask_overlay)
-                
-                # Save frame with bounding box
-                boxed_frame = longest_frame.copy()
-                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-                label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-                bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-                cv2.imwrite(bounding_box_path, boxed_frame)
-                
-                # Update the track with the path to the bounding box image
-                track['image_path'] = bounding_box_path
-                
-                images_saved += 1
+
+            boxed_frame = longest_frame.copy()
+            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
+            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
+            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
+            cv2.imwrite(bounding_box_path, boxed_frame)
+
+            # Update the track with the path to the bounding box image
+            track['image_path'] = bounding_box_path
+
+            images_saved += 1
 
         tqdm.write(f"Shark Images Saved: {images_saved}")
 
@@ -290,7 +297,7 @@ class HeadlessVideoProcessor():
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
         
         custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
         
@@ -299,55 +306,26 @@ class HeadlessVideoProcessor():
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'masks'), exist_ok=True)
 
-        min_frame_skip, max_frame_skip = 10, 60
-        frame_skip = min_frame_skip
-        consecutive_empty_frames = 0
-        max_empty_frames = 1 * fps
         detection_threshold = 0.4
 
-        frame_num = 0
-        while frame_num < total_frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Sequential forward sampling (no per-frame keyframe seeking); no preview needed.
+        sampler = iter_sampled_frames(cap)
+        had_detection = None
+        try:
+            while True:
+                frame_num, frame = sampler.send(had_detection)
 
-            results = self.model(frame, classes=[0], verbose=False)
+                results = self.model(frame, classes=[0], verbose=False)
+                detections = parse_detections(results, detection_threshold)
+                had_detection = bool(detections)
 
-            detections = []
-            if results[0].boxes is not None and len(results[0].boxes) > 0:
-                boxes = results[0].boxes.xywh.cpu()
-                confidences = results[0].boxes.conf.cpu().tolist()
+                if had_detection:
+                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    custom_tracker.update(detections, frame, timestamp)
 
-                detections = [(float(x), float(y), float(w), float(h), confidence) 
-                               for (x, y, w, h), confidence in zip(boxes, confidences) 
-                               if confidence > detection_threshold]
-
-            has_detection = bool(detections)
-            if has_detection:
-                timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
-                active_tracks = custom_tracker.update(detections, frame, timestamp)
-                
-                # Draw bounding boxes on the frame
-                frame_with_boxes = self.draw_bounding_boxes(frame, detections)
-                
-                # Emit the processed frame with bounding boxes
-                frame_processed = cv2.cvtColor(frame_with_boxes, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames = 0
-                frame_skip = min_frame_skip
-            else:
-                # Emit the frame without bounding boxes
-                frame_processed = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                consecutive_empty_frames += frame_skip
-
-            # Increase frame skip more aggressively
-            if consecutive_empty_frames >= max_empty_frames:
-                frame_skip = min(max_frame_skip, frame_skip * 2)
-
-            frame_num += frame_skip
-            self.progress_update = int((frame_num + 1) / total_frames * 100) 
+                self.progress_update = int((frame_num + 1) / total_frames * 100)
+        except StopIteration:
+            pass
 
         cap.release()
         custom_tracker.save_best_frames(self.output_dir, self.video_path)
