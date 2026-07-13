@@ -45,6 +45,7 @@ from segmentation.segmentation_model import (
     find_pixel_length,
     draw_mask,
     release_sam_model,
+    get_sam_predictor,
 )
 import ast
 
@@ -1307,9 +1308,12 @@ class CustomTracker:
             
             track_indices, detection_indices = linear_sum_assignment(cost_matrix)
 
+            # Snapshot the key order once; cost-matrix row indices map to it. (Previously
+            # rebuilt list(self.tracks.keys()) for every matched pair — O(n^2) per frame.)
+            track_ids = list(self.tracks.keys())
             for track_idx, detection_idx in zip(track_indices, detection_indices):
                 if cost_matrix[track_idx, detection_idx] < self.distance_threshold:
-                    track_id = list(self.tracks.keys())[track_idx]
+                    track_id = track_ids[track_idx]
                     self._update_track(track_id, detections[detection_idx], frame, timestamp)
                     active_tracks.add(track_id)
                 else:
@@ -1343,14 +1347,17 @@ class CustomTracker:
             'unique_id': self.next_id,
             'positions': deque([(x, y, w, h)], maxlen=100),
             'confidences': deque([confidence], maxlen=100),
-            'frames': deque([frame.copy()], maxlen=100),
+            # Each cap.retrieve() returns a fresh buffer that is never mutated in place
+            # (all consumers copy before drawing), so store references rather than paying
+            # for a full-frame copy per detection.
+            'frames': deque([frame], maxlen=100),
             'timestamps': deque([timestamp], maxlen=100),
             'lengths': deque([length], maxlen=100),
-            'best_frame': frame.copy(),
+            'best_frame': frame,
             'best_conf': confidence,
             'best_timestamp': timestamp,
             'best_length': length,
-            'longest_frame': frame.copy(),
+            'longest_frame': frame,
             'longest_conf': confidence, 
             'longest_timestamp': timestamp,
             'longest_length': length,            
@@ -1382,13 +1389,13 @@ class CustomTracker:
 
         if confidence > track['best_conf']:
             track['best_conf'] = confidence
-            track['best_frame'] = frame.copy()
+            track['best_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['best_timestamp'] = timestamp
             track['best_length'] = length
 
         if confidence > .8 and length > track['longest_length']:
             track['longest_conf'] = confidence
-            track['longest_frame'] = frame.copy()
+            track['longest_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['longest_timestamp'] = timestamp
             track['longest_length'] = length
 
@@ -1419,15 +1426,22 @@ class CustomTracker:
             avg_confidence = np.mean(track['confidences'])
 
             longest_frame = track['longest_frame']
-            longest_timestamp = track['longest_timestamp']
             longest_confidence = track['longest_conf']
             longest_length = track['longest_length']
-            
-            if longest_frame is not None:
-                timestamp_str = self._format_timestamp_filename(longest_timestamp)
-                
-                x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
-                
+
+            if longest_frame is None:
+                continue
+
+            x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
+
+            # SAM is the expensive post-processing step and it runs once per track. Only
+            # run it on significant tracks (same criteria as _count_significant_tracks);
+            # sub-threshold tracks are almost always false positives, keep their
+            # bbox-estimated length, and get no mask. Significant tracks are segmented
+            # exactly as before, so their reported lengths are unchanged.
+            is_significant = (num_frames >= self.min_frames
+                              and avg_confidence > self.confidence_threshold)
+            if is_significant:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
@@ -1442,35 +1456,34 @@ class CustomTracker:
                 mask_overlay = draw_mask(mask, longest_frame)
                 track['mask_overlay'] = mask_overlay
 
-                feet, inches = divmod(longest_length, 1)
-                length_str = f"{int(feet)}ft{int(inches * 12)}in"
-                
-                avg_conf_int = int(avg_confidence * 100)
-                longest_conf_int = int(longest_confidence * 100)
-                
-                filename = f"{Path(video_path).name}_{track_id}.jpg"
-                
-                # Save original frame
-                cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-                
-                # Save frame with bounding box
-                boxed_frame = longest_frame.copy()
-                # Get annotation settings
-                annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
-                annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
-                
-                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), annotation_color_bgr, box_thickness)
-                label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
-                bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-                cv2.imwrite(bounding_box_path, boxed_frame)
+            feet, inches = divmod(longest_length, 1)
+            length_str = f"{int(feet)}ft{int(inches * 12)}in"
+
+            filename = f"{Path(video_path).name}_{track_id}.jpg"
+
+            # Save original frame + bounding-box frame for every track (cheap, keeps the
+            # review display populated regardless of segmentation).
+            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+
+            boxed_frame = longest_frame.copy()
+            annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
+            annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
+
+            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), annotation_color_bgr, box_thickness)
+            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
+            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
+            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
+            cv2.imwrite(bounding_box_path, boxed_frame)
+
+            # Mask image only exists for segmented (significant) tracks.
+            if is_significant:
                 mask_path = os.path.join(output_dir, 'masks', filename)
                 cv2.imwrite(mask_path, mask_overlay)
-                
-                # Update the track with the path to the bounding box image
-                track['image_path'] = bounding_box_path
-                
-                images_saved += 1
+
+            # Update the track with the path to the bounding box image
+            track['image_path'] = bounding_box_path
+
+            images_saved += 1
 
         print(f"Shark Images Saved: {images_saved}")
 
@@ -1772,6 +1785,13 @@ class VideoProcessingWorker(QObject):
         total_detections = 0
         infer_start = time.perf_counter()
 
+        # Live preview is a courtesy view, not the output. Cap empty-frame updates at
+        # ~20 fps so we don't color-convert, copy across the thread boundary, and
+        # re-scale a pixmap on the UI thread faster than a human can see. Detection
+        # frames always emit so no detection flashes by unseen.
+        preview_interval = 1.0 / 20.0
+        last_preview = 0.0
+
         # Sequential forward sampling (no per-frame keyframe seeking); the stride adapts
         # based on whether the previous frame had a detection.
         sampler = iter_sampled_frames(cap)
@@ -1794,14 +1814,15 @@ class VideoProcessingWorker(QObject):
                     timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
                     total_detections += len(detections)
                     custom_tracker.update(detections, frame, timestamp)
-                    preview = self.draw_bounding_boxes(frame, detections)
-                else:
-                    preview = frame
 
-                # Downscale before the color conversion/emit: the live preview widget is
-                # far smaller than a source frame, so shipping full 4K wastes CPU.
-                preview = downscale_for_preview(preview)
-                self.frame_processed.emit(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                now = time.perf_counter()
+                if had_detection or (now - last_preview) >= preview_interval:
+                    # Draw boxes + downscale only when we actually emit: the preview
+                    # widget is far smaller than a source frame, so shipping full 4K wastes CPU.
+                    preview = self.draw_bounding_boxes(frame, detections) if had_detection else frame
+                    preview = downscale_for_preview(preview)
+                    self.frame_processed.emit(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                    last_preview = now
 
                 self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
         except StopIteration:
@@ -2427,6 +2448,18 @@ class MainWindow(QMainWindow):
             print("Model warmup complete")
         except Exception as e:
             print(f"Model warmup skipped: {e}")
+
+        # Preload + warm up SAM here too. Loading the ~375MB checkpoint (and compiling the
+        # first image-encoder kernels) otherwise happened inside the first video's
+        # segmentation phase (visible as a ~2s longer first-video "Running Segmentation").
+        # Moving it into startup pulls that one-time cost off the processing critical path.
+        try:
+            predictor = get_sam_predictor()
+            predictor.set_image(np.zeros((640, 640, 3), dtype=np.uint8))
+            predictor.reset_image()  # free the warmup embedding; keep the loaded weights
+            print("SAM warmup complete")
+        except Exception as e:
+            print(f"SAM warmup skipped: {e}")
 
     def setup_signal_handlers(self):
         signal.signal(signal.SIGINT, signal_handler)
@@ -4934,58 +4967,64 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     def save_best_frames(output_dir, video_path, tracks):
         """Save best frames for each significant track"""
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        
+
+        # Same significance thresholds the tracker uses (static method has no self).
+        settings_obj = QSettings("BOSL", "SharkEye_App")
+        min_frames = int(settings_obj.value("min_frames"))
+        confidence_threshold = float(settings_obj.value("confidence_threshold"))
+
         images_saved = 0
-        
+
         for track_id, track in tracks.items():
             print("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
 
             longest_frame = track['longest_frame']
-            longest_timestamp = track['longest_timestamp']
             longest_confidence = track['longest_conf']
             longest_length = track['longest_length']
-            
-            if longest_frame is not None:
-                timestamp_str = CustomTracker._format_timestamp_filename(longest_timestamp)
-                
-                x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
-                
+
+            if longest_frame is None:
+                continue
+
+            x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
+
+            # SAM is the expensive per-track step; run it only on significant tracks.
+            is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
+            if is_significant:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
-                
+
                 track['longest_length'] = pixel_length
                 longest_length = track['longest_length']
 
                 mask_overlay = draw_mask(mask, longest_frame)
                 track['mask_overlay'] = mask_overlay
 
-                length_str = f"{pixel_length:.2f}px"
-                
-                avg_conf_int = int(avg_confidence * 100)
-                longest_conf_int = int(longest_confidence * 100)
-                
-                filename = f"{Path(video_path).name}_{track_id}.jpg"
-                
-                # Save original frame
-                cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-                
-                # Save frame with bounding box
-                boxed_frame = longest_frame.copy()
-                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-                label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-                bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-                cv2.imwrite(bounding_box_path, boxed_frame)
+            length_str = f"{longest_length:.2f}px"
+
+            filename = f"{Path(video_path).name}_{track_id}.jpg"
+
+            # Save original frame + bounding-box frame for every track.
+            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+
+            boxed_frame = longest_frame.copy()
+            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
+            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
+            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
+            cv2.imwrite(bounding_box_path, boxed_frame)
+
+            # Mask only exists for segmented (significant) tracks.
+            if is_significant:
                 mask_path = os.path.join(output_dir, 'masks', filename)
                 cv2.imwrite(mask_path, mask_overlay)
-                
-                # Update the track with the path to the bounding box image
-                track['image_path'] = bounding_box_path
-                
-                images_saved += 1
+
+            # Update the track with the path to the bounding box image
+            track['image_path'] = bounding_box_path
+
+            images_saved += 1
 
         print(f"Shark Images Saved: {images_saved}")
 

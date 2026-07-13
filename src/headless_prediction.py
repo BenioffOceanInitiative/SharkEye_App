@@ -122,14 +122,15 @@ class CustomTracker:
             'unique_id': self.next_id,
             'positions': deque([(x, y, w, h)], maxlen=100),
             'confidences': deque([confidence], maxlen=100),
-            'frames': deque([frame.copy()], maxlen=100),
+            # Fresh un-mutated buffer per retrieve(); store references, not full-frame copies.
+            'frames': deque([frame], maxlen=100),
             'timestamps': deque([timestamp], maxlen=100),
             'lengths': deque([length], maxlen=100),
-            'best_frame': frame.copy(),
+            'best_frame': frame,
             'best_conf': confidence,
             'best_timestamp': timestamp,
             'best_length': length,
-            'longest_frame': frame.copy(),
+            'longest_frame': frame,
             'longest_conf': confidence, 
             'longest_timestamp': timestamp,
             'longest_length': length,         
@@ -162,13 +163,13 @@ class CustomTracker:
 
         if confidence > track['best_conf']:
             track['best_conf'] = confidence
-            track['best_frame'] = frame.copy()
+            track['best_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['best_timestamp'] = timestamp
             track['best_length'] = length
 
         if confidence > .8 and length > track['longest_length']:
             track['longest_conf'] = confidence
-            track['longest_frame'] = frame.copy()
+            track['longest_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['longest_timestamp'] = timestamp
             track['longest_length'] = length
             track['longest_position'] = (x, y, w, h)
@@ -197,10 +198,12 @@ class CustomTracker:
         for track_id, track in self.tracks.items():
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
-            
-            if num_frames >= self.min_frames and avg_confidence > self.confidence_threshold:
-                pass
-            else:
+
+            # SAM is the expensive per-track step; run it only on significant tracks.
+            # Sub-threshold tracks (likely false positives) keep their bbox-estimated
+            # length and get no mask.
+            is_significant = num_frames >= self.min_frames and avg_confidence > self.confidence_threshold
+            if not is_significant:
                 print('Track detected below threshold')
 
             longest_frame = track['longest_frame']
@@ -208,11 +211,14 @@ class CustomTracker:
             longest_confidence = track['longest_conf']
             longest_length = track['longest_length']
             longest_position = track['longest_position']
-            
-            if longest_frame is not None:
-                timestamp_str = self._format_timestamp_filename(longest_timestamp)
-                x, y, w, h = longest_position
-                
+
+            if longest_frame is None:
+                continue
+
+            timestamp_str = self._format_timestamp_filename(longest_timestamp)
+            x, y, w, h = longest_position
+
+            if is_significant:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
@@ -223,32 +229,32 @@ class CustomTracker:
                 mask_overlay = draw_mask(mask, longest_frame)
                 track['mask_overlay'] = mask_overlay
 
-                feet, inches = divmod(longest_length, 1)
-                length_str = f"{int(feet)}ft{int(inches * 12)}in"
-                
-                avg_conf_int = int(avg_confidence * 100)
-                longest_conf_int = int(longest_confidence * 100)
-                
-                filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
-                
-                # Save original frame
-                cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+            feet, inches = divmod(longest_length, 1)
+            length_str = f"{int(feet)}ft{int(inches * 12)}in"
 
-                # Save mask
+            avg_conf_int = int(avg_confidence * 100)
+            longest_conf_int = int(longest_confidence * 100)
+
+            filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
+
+            # Save original frame + bounding-box frame for every track.
+            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
+
+            # Mask only exists for segmented (significant) tracks.
+            if is_significant:
                 cv2.imwrite(os.path.join(output_dir, 'masks', filename), mask_overlay)
-                
-                # Save frame with bounding box
-                boxed_frame = longest_frame.copy()
-                cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-                label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-                cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-                bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-                cv2.imwrite(bounding_box_path, boxed_frame)
-                
-                # Update the track with the path to the bounding box image
-                track['image_path'] = bounding_box_path
-                
-                images_saved += 1
+
+            boxed_frame = longest_frame.copy()
+            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
+            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
+            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
+            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
+            cv2.imwrite(bounding_box_path, boxed_frame)
+
+            # Update the track with the path to the bounding box image
+            track['image_path'] = bounding_box_path
+
+            images_saved += 1
 
         tqdm.write(f"Shark Images Saved: {images_saved}")
 
