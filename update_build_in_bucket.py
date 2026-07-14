@@ -17,9 +17,9 @@ def main(build_path: Path):
         print('File must be named properly')
         return 
     
-    if not build_path.name.endswith('.zip'):
-        print('File must be a .zip')
-        return 
+    if not build_path.name.endswith(('.zip', '.dmg')):
+        print('File must be a .zip or .dmg')
+        return
     
     client = storage.Client()
     bucket = client.bucket('sharkeye-app-build')

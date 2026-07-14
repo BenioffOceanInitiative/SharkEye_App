@@ -80,23 +80,44 @@ jobs:
             file dist/SharkEye/* || true
           fi
 
-      - name: Create ARM64 ZIP archive
+      - name: Prune dead weight from app bundle
         shell: bash
         run: |
           set -euxo pipefail
+          APP="dist/SharkEye.app"
+          find "$APP" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
+          find "$APP" -type d -name "include" -path "*/torch/*" -exec rm -rf {} + || true
+          find "$APP" -type d -name "test"    -path "*/torch/*" -exec rm -rf {} + || true
+          find "$APP" -type f -name "*.pyi"   -delete || true
+          find "$APP" -type f -name "*.a"     -delete || true   # static archives, never dlopen'd
+          du -sh "$APP" || true
+
+      - name: Ad-hoc codesign app
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Ad-hoc signature (no paid cert). Keeps arm64 bundles runnable and avoids
+          # "app is damaged" errors. Does NOT remove the Gatekeeper "Allow" prompt —
+          # that requires Developer ID notarization (see plan Phase 3).
+          codesign --force --deep --sign - "dist/SharkEye.app"
+          codesign --verify --deep --strict "dist/SharkEye.app" || true
+
+      - name: Create ARM64 DMG (drag-to-Applications)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew install create-dmg
           date=$(date +"%Y%m%d")
-          zipName="SharkEye_macOS_Silicon_$date.zip"
-          # If PyInstaller created an .app bundle
-          if [ -d "dist/SharkEye.app" ]; then
-            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye.app "$zipName"
-          elif [ -d "dist/SharkEye" ]; then
-            ditto -c -k --sequesterRsrc --keepParent dist/SharkEye "$zipName"
-          else
-            echo "No known build output found" >&2
-            exit 1
-          fi
-          echo "ZIP_NAME_ARM64=$zipName" >> "$GITHUB_ENV"
-          echo "Created $zipName"
+          dmgName="SharkEye_macOS_Silicon_$date.dmg"
+          create-dmg \
+            --volname "SharkEye" \
+            --app-drop-link 450 180 \
+            --icon "SharkEye.app" 150 180 \
+            --window-size 600 360 \
+            "$dmgName" "dist/SharkEye.app" \
+          || hdiutil create -volname "SharkEye" -srcfolder "dist/SharkEye.app" -ov -format UDZO "$dmgName"
+          echo "ZIP_NAME_ARM64=$dmgName" >> "$GITHUB_ENV"
+          echo "Created $dmgName"
 
       - name: Upload ARM64 build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"
