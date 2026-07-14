@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import cv2
 import time
 import math
+import threading
 from segment_anything import sam_model_registry, SamPredictor
 from utility import resource_path
 from pathlib import Path
@@ -74,6 +75,9 @@ class SamPredictorCache:
 
     _predictor: SamPredictor | None = None
     _checkpoint_key: str | None = None
+    # Guards the load path so a background warmup thread and the processing thread
+    # can't double-load the ~375MB checkpoint if they call in concurrently.
+    _lock = threading.Lock()
 
     @classmethod
     def get_predictor(cls, checkpoint_path: Path = DEFAULT_SAM_CHECKPOINT) -> SamPredictor:
@@ -81,11 +85,15 @@ class SamPredictorCache:
         if cls._predictor is not None and cls._checkpoint_key == sam_checkpoint:
             return cls._predictor
 
-        cls.release()
-        print(f"[SAM] Loading model from {checkpoint_path.name}")
-        cls._predictor = _load_sam_predictor(checkpoint_path)
-        cls._checkpoint_key = sam_checkpoint
-        return cls._predictor
+        with cls._lock:
+            # Re-check inside the lock: another thread may have loaded it while we waited.
+            if cls._predictor is not None and cls._checkpoint_key == sam_checkpoint:
+                return cls._predictor
+            cls.release()
+            print(f"[SAM] Loading model from {checkpoint_path.name}")
+            cls._predictor = _load_sam_predictor(checkpoint_path)
+            cls._checkpoint_key = sam_checkpoint
+            return cls._predictor
 
     @classmethod
     def release(cls) -> None:

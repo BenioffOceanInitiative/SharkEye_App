@@ -2314,6 +2314,49 @@ def format_experiment_date(date_str, to_human=True):
                 return dt.strftime("%m%d%Y_%H%M%S")
             return date_str
 
+
+class ModelLoader(QObject):
+    """Loads + warms up YOLO and SAM on a background thread so app launch is not
+    blocked by the ~375MB SAM checkpoint load and one-time kernel compilation.
+
+    Emits `finished` with the ready YOLO model (or None on failure). SAM is left
+    warmed and cached inside SamPredictorCache for the first segmentation call.
+    """
+    finished = pyqtSignal(object)  # emits the loaded YOLO model, or None on failure
+
+    def run(self):
+        model = None
+        try:
+            device = torch.device('cuda' if torch.cuda.is_available() else
+                          'mps' if torch.backends.mps.is_available() else 'cpu')
+            print(f"Using device: {device}")
+            model = YOLO(MODEL_PATH).to(device)
+            # Warm up the model with one dummy inference so the first real video doesn't
+            # pay the one-time kernel-compilation cost mid-run (which showed up as a
+            # multi-second blank preview on the very first video).
+            try:
+                warmup_frame = np.zeros((ORIGINAL_HEIGHT, ORIGINAL_WIDTH, 3), dtype=np.uint8)
+                model(warmup_frame, classes=[0], verbose=False)
+                print("Model warmup complete")
+            except Exception as e:
+                print(f"Model warmup skipped: {e}")
+        except Exception as e:
+            print(f"Model load failed: {e}")
+
+        # Preload + warm up SAM here too. Loading the ~375MB checkpoint (and compiling the
+        # first image-encoder kernels) otherwise happened inside the first video's
+        # segmentation phase (visible as a ~2s longer first-video "Running Segmentation").
+        try:
+            predictor = get_sam_predictor()
+            predictor.set_image(np.zeros((640, 640, 3), dtype=np.uint8))
+            predictor.reset_image()  # free the warmup embedding; keep the loaded weights
+            print("SAM warmup complete")
+        except Exception as e:
+            print(f"SAM warmup skipped: {e}")
+
+        self.finished.emit(model)
+
+
 class MainWindow(QMainWindow):
     upload_finished = pyqtSignal(bool, str)  # (success, message)
     resized = pyqtSignal()
@@ -2325,9 +2368,17 @@ class MainWindow(QMainWindow):
 
         self.initialize_settings()
         self.init_ui()
-        self.init_attributes()  
-        self.setup_model()
+        self.init_attributes()
         self.setup_signal_handlers()
+
+        # Load + warm up the models on a background thread AFTER the window is shown,
+        # so app launch is instant. The user has to select videos before any inference
+        # runs, which almost always outlasts the load; `toggle_processing` gates on
+        # `self.model_ready` in the rare case they click Process first.
+        self.model = None
+        self.model_ready = False
+        self._pending_start = False
+        QTimer.singleShot(0, self._start_model_loading)
 
         # Connect the upload_finished signal
         self.upload_finished.connect(self.on_upload_finished)
@@ -2481,32 +2532,36 @@ class MainWindow(QMainWindow):
         self._help_docs_window.raise_()
         self._help_docs_window.activateWindow()
 
-    def setup_model(self):
-        device = torch.device('cuda' if torch.cuda.is_available() else
-                      'mps' if torch.backends.mps.is_available() else 'cpu')
-        print(f"Using device: {device}")
-        self.model = YOLO(MODEL_PATH).to(device)
-        # Warm up the model with one dummy inference so the first real video doesn't
-        # pay the one-time kernel-compilation cost mid-run (which showed up as a
-        # multi-second blank preview on the very first video).
-        try:
-            warmup_frame = np.zeros((ORIGINAL_HEIGHT, ORIGINAL_WIDTH, 3), dtype=np.uint8)
-            self.model(warmup_frame, classes=[0], verbose=False)
-            print("Model warmup complete")
-        except Exception as e:
-            print(f"Model warmup skipped: {e}")
+    def _start_model_loading(self):
+        """Kick off model load + warmup on a background QThread (see ModelLoader)."""
+        self._model_thread = QThread()
+        self._model_loader = ModelLoader()
+        self._model_loader.moveToThread(self._model_thread)
+        self._model_thread.started.connect(self._model_loader.run)
+        self._model_loader.finished.connect(self._on_models_ready)
+        self._model_loader.finished.connect(self._model_thread.quit)
+        self._model_loader.finished.connect(self._model_loader.deleteLater)
+        self._model_thread.finished.connect(self._model_thread.deleteLater)
+        self._model_thread.start()
 
-        # Preload + warm up SAM here too. Loading the ~375MB checkpoint (and compiling the
-        # first image-encoder kernels) otherwise happened inside the first video's
-        # segmentation phase (visible as a ~2s longer first-video "Running Segmentation").
-        # Moving it into startup pulls that one-time cost off the processing critical path.
-        try:
-            predictor = get_sam_predictor()
-            predictor.set_image(np.zeros((640, 640, 3), dtype=np.uint8))
-            predictor.reset_image()  # free the warmup embedding; keep the loaded weights
-            print("SAM warmup complete")
-        except Exception as e:
-            print(f"SAM warmup skipped: {e}")
+    def _on_models_ready(self, model):
+        """Runs on the main thread once background loading finishes."""
+        self.model = model
+        self.model_ready = model is not None
+        if not self.model_ready:
+            QMessageBox.critical(
+                self,
+                "Model Load Failed",
+                "The detection model could not be loaded. Please restart the app.",
+            )
+            self._pending_start = False
+            return
+        print("Models ready")
+        # If the user already clicked Process while the model was loading, start now.
+        if self._pending_start:
+            self._pending_start = False
+            self.process_button.setText("Process Videos")
+            self.start_processing()
 
     def setup_signal_handlers(self):
         signal.signal(signal.SIGINT, signal_handler)
@@ -2749,6 +2804,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Failed to Start Processing", "Please enter the flight altitude for the selected videos")
             return
         if not self.is_processing:
+            if not self.model_ready:
+                # Background model load hasn't finished; auto-start once it does.
+                self._pending_start = True
+                self.process_button.setEnabled(False)
+                self.process_button.setText("Loading model…")
+                return
             self.start_processing()
         else:
             self.confirm_cancel_processing()
