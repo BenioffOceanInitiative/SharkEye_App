@@ -1,4 +1,11 @@
 import multiprocessing
+# In a PyInstaller-frozen app, multiprocessing helper subprocesses (e.g. the
+# resource_tracker) re-launch this executable with interpreter flags + `-c "..."`.
+# PyInstaller overloads freeze_support() to detect those helpers, run them, and exit.
+# It MUST be called before argparse/Qt see the helper's arguments — and placing it
+# above the torch/Qt imports also keeps the helper child lightweight.
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 import sys
 import os
 import argparse
@@ -5308,7 +5315,7 @@ if __name__ == '__main__':
         if args.testing:
             os.environ["QT_DEBUG_PLUGINS"] = "1"
             os.environ["QT_QPA_PLATFORM"] = "minimal"
-        multiprocessing.freeze_support()
+        # freeze_support() already handled at import time (top of file).
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(True)
         apply_theme(app)
