@@ -84,18 +84,6 @@ jobs:
             file dist/SharkEye/* || true
           fi
 
-      - name: Prune dead weight from app bundle
-        shell: bash
-        run: |
-          set -euxo pipefail
-          APP="dist/SharkEye.app"
-          find "$APP" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
-          find "$APP" -type d -name "include" -path "*/torch/*" -exec rm -rf {} + || true
-          find "$APP" -type d -name "test"    -path "*/torch/*" -exec rm -rf {} + || true
-          find "$APP" -type f -name "*.pyi"   -delete || true
-          find "$APP" -type f -name "*.a"     -delete || true   # static archives, never dlopen'd
-          du -sh "$APP" || true
-
       - name: Ad-hoc codesign app
         shell: bash
         run: |
