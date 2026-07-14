@@ -29,7 +29,6 @@ hidden_imports += collect_submodules("PyQt6.QtSvgWidgets")
 hidden_imports += collect_submodules("ultralytics")
 hidden_imports += collect_submodules("segment_anything")
 hidden_imports += collect_submodules("scipy")
-hidden_imports += collect_submodules("tensorboard")
 # If you truly use these, uncomment; otherwise leave out to avoid build errors
 # hidden_imports += ["lapx", "dask"]
 
@@ -40,9 +39,12 @@ datas += collect_data_files("PyQt6.QtGui")
 datas += collect_data_files("PyQt6.QtWidgets") 
 datas += collect_data_files("PyQt6.QtSvgWidgets")                # Qt plugins/resources
 datas += collect_data_files("ultralytics")
-datas += collect_data_files("torch")
+# torch ships C++ headers (include/) and a test suite that are useless at runtime;
+# keep only the real runtime data files to trim ~tens of MB.
+datas += [t for t in collect_data_files("torch")
+          if "/include/" not in t[1].replace("\\", "/")
+          and "/test/" not in t[1].replace("\\", "/")]
 datas += collect_data_files("certifi")               # CA bundle for requests
-datas += collect_data_files("tensorboard")
 datas += copy_metadata("imageio")
 
 # your app assets + model weights
@@ -78,7 +80,26 @@ a = Analysis(
     hookspath=[str(HERE)],
     hooksconfig={},
     runtime_hooks=[],                 # you can add a runtime hook file here if needed
-    excludes=['PyQt6.QtBluetooth', 'PyQt6.QtNfc'],
+    excludes=[
+        # Confirmed unused in src/ — trims dead weight from the bundle.
+        'tensorboard',
+        # polars (~182 MB Rust runtime) is an ultralytics dep but is not used by our
+        # inference-only path; verified YOLO detection + box access work without it.
+        'polars', '_polars_runtime_32',
+        # NOTE: torchvision is NOT excluded — ultralytics imports it at inference time
+        # (autobackend.warmup + torchvision NMS in nms.py), so it must stay bundled.
+        'dask',
+        # Qt modules the app never touches (it only uses QtCore/QtGui/QtWidgets/QtSvg/QtSvgWidgets)
+        'PyQt6.QtBluetooth', 'PyQt6.QtNfc',
+        'PyQt6.QtQml', 'PyQt6.QtQuick', 'PyQt6.QtQuick3D',
+        'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets',
+        'PyQt6.QtMultimedia', 'PyQt6.QtMultimediaWidgets',
+        'PyQt6.Qt3DCore', 'PyQt6.QtCharts', 'PyQt6.QtDataVisualization',
+        # NOTE: QtDesigner is NOT excluded — PyQt6_SwitchControl imports it at load time.
+        'PyQt6.QtTest', 'PyQt6.QtSql',
+        'PyQt6.QtPositioning', 'PyQt6.QtSensors', 'PyQt6.QtSerialPort',
+        'PyQt6.QtWebSockets', 'PyQt6.QtRemoteObjects',
+    ],
     noarchive=False,
 )
 
@@ -92,9 +113,9 @@ exe = EXE(
     name="SharkEye",
     debug=False,                      # set True while diagnosing
     bootloader_ignore_signals=False,
-    strip=False,
+    strip=True,                       # strip symbol tables from bundled dylibs (torch/Qt/scipy)
     upx=False,                        # <-- DO NOT UPX torch/Qt/scipy dlls
-    console=True,                     # <-- True for debugging; set False for release
+    console=False,                    # release build: no debug terminal window
     icon=icon_file,
 )
 
@@ -127,7 +148,7 @@ else:
         a.binaries,
         a.zipfiles,
         a.datas,
-        strip=False,
+        strip=True,
         upx=False,                     # keep UPX off here too
         upx_exclude=[],
         name="SharkEye",
