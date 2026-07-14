@@ -39,11 +39,17 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip wheel
           pip install -r requirements.txt
-          pip install "pyinstaller==6.13.*" "PyQt6<6.8" "PyQt6-Qt6<6.8" "numpy<2"
-          pip show numpy
+          # Pin setuptools + pyinstaller to a combo verified to boot: newer setuptools
+          # removes pkg_resources entirely, so PyInstaller does NOT bundle its
+          # pkg_resources runtime hook (which crashes with "module 'pkg_resources'
+          # has no attribute 'NullProvider'" on the transitional stub versions).
+          pip install "setuptools==83.0.0" "pyinstaller==6.21.0" "PyQt6<6.8" "PyQt6-Qt6<6.8" "numpy<2"
+          pip show numpy setuptools
 
           # Force compatible Google stack
           pip install --upgrade google-cloud-storage google-cloud-core google-api-core google-auth
+          # Reassert setuptools pin in case the Google upgrade pulled a different one
+          pip install "setuptools==83.0.0"
 
       - name: Clean build outputs
         shell: bash
