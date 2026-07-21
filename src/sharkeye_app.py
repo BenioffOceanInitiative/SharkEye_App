@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
                              QMenuBar)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette  # TODO: remove QPalette — unused (moved to theme.py)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QUrl
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
@@ -26,6 +26,7 @@ from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
 from help_docs_window import HelpDocsWindow
+from frame_line_editor import FrameLineEditorWidget
 import signal
 import json
 import requests
@@ -73,6 +74,7 @@ from theme import (
     banner_icon,
     banner_surface_style,
     colored_svg_icon,
+    colored_svg_icon_fit,
     is_dark_mode,
     theme_icon_color,
     warning_text_color,
@@ -101,6 +103,28 @@ def get_detection_labels(settings_obj):
 
 def save_detection_labels(settings_obj, labels):
     settings_obj.setValue("detection_labels", json.dumps(labels))
+
+
+# Cloud Function that serves version checks + build downloads (same endpoint the
+# model download uses). `?request=check_version` compares commits; the default
+# request (`?user_os=<os>`) redirects to a signed URL for the latest build.
+UPDATE_ENDPOINT = "https://us-central1-sharkeye-329715.cloudfunctions.net/sign-up"
+
+
+def get_build_info():
+    """Return the bundled build identifier (os/commit/committed_at) written by SharkEye.spec.
+
+    Returns None for dev runs or unstamped builds where version.json is absent, so the
+    caller can skip the update check (there is nothing to compare against).
+    """
+    try:
+        with open(resource_path("version.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and data.get("commit") and data.get("os"):
+        return data
+    return None
 
 
 def calculate_gsd(altitude, sensor_width, focal_length, image_width):
@@ -1213,6 +1237,13 @@ class CloudUploadPage(HistoricalExperimentsPage):
         self.auto_upload_checkbox.setChecked(enable_auto_upload_bool)
         self.auto_upload_checkbox.clicked.connect(self._on_auto_upload_clicked)
 
+        # --- Update check checkbox ---
+        # Stored as "ignore_update"; the checkbox is the positive phrasing (checked = check).
+        check_updates_bool = str(self.settings_obj.value("ignore_update")).lower() != "true"
+        self.check_updates_checkbox = QCheckBox("Check for app updates on startup")
+        self.check_updates_checkbox.setChecked(check_updates_bool)
+        self.check_updates_checkbox.clicked.connect(self._on_check_updates_clicked)
+
         # --- Historical experiments table ---
         self.historical_experiments_settings = QTableWidget()
         self.historical_experiments_settings.setColumnCount(2)
@@ -1233,6 +1264,7 @@ class CloudUploadPage(HistoricalExperimentsPage):
         experiment_table.addWidget(QLabel("Past Experiments"))
         experiment_table.addWidget(self.historical_experiments_settings)
         experiment_table.addWidget(self.auto_upload_checkbox)
+        experiment_table.addWidget(self.check_updates_checkbox)
 
         # --- Buttons ---
         experiment_buttons = QHBoxLayout()
@@ -1275,6 +1307,10 @@ class CloudUploadPage(HistoricalExperimentsPage):
             self.auto_upload_checkbox.blockSignals(False)
             return
         self.settings_obj.setValue("enable_auto_upload", "true")
+
+    def _on_check_updates_clicked(self, checked):
+        # Checkbox is positive ("check on startup"); the stored flag is the inverse.
+        self.settings_obj.setValue("ignore_update", "false" if checked else "true")
 
 class CustomTracker:
     def __init__(self, distance_threshold=250):
@@ -2382,6 +2418,10 @@ class MainWindow(QMainWindow):
 
         # Connect the upload_finished signal
         self.upload_finished.connect(self.on_upload_finished)
+
+        # Check for a newer build once the window is up (skipped if the user opted out).
+        self.version_check_thread = None
+        QTimer.singleShot(0, self.check_for_update)
     
     def initialize_settings(self):
         # Drone Settings
@@ -2414,6 +2454,10 @@ class MainWindow(QMainWindow):
         # Cloud Settings
         if not self.settings_obj.value("enable_auto_upload"):
             self.settings_obj.setValue("enable_auto_upload", "false")
+
+        # Update check: when "true", the app skips the startup version check.
+        if not self.settings_obj.value("ignore_update"):
+            self.settings_obj.setValue("ignore_update", "false")
 
         if not self.settings_obj.value("detection_labels"):
             save_detection_labels(self.settings_obj, list(DEFAULT_DETECTION_LABELS))
@@ -2448,6 +2492,57 @@ class MainWindow(QMainWindow):
         settings_dialog.settings_updated.connect(self.update_available_drones)
         settings_dialog.detection_labels_page.labels_updated.connect(self.refresh_label_combos)
         settings_dialog.exec()
+
+    def check_for_update(self):
+        """Kick off a background version check against the Cloud Function on startup."""
+        if str(self.settings_obj.value("ignore_update", "false")).lower() == "true":
+            return
+
+        build_info = get_build_info()
+        if not build_info:
+            # Dev run or unstamped build — no commit to compare, so nothing to check.
+            return
+
+        os_key = build_info.get("os", "")
+        commit = build_info.get("commit", "")
+        if not os_key or not commit:
+            return
+
+        self.version_check_thread = VersionCheckThread(UPDATE_ENDPOINT, os_key, commit)
+        self.version_check_thread.check_finished.connect(self.on_version_check_finished)
+        self.version_check_thread.start()
+
+    def on_version_check_finished(self, update_available, os_key, error):
+        if error:
+            # Never interrupt the user over a failed/unreachable update check.
+            print(f"Version check failed: {error}")
+            return
+        if update_available:
+            self.show_update_dialog(os_key)
+
+    def show_update_dialog(self, os_key):
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText("A new version of SharkEye is available.")
+        box.setInformativeText(
+            "Download the latest version?"
+        )
+
+        download_btn = box.addButton("Update", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+
+        dont_ask_checkbox = QCheckBox("Don't check for updates again")
+        box.setCheckBox(dont_ask_checkbox)
+
+        box.exec()
+
+        if dont_ask_checkbox.isChecked():
+            self.settings_obj.setValue("ignore_update", "true")
+
+        if box.clickedButton() is download_btn:
+            download_url = f"{UPDATE_ENDPOINT}?user_os={os_key}"
+            QDesktopServices.openUrl(QUrl(download_url))
         
     def init_attributes(self):
         self.is_processing = False
@@ -2483,6 +2578,7 @@ class MainWindow(QMainWindow):
         self.historical_label_changes = {}  # key: (experiment, video_name, csv_name, track_id) -> new_label
         self.experiments = []
         self.gif_active = False
+        self.mask_active = False
         self.current_flight_location = None
         self.low_confidence_threshold = .65
         self.progress_status = None  # string summarizing current process (Running Inference, Uploading Frames, etc.)
@@ -3685,6 +3781,9 @@ class MainWindow(QMainWindow):
         self.toggle_display_switch.setVisible(enable)
         self.mask_icon.setVisible(enable)
         self.box_icon.setVisible(enable)
+        if not enable:
+            self.mask_active = False
+        self._update_edit_frame_button()
         self._apply_review_ui_state()
 
     def confirm_detections(self):
@@ -3732,13 +3831,17 @@ class MainWindow(QMainWindow):
                 scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
                 self.frame_player.set_static_pixmap(scaled_pixmap)
                 # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
+                self.mask_active = True
             else:
                 dlg = QMessageBox(self)
                 dlg.setWindowTitle("Alert")
                 dlg.setText("Error: No mask drawn for this track")
                 dlg.exec()
+                self.mask_active = False
             # Do NOT start/stop timer in historical mode
             self.gif_active = False
+            self.update_frame_elements()
+            self._update_edit_frame_button()
             return
         else:
             self.show_historical_gif()
@@ -3797,20 +3900,26 @@ class MainWindow(QMainWindow):
 
 
         
-        # Frame player container with horizontal centering
-        self.frame_player_container = QVBoxLayout()
-        # self.frame_player_container.addStretch()  # Add stretch before frame player
-        
+        # Frame player / in-place frame editor share one stack slot so Edit Frame
+        # can replace the active mask view without opening a separate window.
+        self.frame_stack = QStackedWidget()
+        self.frame_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
         self.frame_player = FramePlayer(self.settings_obj)
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.frame_player.setMinimumWidth(int(720))
-        # self.frame_player.setMaximumSize(int(1080), int(720))
         self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        # self.frame_player_container.addWidget(self.frame_player)
-        # self.frame_player_container.addWidget(self.frame_player, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.frame_stack.addWidget(self.frame_player)
 
-        # self.frame_player_container.addStretch()  # Add stretch after frame player
-        layout.addWidget(self.frame_player)
+        self.frame_editor = FrameLineEditorWidget(
+            parent=self.frame_stack,
+            settings_obj=self.settings_obj,
+        )
+        self.frame_editor.changes_confirmed.connect(self._on_frame_editor_result)
+        self.frame_stack.addWidget(self.frame_editor)
+        self.frame_stack.setCurrentWidget(self.frame_player)
+
+        layout.addWidget(self.frame_stack)
 
         self.box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"), parent=self.frame_player)
         self.box_icon.setFixedSize(30, 30)
@@ -3819,6 +3928,24 @@ class MainWindow(QMainWindow):
         self.mask_icon = QSvgWidget(resource_path("assets/images/MdiSharkFin.svg"), parent=self.frame_player)
         self.mask_icon.setFixedSize(30, 30)
         self.mask_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        # Overlay button (bottom-left of the frame, opposite the mask toggle) that
+        # opens the frame line editor for the currently selected mask frame.
+        edit_icon, edit_icon_size = colored_svg_icon_fit(
+            resource_path("assets/images/draw-line.svg"),
+            QColor("white"),
+            max_edge=30,
+        )
+        self.edit_frame_button = QPushButton(parent=self.frame_player)
+        self.edit_frame_button.setIcon(edit_icon)
+        self.edit_frame_button.setIconSize(edit_icon_size)
+        self.edit_frame_button.setFixedSize(edit_icon_size.width() + 4, edit_icon_size.height() + 4)
+        self.edit_frame_button.setStyleSheet(FLAT_ICON_BUTTON)
+        self.edit_frame_button.setToolTip("Edit Frame")
+        self.edit_frame_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.edit_frame_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.edit_frame_button.clicked.connect(self.open_frame_editor)
+        self.edit_frame_button.setVisible(False)
 
         self.toggle_display_switch = SwitchControl(
             bg_color="#777777",
@@ -3931,6 +4058,12 @@ class MainWindow(QMainWindow):
         self.toggle_display_switch.raise_()
         self.mask_icon.raise_()
 
+        # Mirror the mask toggle's margins onto the opposite (left) side.
+        edit_y = rect.y() + rect.height() - self.edit_frame_button.height() - 4
+        edit_x = rect.x() + margin
+        self.edit_frame_button.move(edit_x, edit_y)
+        self.edit_frame_button.raise_()
+
         # Position warning to bottom center of video.
         warning_x = rect.x() + (rect.width() - self.low_confidence_warning.width()) // 2
         warning_y = btn_y - self.low_confidence_warning.height() - 4
@@ -3938,6 +4071,68 @@ class MainWindow(QMainWindow):
         warning_y = max(rect.y() + margin, warning_y)
         self.low_confidence_warning.move(warning_x, warning_y)
         self.low_confidence_warning.raise_()
+
+    def _update_edit_frame_button(self):
+        """Show the Edit Frame overlay only while a mask is being displayed."""
+        if not hasattr(self, "edit_frame_button"):
+            return
+        editing = (
+            hasattr(self, "frame_stack")
+            and hasattr(self, "frame_editor")
+            and self.frame_stack.currentWidget() is self.frame_editor
+        )
+        visible = bool(getattr(self, "mask_active", False)) and not editing
+        self.edit_frame_button.setVisible(visible)
+        if visible:
+            self.edit_frame_button.raise_()
+
+    def _current_frame_image_path(self):
+        """Resolve the original frame image path for the currently selected track."""
+        row = self.historical_items.currentRow()
+        if row < 0:
+            return None
+        experiment = format_experiment_date(
+            self.historical_items.item(row, 0).text(), to_human=False
+        )
+        video_basename = self.historical_items.item(row, 1).text()
+        track_id = self.historical_items.item(row, 2).text()
+        frame_path = (
+            Path(get_results_dir()) / experiment / "frames"
+            / f"{video_basename}_{track_id}.jpg"
+        )
+        return str(frame_path) if frame_path.exists() else None
+
+    def open_frame_editor(self):
+        """Replace the active frame view with the in-place line editor."""
+        frame_path = self._current_frame_image_path()
+        if not frame_path:
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Alert")
+            dlg.setText("Error: No frame available to edit")
+            dlg.exec()
+            return
+
+        initial_drone = self.settings_obj.value("last_drone_type") or None
+        if not self.frame_editor.load_image(frame_path, initial_drone=initial_drone):
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Alert")
+            dlg.setText("Error: Failed to load frame for editing")
+            dlg.exec()
+            return
+
+        self.frame_stack.setCurrentWidget(self.frame_editor)
+        self.edit_frame_button.setVisible(False)
+
+    def close_frame_editor(self):
+        """Return from the in-place editor to the normal frame/mask view."""
+        self.frame_stack.setCurrentWidget(self.frame_player)
+        self._update_edit_frame_button()
+        self.update_frame_elements()
+
+    def _on_frame_editor_result(self, result):
+        # Saving is not implemented yet: confirm/cancel return values, but they are
+        # intentionally unused for now.
+        self.close_frame_editor()
 
     def switch_detection_list(self, show_historical=False):
         current_list = self.historical_items if show_historical else self.detection_list
@@ -3981,7 +4176,15 @@ class MainWindow(QMainWindow):
         self.label_combo = combo # 
 
     def show_historical_gif(self):
+        if (
+            hasattr(self, "frame_stack")
+            and hasattr(self, "frame_editor")
+            and self.frame_stack.currentWidget() is self.frame_editor
+        ):
+            self.close_frame_editor()
         self.gif_active = True
+        self.mask_active = False
+        self._update_edit_frame_button()
         if self.frame_player.timer.isActive():
             self.frame_player.timer.stop()
 
@@ -4836,6 +5039,39 @@ class UploadThread(QThread):
     #         self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
     #     except Exception as e:
     #         self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
+
+class VersionCheckThread(QThread):
+    """Ask the Cloud Function whether the running build is the latest for its OS.
+
+    Runs off the UI thread so a slow/unreachable network never delays app launch.
+    The endpoint returns a JSON boolean: true == up to date, false == update available.
+    """
+    # (update_available, os_key, error_message)
+    check_finished = pyqtSignal(bool, str, str)
+
+    def __init__(self, endpoint, os_key, commit):
+        super().__init__()
+        self.endpoint = endpoint
+        self.os_key = os_key
+        self.commit = commit
+
+    def run(self):
+        try:
+            response = requests.get(
+                self.endpoint,
+                params={
+                    "request": "check_version",
+                    "user_os": self.os_key,
+                    "latest_commit": self.commit,
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            up_to_date = bool(response.json())
+            self.check_finished.emit(not up_to_date, self.os_key, "")
+        except Exception as e:
+            self.check_finished.emit(False, self.os_key, str(e))
+
 
 def signal_handler(signum, frame):
     print(f"Received signal {signum}")
