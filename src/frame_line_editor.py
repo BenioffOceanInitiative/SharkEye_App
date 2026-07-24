@@ -37,6 +37,10 @@ from segmentation.segmentation_model import calculate_shark_length_from_pixel
 from theme import colored_svg_icon, is_dark_mode
 from utility import resource_path
 
+# Inset used by `_position_overlays` between content_rect and chrome panels.
+# Obstacle / HUD math must use this same value so margin strips match layout.
+OVERLAY_MARGIN = 8
+
 
 def _default_drone_settings() -> dict:
     return {
@@ -233,18 +237,60 @@ def _rotated_arrow_pixmap(degrees: float, size: int = 16) -> QPixmap:
     )
 
 
-def _min_shift_to_clear(group: QRect, obstacle: QRect) -> QPoint:
-    """Smallest axis-aligned shift that separates ``group`` from ``obstacle``."""
+def _min_shift_to_clear(
+    group: QRect, obstacle: QRect, prefer_side: QPointF | None = None
+) -> QPoint:
+    """Smallest axis-aligned shift that separates ``group`` from ``obstacle``.
+
+    When ``prefer_side`` is set (usually the line endpoint), prefer pushing the
+    group toward the side of the obstacle that point currently occupies / faces.
+    That stops the HUD from flipping between "to the right of panel" and "below
+    panel" as the point slides along a corner.
+    """
     inter = group.intersected(obstacle)
     if inter.isEmpty():
         return QPoint(0, 0)
     candidates = [
-        QPoint(obstacle.right() + 1 - group.left(), 0),   # push right
-        QPoint(obstacle.left() - group.right() - 1, 0),   # push left
-        QPoint(0, obstacle.bottom() + 1 - group.top()),   # push down
-        QPoint(0, obstacle.top() - group.bottom() - 1),   # push up
+        QPoint(obstacle.right() + 1 - group.left(), 0),  # push right
+        QPoint(obstacle.left() - group.right() - 1, 0),  # push left
+        QPoint(0, obstacle.bottom() + 1 - group.top()),  # push down
+        QPoint(0, obstacle.top() - group.bottom() - 1),  # push up
     ]
-    return min(candidates, key=lambda p: abs(p.x()) + abs(p.y()))
+
+    def _manhattan(p: QPoint) -> int:
+        return abs(p.x()) + abs(p.y())
+
+    if prefer_side is not None:
+        px, py = prefer_side.x(), prefer_side.y()
+        preferred: list[QPoint] = []
+        # Outside (or on) a face: prefer clearing across that face.
+        if px >= obstacle.right():
+            preferred = [c for c in candidates if c.x() > 0]
+        elif px <= obstacle.left():
+            preferred = [c for c in candidates if c.x() < 0]
+        elif py >= obstacle.bottom():
+            preferred = [c for c in candidates if c.y() > 0]
+        elif py <= obstacle.top():
+            preferred = [c for c in candidates if c.y() < 0]
+        else:
+            # Inside the obstacle: clear across the nearest face.
+            pens = [
+                (obstacle.right() - px, 1, 0),
+                (px - obstacle.left(), -1, 0),
+                (obstacle.bottom() - py, 0, 1),
+                (py - obstacle.top(), 0, -1),
+            ]
+            _pen, sx, sy = min(pens, key=lambda t: t[0])
+            preferred = [
+                c
+                for c in candidates
+                if (sx and (c.x() > 0) == (sx > 0) and c.x() != 0)
+                or (sy and (c.y() > 0) == (sy > 0) and c.y() != 0)
+            ]
+        if preferred:
+            return min(preferred, key=_manhattan)
+
+    return min(candidates, key=_manhattan)
 
 
 class ZoomableFrameView(QWidget):
@@ -706,8 +752,21 @@ class FrameLineEditorWidget(QWidget):
         self._default_altitude = drone_altitude
         self._initial_drone = initial_drone
         self._drawing_mode = False
+        # Set True to log length-HUD geometry while panning.
+        self._debug_hud_layout = False
+        # Sticky arrow only while the endpoint stays in the *same* outside region
+        # (same exclusion hole set, or continuously off-frame). Region changes
+        # (panel → top strip, hole → frame edge) recompute direction.
+        # (region_key, dx, dy, dock_rect|None)
+        self._outside_dir_sticky: tuple[object, int, int, QRect | None] | None = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._build_ui()
+        self._populate_initial_drone()
+
+    def _update_drone_settings(self) -> None:
+        self._drone_settings = load_drone_settings(self._settings_obj)
+        self._drone_select.clear()
+        self._drone_select.addItems(list(self._drone_settings.keys()))
         self._populate_initial_drone()
 
     def _build_ui(self) -> None:
@@ -781,6 +840,7 @@ class FrameLineEditorWidget(QWidget):
         self._draw_line_button.setCheckable(True)
         self._draw_line_button.toggled.connect(self._toggle_draw_mode)
         self._update_draw_button_text(False)
+        self._ensure_draw_button_min_width()
         right_layout.addWidget(self._draw_line_button)
 
         self._clear_line_button = QPushButton("Clear Line")
@@ -811,6 +871,7 @@ class FrameLineEditorWidget(QWidget):
         self._clear_line_button.setStyleSheet(button_style)
         self._cancel_button.setStyleSheet(button_style)
         self._confirm_button.setStyleSheet(button_style)
+        self._ensure_draw_button_min_width()
         self._length_hud.setStyleSheet(_overlay_hud_style())
         # Refresh arrow tint if theme changed since last show.
         if self._length_hud_arrow.isVisible():
@@ -818,13 +879,13 @@ class FrameLineEditorWidget(QWidget):
 
     def _position_overlays(self) -> None:
         """Place overlay controls inside the FramePlayer-style content_rect."""
-        margin = 8
+        margin = OVERLAY_MARGIN
         rect = self._view.content_rect()
         if rect.isNull():
             rect = self._view.rect()
 
         self._top_panel.adjustSize()
-        top_w = min(self._top_panel.sizeHint().width(), max(rect.width() - 2 * margin, 1))
+        top_w = min(self._top_panel.sizeHint().width(), max(rect.width() - 2 * margin, 1)) + 1
         top_h = self._top_panel.sizeHint().height()
         self._top_panel.setGeometry(rect.x() + margin, rect.y() + margin, top_w, top_h)
         self._top_panel.raise_()
@@ -897,6 +958,8 @@ class FrameLineEditorWidget(QWidget):
             index = self._drone_select.findText(str(preferred_drone))
             if index >= 0:
                 self._drone_select.setCurrentIndex(index)
+            else: 
+                self._drone_select.setCurrentIndex(0)
 
     def _get_image_size(self) -> tuple[int, int] | None:
         return self._view.image_size()
@@ -933,6 +996,18 @@ class FrameLineEditorWidget(QWidget):
         self._draw_line_button.setText(
             "Move Frame (R)" if drawing else "Draw Line (R)"
         )
+        self._position_overlays()
+
+    def _ensure_draw_button_min_width(self) -> None:
+        """Size the mode button for the longer of its two labels."""
+        button = self._draw_line_button
+        current = button.text()
+        widths: list[int] = []
+        for label in ("Draw Line (R)", "Move Frame (R)"):
+            button.setText(label)
+            widths.append(button.sizeHint().width())
+        button.setText(current)
+        button.setMinimumWidth(max(widths))
 
     def _format_shark_length_text(self, length_px: float | None) -> str | None:
         """Return a compact shark-length string (e.g. ``8ft4in``), or None if unknown."""
@@ -957,82 +1032,328 @@ class FrameLineEditorWidget(QWidget):
 
         Matches cancel/confirm panel height + 2× the overlay margin used to place it.
         """
-        margin = 8
+        margin = OVERLAY_MARGIN
         panel = self._bottom_left_panel
         panel_h = panel.height() if panel.height() > 0 else panel.sizeHint().height()
         return panel_h + 2 * margin
 
-    def _overlay_obstacle_rects(self, padding: int = 0) -> list[QRect]:
-        """Geometries of other in-frame overlays the length HUD must not cover."""
+    @staticmethod
+    def _spans_overlap(a0: int, a1: int, b0: int, b1: int) -> bool:
+        return a0 <= b1 and b0 <= a1
+
+    def _edge_chrome_inset(
+        self,
+        frame: QRect,
+        edge: str,
+        span0: int,
+        span1: int,
+    ) -> int:
+        """Inset from one frame edge, clearing only overlays that overlap ``span``.
+
+        Off-screen arrows hug the border (``OVERLAY_MARGIN``) when no chrome sits
+        along that stretch; they only step inward where a panel actually overlaps.
+        """
+        margin = OVERLAY_MARGIN
+        inset = margin
+
+        if edge == "top" and self._top_panel.isVisible():
+            geo = self._top_panel.geometry()
+            if self._spans_overlap(span0, span1, geo.left(), geo.right()):
+                inset = max(inset, geo.bottom() - frame.top() + 1 + margin)
+        elif edge == "bottom":
+            for panel in (self._bottom_left_panel, self._bottom_right_panel):
+                if not panel.isVisible():
+                    continue
+                geo = panel.geometry()
+                if self._spans_overlap(span0, span1, geo.left(), geo.right()):
+                    inset = max(inset, frame.bottom() - geo.top() + 1 + margin)
+        elif edge == "left":
+            for panel in (self._top_panel, self._bottom_left_panel):
+                if not panel.isVisible():
+                    continue
+                geo = panel.geometry()
+                if self._spans_overlap(span0, span1, geo.top(), geo.bottom()):
+                    inset = max(inset, geo.right() - frame.left() + 1 + margin)
+        elif edge == "right" and self._bottom_right_panel.isVisible():
+            geo = self._bottom_right_panel.geometry()
+            if self._spans_overlap(span0, span1, geo.top(), geo.bottom()):
+                inset = max(inset, frame.right() - geo.left() + 1 + margin)
+
+        return inset
+
+    def _hud_exclusion_rects(self, frame: QRect | None = None) -> list[QRect]:
+        """HUD chrome subtracted from the zoom frame to form the acceptable area.
+
+        Acceptable area = ``content_rect`` minus the union of these rectangles
+        (panel bodies plus the margin strips between panels and the frame edge).
+        """
+        margin = OVERLAY_MARGIN
+        if frame is None or frame.isNull():
+            frame = self._view.content_rect()
+        if frame.isNull():
+            frame = self._view.rect()
+
         rects: list[QRect] = []
-        for widget in (
-            self._top_panel,
-            self._bottom_left_panel,
-            self._bottom_right_panel,
-        ):
+        top = self._top_panel
+        bottom_left = self._bottom_left_panel
+        bottom_right = self._bottom_right_panel
+
+        for widget in (top, bottom_left, bottom_right):
             if widget.isVisible():
-                geo = widget.geometry()
-                if padding:
-                    geo = geo.adjusted(-padding, -padding, padding, padding)
-                rects.append(geo)
+                rects.append(QRect(widget.geometry()))
+
+        has_top = top.isVisible()
+        has_bottom = bottom_left.isVisible() or bottom_right.isVisible()
+        has_left = top.isVisible() or bottom_left.isVisible()
+        has_right = bottom_right.isVisible()
+
+        def _top_band_h() -> int:
+            if not has_top:
+                return margin
+            gap = top.geometry().top() - frame.top()
+            return gap if gap > 0 else margin
+
+        def _bottom_band_h() -> int:
+            gaps = []
+            if bottom_left.isVisible():
+                gaps.append(frame.bottom() - bottom_left.geometry().bottom())
+            if bottom_right.isVisible():
+                gaps.append(frame.bottom() - bottom_right.geometry().bottom())
+            if not gaps:
+                return margin
+            gap = min(gaps)
+            return gap if gap > 0 else margin
+
+        def _left_band_w() -> int:
+            gaps = []
+            if top.isVisible():
+                gaps.append(top.geometry().left() - frame.left())
+            if bottom_left.isVisible():
+                gaps.append(bottom_left.geometry().left() - frame.left())
+            if not gaps:
+                return margin
+            gap = min(gaps)
+            return gap if gap > 0 else margin
+
+        def _right_band_w() -> int:
+            if not has_right:
+                return margin
+            gap = frame.right() - bottom_right.geometry().right()
+            return gap if gap > 0 else margin
+
+        if has_top:
+            h = _top_band_h()
+            rects.append(QRect(frame.left(), frame.top(), frame.width(), h))
+        if has_bottom:
+            h = _bottom_band_h()
+            rects.append(
+                QRect(frame.left(), frame.bottom() - h + 1, frame.width(), h)
+            )
+        if has_left:
+            w = _left_band_w()
+            rects.append(QRect(frame.left(), frame.top(), w, frame.height()))
+        if has_right:
+            w = _right_band_w()
+            rects.append(
+                QRect(frame.right() - w + 1, frame.top(), w, frame.height())
+            )
         return rects
 
-    def _preferred_hud_rect(self, anchor: QPointF, hud_w: int, hud_h: int) -> QRect:
-        """Ideal length-box placement above the endpoint (before clamping)."""
-        return QRect(
-            int(anchor.x() - hud_w / 2),
-            int(anchor.y() - hud_h - 12),
-            hud_w,
-            hud_h,
+    def _overlay_obstacle_rects(
+        self, frame: QRect | None = None, padding: int = 0
+    ) -> list[QRect]:
+        """Exclusion rects used for HUD collision (same as acceptable-area holes)."""
+        rects = self._hud_exclusion_rects(frame)
+        if not padding:
+            return rects
+        return [r.adjusted(-padding, -padding, padding, padding) for r in rects]
+
+    def _point_in_acceptable_area(self, point: QPoint, frame: QRect) -> bool:
+        """True if ``point`` is inside the zoom frame and outside every HUD exclusion."""
+        if not frame.contains(point):
+            return False
+        return all(not hole.contains(point) for hole in self._hud_exclusion_rects(frame))
+
+    def _direction_out_of_exclusion(
+        self, anchor: QPointF, hole: QRect, frame: QRect
+    ) -> tuple[int, int]:
+        """Nearest free-facing edge of an exclusion hole (into acceptable area)."""
+        ax = int(round(anchor.x()))
+        ay = int(round(anchor.y()))
+        mid_x = hole.center().x()
+        mid_y = hole.center().y()
+        exclusions = self._hud_exclusion_rects(frame)
+
+        def _free(pt: QPoint) -> bool:
+            if not frame.contains(pt):
+                return False
+            return all(not h.contains(pt) for h in exclusions)
+
+        edges: list[tuple[str, int, float]] = []
+        if _free(QPoint(mid_x, hole.top() - 1)):
+            edges.append(("dy", 1, float(ay - hole.top())))
+        if _free(QPoint(mid_x, hole.bottom() + 1)):
+            edges.append(("dy", -1, float(hole.bottom() - ay)))
+        if _free(QPoint(hole.left() - 1, mid_y)):
+            edges.append(("dx", 1, float(ax - hole.left())))
+        if _free(QPoint(hole.right() + 1, mid_y)):
+            edges.append(("dx", -1, float(hole.right() - ax)))
+
+        if not edges:
+            return 0, 0
+        edges.sort(key=lambda item: item[2])
+        axis0, sign0, _ = edges[0]
+        return (sign0, 0) if axis0 == "dx" else (0, sign0)
+
+    def _outside_region_key(
+        self, point: QPoint, frame: QRect
+    ) -> tuple:
+        """Identity of the outside-acceptable region containing ``point``."""
+        frame_dx, frame_dy = _offscreen_direction(QPointF(point), frame)
+        if frame_dx != 0 or frame_dy != 0:
+            # Axes in the key so edge → frame-corner can switch to a diagonal.
+            return ("frame", frame_dx, frame_dy)
+        hole_ids = tuple(
+            i
+            for i, hole in enumerate(self._hud_exclusion_rects(frame))
+            if hole.contains(point)
         )
+        if hole_ids:
+            return ("holes",) + hole_ids
+        return ("none",)
 
     def _compute_hud_direction(
         self, anchor: QPointF, hud_w: int, hud_h: int, frame: QRect
-    ) -> tuple[int, int]:
-        """8-way direction treating frame edges *and* UI overlays as off-screen.
+    ) -> tuple[int, int, QRect | None]:
+        """Arrow direction when the endpoint is outside the acceptable area.
 
-        If the preferred HUD box would hit an overlay (or the endpoint sits in one),
-        an arrow direction is returned before a hard collision so the HUD switches
-        to edge/arrow mode early.
+        Acceptable area = zoom ``content_rect`` minus HUD exclusion rectangles.
+        No arrow while the point stays inside that region.
+
+        Diagonal arrows are only for the four frame corners (point outside the
+        zoom frame on both axes). Exclusion chrome always uses a single cardinal
+        exit, even when the point sits in overlapping strips/panels.
         """
+        del hud_w, hud_h
+        pt = anchor.toPoint()
+
+        if self._point_in_acceptable_area(pt, frame):
+            self._outside_dir_sticky = None
+            return 0, 0, None
+
+        region = self._outside_region_key(pt, frame)
+        if (
+            self._outside_dir_sticky is not None
+            and self._outside_dir_sticky[0] == region
+        ):
+            _key, dx, dy, dock = self._outside_dir_sticky
+            return dx, dy, dock
+
+        # Outside the zoom frame → frame-border arrow (diagonals at corners only).
         frame_dx, frame_dy = _offscreen_direction(anchor, frame)
+        if frame_dx != 0 or frame_dy != 0:
+            self._outside_dir_sticky = (region, frame_dx, frame_dy, None)
+            return frame_dx, frame_dy, None
 
-        # Slight padding so the arrow appears just before a visible overlap.
-        obstacles = self._overlay_obstacle_rects(padding=6)
-        preferred = self._preferred_hud_rect(anchor, hud_w, hud_h)
-        blocked = False
-        for obs in obstacles:
-            if obs.contains(anchor.toPoint()) or preferred.intersects(obs):
-                blocked = True
-                break
+        # Inside frame but inside exclusion hole(s) — cardinal only.
+        ax = int(round(anchor.x()))
+        ay = int(round(anchor.y()))
+        best: tuple[float, int, int, QRect] | None = None
+        for hole in self._hud_exclusion_rects(frame):
+            if not hole.contains(pt):
+                continue
+            hdx, hdy = self._direction_out_of_exclusion(anchor, hole, frame)
+            if hdx == 0 and hdy == 0:
+                continue
+            if hdx == -1:
+                pen = float(hole.right() - ax)
+            elif hdx == 1:
+                pen = float(ax - hole.left())
+            elif hdy == -1:
+                pen = float(hole.bottom() - ay)
+            else:
+                pen = float(ay - hole.top())
+            candidate = (pen, hdx, hdy, QRect(hole))
+            if best is None or candidate[0] < best[0]:
+                best = candidate
 
-        obs_dx = obs_dy = 0
-        if blocked:
-            # Direction from the free frame center toward the endpoint.
-            mid = QPointF(frame.center())
-            deadzone = 8.0
-            if anchor.x() < mid.x() - deadzone:
-                obs_dx = -1
-            elif anchor.x() > mid.x() + deadzone:
-                obs_dx = 1
-            if anchor.y() < mid.y() - deadzone:
-                obs_dy = -1
-            elif anchor.y() > mid.y() + deadzone:
-                obs_dy = 1
-            # If still undecided (near center but blocked), aim at the blocking panel.
-            if obs_dx == 0 and obs_dy == 0:
-                for obs in obstacles:
-                    if obs.contains(anchor.toPoint()) or preferred.intersects(obs):
-                        oc = obs.center()
-                        if abs(oc.x() - mid.x()) >= abs(oc.y() - mid.y()):
-                            obs_dx = -1 if oc.x() < mid.x() else 1
-                        else:
-                            obs_dy = -1 if oc.y() < mid.y() else 1
-                        break
+        if best is None:
+            self._outside_dir_sticky = None
+            return 0, 0, None
 
-        dx = frame_dx if frame_dx != 0 else obs_dx
-        dy = frame_dy if frame_dy != 0 else obs_dy
-        return dx, dy
+        _pen, dx, dy, dock = best
+        self._outside_dir_sticky = (region, dx, dy, dock)
+        return dx, dy, dock
+
+    def _box_pos_for_exclusion_dock(
+        self,
+        dock: QRect,
+        dx: int,
+        dy: int,
+        hud_w: int,
+        hud_h: int,
+        arrow_w: int,
+        arrow_h: int,
+        gap: int,
+        anchor: QPointF,
+        frame: QRect,
+        margin: int,
+    ) -> tuple[int, int]:
+        """Place the length box in acceptable space just outside ``dock``.
+
+        Exclusion docking is cardinal-only (diagonals are frame corners only).
+        """
+        if dx == -1:
+            box_x = dock.right() + 1 + arrow_w + gap
+            box_y = int(anchor.y() - hud_h / 2)
+            box_y = max(dock.top(), min(box_y, dock.bottom() - hud_h + 1))
+            # Clear side chrome only where this vertical span hits a panel.
+            left_i = self._edge_chrome_inset(
+                frame, "left", box_y, box_y + hud_h - 1
+            )
+            box_x = max(box_x, frame.x() + left_i + arrow_w + gap)
+        elif dx == 1:
+            box_x = dock.left() - gap - arrow_w - hud_w
+            box_y = int(anchor.y() - hud_h / 2)
+            box_y = max(dock.top(), min(box_y, dock.bottom() - hud_h + 1))
+            right_i = self._edge_chrome_inset(
+                frame, "right", box_y, box_y + hud_h - 1
+            )
+            box_x = min(
+                box_x,
+                frame.x() + frame.width() - right_i - arrow_w - gap - hud_w,
+            )
+        elif dy == -1:
+            box_x = int(anchor.x() - hud_w / 2)
+            box_x = max(dock.left(), min(box_x, dock.right() - hud_w + 1))
+            top_i = self._edge_chrome_inset(
+                frame, "top", box_x, box_x + hud_w - 1
+            )
+            # Top strip may sit above the panel — clear both when spans overlap.
+            box_y = max(
+                dock.bottom() + 1 + arrow_h + gap,
+                frame.y() + top_i + arrow_h + gap,
+            )
+        else:
+            box_x = int(anchor.x() - hud_w / 2)
+            box_x = max(dock.left(), min(box_x, dock.right() - hud_w + 1))
+            bottom_i = self._edge_chrome_inset(
+                frame, "bottom", box_x, box_x + hud_w - 1
+            )
+            box_y = min(
+                dock.top() - gap - arrow_h - hud_h,
+                frame.y() + frame.height() - bottom_i - arrow_h - gap - hud_h,
+            )
+
+        box_x = max(
+            frame.x() + margin,
+            min(box_x, frame.x() + frame.width() - margin - hud_w),
+        )
+        box_y = max(
+            frame.y() + margin,
+            min(box_y, frame.y() + frame.height() - margin - hud_h),
+        )
+        return box_x, box_y
 
     def _arrow_offset_for_box(
         self,
@@ -1072,9 +1393,18 @@ class FrameLineEditorWidget(QWidget):
         show_arrow: bool,
         frame: QRect,
         margin: int,
+        anchor: QPointF | None = None,
+        skip_obstacle: QRect | None = None,
+        slide_axis: str | None = None,
     ) -> tuple[int, int]:
-        """Nudge the length box until the HUD (+ arrow) clears other overlays."""
-        obstacles = self._overlay_obstacle_rects()
+        """Nudge the length box until the HUD (+ arrow) clears exclusion chrome.
+
+        ``slide_axis`` ``\"x\"`` / ``\"y\"`` restricts shifts to that axis so an
+        edge-hugging HUD slides along the border instead of being shoved inward.
+        """
+        obstacles = self._overlay_obstacle_rects(frame=frame)
+        if skip_obstacle is not None:
+            obstacles = [o for o in obstacles if o != skip_obstacle]
         if not obstacles:
             return box_x, box_y
 
@@ -1091,9 +1421,28 @@ class FrameLineEditorWidget(QWidget):
 
             shift = QPoint(0, 0)
             for obstacle in obstacles:
-                part = _min_shift_to_clear(group, obstacle)
+                # Along a hugged frame edge, prefer clearing on the free axis.
+                prefer = anchor
+                if slide_axis == "y":
+                    prefer = QPointF(
+                        group.center().x(),
+                        obstacle.bottom() + 1
+                        if group.center().y() >= obstacle.center().y()
+                        else obstacle.top() - 1,
+                    )
+                elif slide_axis == "x":
+                    prefer = QPointF(
+                        obstacle.right() + 1
+                        if group.center().x() >= obstacle.center().x()
+                        else obstacle.left() - 1,
+                        group.center().y(),
+                    )
+                part = _min_shift_to_clear(group, obstacle, prefer_side=prefer)
+                if slide_axis == "y":
+                    part = QPoint(0, part.y())
+                elif slide_axis == "x":
+                    part = QPoint(part.x(), 0)
                 if part.x() != 0 or part.y() != 0:
-                    # Prefer the smallest single-obstacle separation this pass.
                     if shift == QPoint(0, 0) or (
                         abs(part.x()) + abs(part.y()) < abs(shift.x()) + abs(shift.y())
                     ):
@@ -1104,31 +1453,64 @@ class FrameLineEditorWidget(QWidget):
 
             box_x += shift.x()
             box_y += shift.y()
-            box_x = max(
-                frame.x() + margin,
-                min(box_x, frame.x() + frame.width() - margin - hud_w),
-            )
-            box_y = max(
-                frame.y() + margin,
-                min(box_y, frame.y() + frame.height() - margin - hud_h),
-            )
+            # Keep HUD (+ outward arrow) inside the frame margin.
+            min_x = frame.x() + margin
+            max_x = frame.x() + frame.width() - margin - hud_w
+            min_y = frame.y() + margin
+            max_y = frame.y() + frame.height() - margin - hud_h
+            if show_arrow:
+                if dx == -1:
+                    min_x = frame.x() + margin + arrow_w + gap
+                elif dx == 1:
+                    max_x = frame.x() + frame.width() - margin - arrow_w - gap - hud_w
+                if dy == -1:
+                    min_y = frame.y() + margin + arrow_h + gap
+                elif dy == 1:
+                    max_y = (
+                        frame.y()
+                        + frame.height()
+                        - margin
+                        - arrow_h
+                        - gap
+                        - hud_h
+                    )
+            box_x = max(min_x, min(box_x, max_x))
+            box_y = max(min_y, min(box_y, max_y))
 
         return box_x, box_y
 
+    def _clamp_box_y_clear_chrome(
+        self,
+        box_x: int,
+        box_y: int,
+        hud_w: int,
+        hud_h: int,
+        frame: QRect,
+    ) -> int:
+        """Keep a horizontally edge-hugged box clear of top/bottom chrome."""
+        top_i = self._edge_chrome_inset(frame, "top", box_x, box_x + hud_w - 1)
+        bottom_i = self._edge_chrome_inset(
+            frame, "bottom", box_x, box_x + hud_w - 1
+        )
+        return max(
+            frame.y() + top_i,
+            min(box_y, frame.y() + frame.height() - bottom_i - hud_h),
+        )
+
     def _place_length_hud_at(self, anchor: QPointF, text: str) -> None:
-        """Position the boxed length readout; attach a direction arrow when off-frame."""
+        """Position the boxed length readout; attach a direction arrow when off-area."""
         self._length_hud.setText(text)
         self._length_hud.adjustSize()
         hud_w = self._length_hud.width()
         hud_h = self._length_hud.height()
         gap = 4
-        margin = 8
+        margin = OVERLAY_MARGIN
 
         rect = self._view.content_rect()
         if rect.isNull():
             rect = self._view.rect()
 
-        dx, dy = self._compute_hud_direction(anchor, hud_w, hud_h, rect)
+        dx, dy, dock = self._compute_hud_direction(anchor, hud_w, hud_h, rect)
 
         if dx == 0 and dy == 0:
             self._length_hud_arrow.setVisible(False)
@@ -1137,11 +1519,26 @@ class FrameLineEditorWidget(QWidget):
             box_x = max(rect.x(), min(box_x, rect.x() + rect.width() - hud_w))
             box_y = max(rect.y(), min(box_y, rect.y() + rect.height() - hud_h))
             box_x, box_y = self._resolve_hud_overlay_collisions(
-                box_x, box_y, hud_w, hud_h, 0, 0, 0, 0, gap, False, rect, margin
+                box_x,
+                box_y,
+                hud_w,
+                hud_h,
+                0,
+                0,
+                0,
+                0,
+                gap,
+                False,
+                rect,
+                margin,
+                anchor=anchor,
             )
             self._length_hud.move(box_x, box_y)
             self._length_hud.setVisible(True)
             self._length_hud.raise_()
+            self._debug_print_hud_layout(
+                anchor, box_x, box_y, None, None, enabled=self._debug_hud_layout
+            )
             return
 
         rotation = _ARROW_ROTATION_BY_DIR[(dx, dy)]
@@ -1151,39 +1548,171 @@ class FrameLineEditorWidget(QWidget):
         self._length_hud_arrow.setFixedSize(arrow_w, arrow_h)
         self._length_hud_arrow.setPixmap(arrow_pixmap)
 
-        if dx != 0 and dy != 0:
-            # Corner: equal clearance from both edges (clears bottom control strips).
-            inset = self._corner_hud_inset()
-            box_x = (
-                rect.x() + rect.width() - inset - hud_w
-                if dx == 1
-                else rect.x() + inset
+        if dock is not None:
+            box_x, box_y = self._box_pos_for_exclusion_dock(
+                dock,
+                dx,
+                dy,
+                hud_w,
+                hud_h,
+                arrow_w,
+                arrow_h,
+                gap,
+                anchor,
+                rect,
+                margin,
             )
-            box_y = (
-                rect.y() + rect.height() - inset - hud_h
-                if dy == 1
-                else rect.y() + inset
+            if dx == -1:
+                prefer = QPointF(dock.right() + 1, anchor.y())
+            elif dx == 1:
+                prefer = QPointF(dock.left() - 1, anchor.y())
+            elif dy == -1:
+                prefer = QPointF(anchor.x(), dock.bottom() + 1)
+            else:
+                prefer = QPointF(anchor.x(), dock.top() - 1)
+            if dx != 0 and dy == 0:
+                box_y = self._clamp_box_y_clear_chrome(
+                    box_x, box_y, hud_w, hud_h, rect
+                )
+            box_x, box_y = self._resolve_hud_overlay_collisions(
+                box_x,
+                box_y,
+                hud_w,
+                hud_h,
+                arrow_w,
+                arrow_h,
+                dx,
+                dy,
+                gap,
+                True,
+                rect,
+                margin,
+                anchor=prefer,
+                skip_obstacle=dock,
+                slide_axis="y" if (dx != 0 and dy == 0) else None,
             )
         else:
-            if dx == 1:
-                box_x = rect.x() + rect.width() - margin - arrow_w - gap - hud_w
-            elif dx == -1:
-                box_x = rect.x() + margin + arrow_w + gap
+            if dx != 0 and dy != 0:
+                # Frame corner: hug the side border; clear top/bottom chrome in Y.
+                arrow_pad_x = arrow_w + gap
+                arrow_pad_y = arrow_h + gap
+                if dx == 1:
+                    box_x_span0 = rect.x() + rect.width() - hud_w
+                else:
+                    box_x_span0 = rect.x()
+                inset_y = self._edge_chrome_inset(
+                    rect,
+                    "bottom" if dy == 1 else "top",
+                    box_x_span0,
+                    box_x_span0 + hud_w - 1,
+                )
+                if dy == 1:
+                    inset_y = max(inset_y, self._corner_hud_inset())
+                box_x = (
+                    rect.x() + rect.width() - arrow_pad_x - hud_w
+                    if dx == 1
+                    else rect.x() + arrow_pad_x
+                )
+                box_y = (
+                    rect.y() + rect.height() - inset_y - arrow_pad_y - hud_h
+                    if dy == 1
+                    else rect.y() + inset_y + arrow_pad_y
+                )
             else:
-                box_x = int(anchor.x() - hud_w / 2)
+                # Estimate span along the edge from the anchor, then inset only
+                # where that span overlaps a panel (otherwise hug the border).
+                if dx == 0:
+                    box_x = int(anchor.x() - hud_w / 2)
+                    box_x = max(
+                        rect.x() + margin,
+                        min(box_x, rect.x() + rect.width() - margin - hud_w),
+                    )
+                if dy == 0:
+                    box_y = int(anchor.y() - hud_h / 2)
+                    box_y = max(
+                        rect.y() + margin,
+                        min(box_y, rect.y() + rect.height() - margin - hud_h),
+                    )
 
-            if dy == 1:
-                box_y = rect.y() + rect.height() - margin - arrow_h - gap - hud_h
-            elif dy == -1:
-                box_y = rect.y() + margin + arrow_h + gap
-            else:
-                box_y = int(anchor.y() - hud_h - 12)
+                if dx == 1:
+                    box_x = (
+                        rect.x() + rect.width() - arrow_w - gap - hud_w
+                    )
+                elif dx == -1:
+                    box_x = rect.x() + arrow_w + gap
 
-        box_x = max(rect.x() + margin, min(box_x, rect.x() + rect.width() - margin - hud_w))
-        box_y = max(rect.y() + margin, min(box_y, rect.y() + rect.height() - margin - hud_h))
-        box_x, box_y = self._resolve_hud_overlay_collisions(
-            box_x, box_y, hud_w, hud_h, arrow_w, arrow_h, dx, dy, gap, True, rect, margin
-        )
+                if dy == 1:
+                    bottom_i = self._edge_chrome_inset(
+                        rect, "bottom", box_x, box_x + hud_w - 1
+                    )
+                    box_y = (
+                        rect.y()
+                        + rect.height()
+                        - bottom_i
+                        - arrow_h
+                        - gap
+                        - hud_h
+                    )
+                elif dy == -1:
+                    top_i = self._edge_chrome_inset(
+                        rect, "top", box_x, box_x + hud_w - 1
+                    )
+                    box_y = rect.y() + top_i + arrow_h + gap
+
+                # Left/right edge: hug the border in X, but keep Y clear of
+                # top/bottom chrome while the point slides vertically.
+                if dx != 0 and dy == 0:
+                    box_y = self._clamp_box_y_clear_chrome(
+                        box_x, box_y, hud_w, hud_h, rect
+                    )
+
+            box_x = max(
+                rect.x() + margin,
+                min(box_x, rect.x() + rect.width() - margin - hud_w),
+            )
+            box_y = max(
+                rect.y() + margin,
+                min(box_y, rect.y() + rect.height() - margin - hud_h),
+            )
+            # Keep the outward arrow inside the frame as well.
+            if dx == -1:
+                box_x = max(box_x, rect.x() + margin + arrow_w + gap)
+            elif dx == 1:
+                box_x = min(
+                    box_x,
+                    rect.x() + rect.width() - margin - arrow_w - gap - hud_w,
+                )
+            if dy == -1:
+                box_y = max(box_y, rect.y() + margin + arrow_h + gap)
+            elif dy == 1:
+                box_y = min(
+                    box_y,
+                    rect.y()
+                    + rect.height()
+                    - margin
+                    - arrow_h
+                    - gap
+                    - hud_h,
+                )
+            # Left/right frame edges slide vertically only so collision cannot
+            # shove the hugged X inward when clearing top/bottom panels.
+            slide = "y" if (dx != 0 and dy == 0) else None
+            box_x, box_y = self._resolve_hud_overlay_collisions(
+                box_x,
+                box_y,
+                hud_w,
+                hud_h,
+                arrow_w,
+                arrow_h,
+                dx,
+                dy,
+                gap,
+                True,
+                rect,
+                margin,
+                anchor=anchor,
+                slide_axis=slide,
+            )
 
         arrow_x, arrow_y = self._arrow_offset_for_box(
             box_x, box_y, hud_w, hud_h, arrow_w, arrow_h, dx, dy, gap
@@ -1195,6 +1724,34 @@ class FrameLineEditorWidget(QWidget):
         self._length_hud_arrow.setVisible(True)
         self._length_hud.raise_()
         self._length_hud_arrow.raise_()
+        self._debug_print_hud_layout(
+            anchor, box_x, box_y, arrow_x, arrow_y, enabled=self._debug_hud_layout
+        )
+
+    def _debug_print_hud_layout(
+        self,
+        last_point: QPointF,
+        box_x: int,
+        box_y: int,
+        arrow_x: int | None,
+        arrow_y: int | None,
+        enabled: bool = False,
+    ) -> None:
+        """Print HUD/debug geometry while the user pans the image."""
+        if not enabled or not self._view._panning:
+            return
+        top = self._top_panel.geometry()
+        arrow_str = (
+            f"({arrow_x}, {arrow_y})"
+            if arrow_x is not None and arrow_y is not None
+            else "hidden"
+        )
+        print(
+            f"[pan] last_point=({last_point.x():.1f}, {last_point.y():.1f})  "
+            f"box=({box_x}, {box_y}) size=({self._length_hud.width()}, "
+            f"{self._length_hud.height()})  arrow={arrow_str}  "
+            f"top_panel LTRB=({top.left()}, {top.top()}, {top.right()}, {top.bottom()})"
+        )
 
     def _refresh_length_hud(self, _value=None) -> None:
         """Show length at the cursor while drawing, else above the last endpoint."""

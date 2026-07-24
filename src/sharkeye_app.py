@@ -1972,7 +1972,8 @@ class VideoProcessingWorker(QObject):
         with open(csv_path, 'w', newline='') as csvfile:
             fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
-                        'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label']
+                        'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label',
+                        'manual_length_px', 'manual_length_ft']
             csv_writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             csv_writer.writeheader()
 
@@ -1993,6 +1994,8 @@ class VideoProcessingWorker(QObject):
                     'Meets Thresholds': meets_thresholds,
                     'Confidence of Longest Length': track['longest_conf'],
                     'Label': 'Shark',
+                    'manual_length_px': '',
+                    'manual_length_ft': '',
                 })
             print("Done saving csv")       
         
@@ -2209,6 +2212,18 @@ def format_time(seconds: float) -> str:
         minutes = int(seconds // 60)
         remaining_seconds = int(seconds % 60)
         return f"{minutes} minutes {remaining_seconds} seconds"
+
+def _csv_value_is_empty(value) -> bool:
+    """True if a CSV cell is missing, NaN, or blank (used for optional manual lengths)."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
 
 def validate_experiment_folder(experiment_folder):
     """
@@ -3904,10 +3919,13 @@ class MainWindow(QMainWindow):
         # can replace the active mask view without opening a separate window.
         self.frame_stack = QStackedWidget()
         self.frame_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.frame_stack.setMinimumWidth(720)       
+        self.frame_stack.setMinimumHeight(405)
 
         self.frame_player = FramePlayer(self.settings_obj)
         self.frame_player.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.frame_player.setMinimumWidth(int(720))
+        # Match ZoomableFrameView: fill the stack; image is KeepAspectRatio-centered inside.
+        self.frame_player.setMinimumSize(0, 0)
         self.frame_player.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.frame_stack.addWidget(self.frame_player)
 
@@ -4112,6 +4130,7 @@ class MainWindow(QMainWindow):
             dlg.exec()
             return
 
+        self.frame_editor._update_drone_settings()
         initial_drone = self.settings_obj.value("last_drone_type") or None
         if not self.frame_editor.load_image(frame_path, initial_drone=initial_drone):
             dlg = QMessageBox(self)
@@ -4130,8 +4149,63 @@ class MainWindow(QMainWindow):
         self.update_frame_elements()
 
     def _on_frame_editor_result(self, result):
-        # Saving is not implemented yet: confirm/cancel return values, but they are
-        # intentionally unused for now.
+        """Persist manual line lengths from the frame editor into the track's CSV row."""
+        if not result:
+            self.close_frame_editor()
+            return
+
+        length_px = result.get("length_pixels")
+        length_ft = result.get("length_feet")
+        if length_px is None:
+            self.close_frame_editor()
+            return
+
+        row = self.historical_items.currentRow()
+        if row < 0:
+            self.close_frame_editor()
+            return
+
+        meta = self.historical_items.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if not meta:
+            self.close_frame_editor()
+            return
+
+        experiment, _video_name, csv_name, track_id = meta
+        csv_path = Path(get_results_dir()) / experiment / "detection_results" / csv_name
+        try:
+            if not csv_path.exists():
+                raise FileNotFoundError(f"CSV not found: {csv_path}")
+
+            df = pd.read_csv(csv_path)
+            for col in ("manual_length_px", "manual_length_ft"):
+                if col not in df.columns:
+                    df[col] = ""
+
+            mask = df["Track Id"].astype(int) == int(track_id)
+            if not mask.any():
+                raise ValueError(f"Track {track_id} not found in {csv_path}")
+
+            df.loc[mask, "manual_length_px"] = length_px
+            df.loc[mask, "manual_length_ft"] = length_ft if length_ft is not None else ""
+            df.to_csv(csv_path, index=False)
+
+            if length_ft is not None:
+                length_item = self.historical_items.item(row, 5)
+                if length_item is not None:
+                    length_item.setText(f"{float(length_ft):.1f}ft")
+
+            QMessageBox.information(
+                self,
+                "Length Saved",
+                "Length correction saved to detection results.",
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Save Failed",
+                f"Could not save manual length to CSV:\n{e}",
+            )
+
         self.close_frame_editor()
 
     def switch_detection_list(self, show_historical=False):
@@ -4284,6 +4358,11 @@ class MainWindow(QMainWindow):
                         time_str = str(row.get('Highest Conf Timestamp', ''))
                         conf_longest = float(row.get('Confidence of Longest Length', 0.0))
                         len_high_conf = float(row.get('Highest Confidence Length', 0.0))
+                        manual_ft = row.get('manual_length_ft', '')
+                        if not _csv_value_is_empty(manual_ft):
+                            display_length = float(manual_ft)
+                        else:
+                            display_length = len_high_conf
                         label = self.historical_label_changes.get(
                             (self.current_experiment, video_path_str, csv_name, track_id),
                             row.get('Label', 'Shark'),
@@ -4297,7 +4376,7 @@ class MainWindow(QMainWindow):
                             str(track_id),
                             time_str,
                             f"{conf_longest:.2f}",
-                            f"{len_high_conf:.1f}ft",
+                            f"{display_length:.1f}ft",
                             label
                         ]
 
@@ -5085,6 +5164,10 @@ class FramePlayer(QLabel):
         self.settings_obj = settings_obj or QSettings("BOSL", "SharkEye_App")
         self._movie = None
         self.setScaledContents(False)
+        # Fill the parent stack like ZoomableFrameView; image fits inside via KeepAspectRatio.
+        # Do not inherit QLabel's pixmap/movie sizeHint — native drone frames are huge and
+        # would force the window wider than the screen once frame_stack is height-capped.
+        self.setMinimumSize(0, 0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.frames = []
         self.current_frame = 0
@@ -5093,7 +5176,33 @@ class FramePlayer(QLabel):
         self.timer.setInterval(100)  # 10 FPS
         self._static_pixmap = None
 
+    def sizeHint(self):
+        # Prefer filling the stack, not growing the window to native clip resolution.
+        return QSize(640, 360)
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+    def _clear_height_constraints(self):
+        """Ensure the player can expand to the full stack (no leftover fixed height)."""
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+
+    def _detach_movie(self):
+        if self._movie:
+            on_frame = getattr(self, "_on_movie_frame", None)
+            if on_frame is not None:
+                try:
+                    self._movie.frameChanged.disconnect(on_frame)
+                except TypeError:
+                    pass
+            self._movie.stop()
+            self._movie = None
+        # Avoid QLabel::setMovie sizeHint = native frame size.
+        self.setMovie(None)
+
     def set_frames(self, frames):
+        self._clear_height_constraints()
         self.frames = frames
         self.current_frame = 0
         if frames:
@@ -5106,17 +5215,14 @@ class FramePlayer(QLabel):
             
     def show_frame(self, index):
         if 0 <= index < len(self.frames):
-            frame = self.frames[index]
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            height, width, channel = frame_rgb.shape
-            bytes_per_line = 3 * width
-            q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_image)
-            scaled_pixmap = pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            self.setPixmap(scaled_pixmap)
+            self.current_frame = index
+            # Painting fits KeepAspectRatio to the current widget size (like ZoomableFrameView).
+            self.update()
             
     def next_frame(self):
+        if not self.frames:
+            self.timer.stop()
+            return
         self.current_frame = (self.current_frame + 1) % len(self.frames)
         self.show_frame(self.current_frame)
 
@@ -5146,12 +5252,12 @@ class FramePlayer(QLabel):
 
     def set_static_pixmap(self, pixmap: QPixmap):
         """Display a still image. Detach the movie if one is active."""
-        if self._movie:
-            self._movie.stop()
-            self.setMovie(None)
-            self._movie = None
-
+        self._detach_movie()
+        self.timer.stop()
+        self.frames = []
+        self._clear_height_constraints()
         self._static_pixmap = pixmap
+        self.clear()  # drop any QLabel pixmap/text so sizeHint stays small
         self.update()
         self.resized.emit()
 
@@ -5159,14 +5265,12 @@ class FramePlayer(QLabel):
         """Play an MP4 clip by decoding it into frames and animating them via the
         frame timer. QMovie can't decode MP4, so this is the MP4 counterpart to
         set_gif(); it reuses the existing set_frames() playback path."""
-        # Detach any active movie / static image and stop frame playback.
-        if self._movie:
-            self._movie.stop()
-            self.setMovie(None)
-            self._movie = None
+        self._detach_movie()
         self._static_pixmap = None
         self.timer.stop()
         self.frames = []
+        self._clear_height_constraints()
+        self.clear()
 
         frames = []
         cap = cv2.VideoCapture(path)
@@ -5199,6 +5303,9 @@ class FramePlayer(QLabel):
 
     def set_gif(self, path: str):
         self._static_pixmap = None
+        self._clear_height_constraints()
+        self._detach_movie()
+        self.clear()
 
         movie = QMovie(path)
         movie.setCacheMode(QMovie.CacheMode.CacheAll)
@@ -5215,16 +5322,21 @@ class FramePlayer(QLabel):
         movie = QMovie(path)
         movie.setCacheMode(QMovie.CacheMode.CacheAll)
         self._movie = movie
-        self.setMovie(self._movie)
+        # Paint via paintEvent — do not setMovie on QLabel (native size blows out window width).
+        self._movie.frameChanged.connect(self._on_movie_frame)
         self._movie.start()
         self._movie.finished.connect(lambda: self._movie.start())
         self.update()
         self.resized.emit()
 
+    def _on_movie_frame(self, _frame_number=0):
+        self.update()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         widget_size = self.size()
 
+        # Same as ZoomableFrameView: KeepAspectRatio, centered in the full widget.
         # 1) Static Image Mode
         if self._static_pixmap:
             frame = self._static_pixmap
@@ -5244,27 +5356,36 @@ class FramePlayer(QLabel):
                 painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), frame)
             return
 
-        # 3) Fallback (no movie, no pixmap)
+        # 3) Frame-sequence Mode (MP4 path) — paint from native frames so resize
+        #    refits like the editor instead of using a stale pre-scaled QLabel pixmap.
+        if self.frames:
+            frame = self.frames[self.current_frame]
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, _ = frame_rgb.shape
+            q_image = QImage(frame_rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+            scaled = pixmap.size().scaled(widget_size, Qt.AspectRatioMode.KeepAspectRatio)
+            x = (widget_size.width() - scaled.width()) // 2
+            y = (widget_size.height() - scaled.height()) // 2
+            painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), pixmap)
+            return
+
+        # 4) Fallback
         super().paintEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Do not setFixedHeight — fill the stack; content_rect / paint handle fit.
         self.resized.emit()
-        if self._movie:
-            # Scale
-            frame = self._movie.currentPixmap()
-            if not frame.isNull():
-                frame_ratio = frame.width() / frame.height()
-                max_height = int(self.width() / frame_ratio)
-                self.setFixedHeight(min(int(500), max_height))
         self.update()
 
     def clear_frame(self):
         self._static_pixmap = None
-        if self._movie:
-            self._movie.stop()
-            self.setMovie(None)
-            self._movie = None
+        self._detach_movie()
+        self.timer.stop()
+        self.frames = []
+        self._clear_height_constraints()
+        self.clear()
         self.update()
     
     def content_rect(self):
@@ -5440,6 +5561,8 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 'Meets Thresholds': meets_thresholds,
                 'Confidence of Longest Length': track['longest_conf'],
                 'Label': 'Shark',
+                'manual_length_px': '',
+                'manual_length_ft': '',
             }
 
             all_track_info.append(track_info)
