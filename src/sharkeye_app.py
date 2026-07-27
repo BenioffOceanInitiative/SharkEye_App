@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
-                             QMenuBar)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool
+                             QSlider, QButtonGroup)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QEventLoop, qInstallMessageHandler
 from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
@@ -71,7 +71,8 @@ MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 
 
 # Frame sampling / detection parsing (shared with the headless processors).
-from frame_sampling import iter_sampled_frames, parse_detections, downscale_for_preview
+from frame_sampling import (iter_sampled_frames, parse_detections, downscale_for_preview,
+                            format_sampling_stats, format_sampling_timeline)
 
 # Theming: colors, icon tints, and reusable style snippets live in theme.py so styling
 # decisions stay in one place and adapt to the OS light/dark palette.
@@ -108,6 +109,59 @@ def get_detection_labels(settings_obj):
 
 def save_detection_labels(settings_obj, labels):
     settings_obj.setValue("detection_labels", json.dumps(labels))
+
+
+# Trailing entry in the home screen's drone dropdown that opens the Add New Drone dialog.
+ADD_DRONE_ITEM_TEXT = "➕ Add New Drone…"
+ADD_DRONE_SENTINEL = "__add_drone__"
+
+# Review-clip playback rates, as multiples of the clips' native 10 fps. Detection clips
+# are built from sparsely sampled frames, so even 1x replays far faster than real time;
+# 0.5x is the default because reviewers need time to judge each detection.
+PLAYBACK_SPEEDS = (0.5, 1.0)
+DEFAULT_PLAYBACK_SPEED = 0.5
+
+# Accessibility annotation preview. Drawn at PREVIEW_RENDER_* with the user's literal
+# cv2 parameters (so a thickness of 2 really is 2 px, as on an exported frame), then
+# downscaled to PREVIEW_DISPLAY_* to fit the settings dialog. Rendering at the true
+# 2688x1512 export size instead would cost ~37 ms per keystroke — too slow to feel live.
+PREVIEW_RENDER_WIDTH, PREVIEW_RENDER_HEIGHT = 640, 360
+PREVIEW_DISPLAY_WIDTH, PREVIEW_DISPLAY_HEIGHT = 360, 203
+
+
+def add_drone_to_settings(settings_obj, drone_name, width, height, fov_input):
+    """Validate and persist one drone/resolution entry into the ``drone_settings`` JSON.
+
+    Shared by the Settings page's "Add New Drone" button and the home screen's
+    "Add New Drone…" dropdown entry so the validation rules live in one place.
+    Returns an error message on rejection, or ``None`` on success.
+    """
+    drone_name = (drone_name or "").strip()
+    width = (width or "").strip()
+    height = (height or "").strip()
+    fov_input = (fov_input or "").strip()
+
+    if not drone_name or not width or not height or not fov_input:
+        return "All fields must be filled."
+    if not width.isdigit() or not height.isdigit():
+        return "Width and Height must be positive integers."
+    try:
+        fov_rad = float(fov_input)
+        if fov_rad <= 0:
+            raise ValueError
+    except ValueError:
+        return "FOV must be a positive number (in radians)."
+
+    value = settings_obj.value("drone_settings")
+    try:
+        drone_settings = json.loads(value) if value else {}
+    except (json.JSONDecodeError, TypeError):
+        drone_settings = {}
+
+    res_key = f"({width}, {height})"
+    drone_settings.setdefault(drone_name, {}).setdefault("Resolution", {})[res_key] = fov_rad
+    settings_obj.setValue("drone_settings", json.dumps(drone_settings))
+    return None
 
 
 def calculate_gsd(altitude, sensor_width, focal_length, image_width):
@@ -433,28 +487,17 @@ class DroneSettingsPage(QWidget):
 
     def add_new_drone(self):
         dialog = NewDroneDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            drone_name, width, height, fov_input = dialog.get_inputs()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
 
-            if not drone_name or not width or not height or not fov_input:
-                QMessageBox.warning(self, "Incomplete Input", "All fields must be filled.")
-                return
+        error = add_drone_to_settings(self.settings_obj, *dialog.get_inputs())
+        if error:
+            QMessageBox.warning(self, "Invalid Input", error)
+            return
 
-            if not width.isdigit() or not height.isdigit():
-                QMessageBox.warning(self, "Invalid Input", "Width and Height must be positive integers.")
-                return
-
-            try:
-                fov_rad = float(fov_input)
-                if fov_rad <= 0:
-                    raise ValueError
-            except ValueError:
-                QMessageBox.warning(self, "Invalid Input", "FOV must be a positive number (in radians).")
-                return
-
-            res_key = f"({width}, {height})"
-            self.settings.setdefault(drone_name, {}).setdefault("Resolution", {})[res_key] = fov_rad
-            self.save_settings()
+        # The helper wrote straight to QSettings; refresh our in-memory copy so the
+        # closeEvent save_settings() doesn't write the stale dict back over it.
+        self.load_settings()
 
     def delete_drone(self):
         item = self.tree.currentItem()
@@ -727,11 +770,15 @@ class HistoricalExperimentsPage(QWidget):
     def on_upload(self):
         checked = self.find_checked_boxes()
         api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
-        for experiment_dir in checked: 
+        print(f"[upload] Manual upload requested for {len(checked)} selected experiment(s)")
+        for experiment_dir in checked:
+            zip_name = f'{Path(experiment_dir).name}.zip'
+            print(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
             try:
+                file_count = 0
                 buffer = io.BytesIO()
                 with zipfile.ZipFile(buffer, 'w') as zipf:
-                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']: 
+                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
                         folder_path = os.path.join(experiment_dir, folder)
                         if os.path.exists(folder_path):
                             for root, _, files in os.walk(folder_path):
@@ -739,15 +786,22 @@ class HistoricalExperimentsPage(QWidget):
                                     file_path = os.path.join(root, file)
                                     arcname = os.path.relpath(file_path, experiment_dir)
                                     zipf.write(file_path, arcname)
+                                    file_count += 1
 
+                zip_size = buffer.tell()
                 buffer.seek(0)
-                files = {'file': (f'{Path(experiment_dir).name}.zip', buffer, 'application/zip')}
+                print(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
+                      f"POST -> {api_url}")
+                files = {'file': (zip_name, buffer, 'application/zip')}
                 response = requests.post(api_url, files=files)
                 response.raise_for_status()
+                print(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
                 upload_status, message = "Upload Finished", "Folder uploaded successfully"
             except requests.RequestException as e:
+                print(f"[upload] {zip_name}: FAILED (request error): {e}")
                 upload_status, message = "Upload Error", "Failed to Upload folder to cloud storage: {}".format(str(e))
             except Exception as e:
+                print(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
                 upload_status, message = "Upload Error", "An unexpected error occurred: {}".format(str(e))
             QMessageBox.information(self, upload_status, message)
 
@@ -899,7 +953,10 @@ class PlaybackSettingsPage(QWidget):
 
         description = QLabel(
             "Minimum frame count for playback: animations with fewer frames than this value "
-            "display a single center frame instead of playing, to avoid jittery playback."
+            "display a single center frame instead of playing, to avoid jittery playback.\n\n"
+            "Default speed is the playback rate the Review screen starts at. Detection clips "
+            "are built from sparsely sampled frames, so they replay much faster than real "
+            "time — 0.5x gives you longer to judge each detection."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -911,6 +968,11 @@ class PlaybackSettingsPage(QWidget):
         self.playback_min_frames_input = QLineEdit(str(self.playback_min_frames))
         self.playback_min_frames_input.setValidator(QIntValidator(1, 10000))
 
+        self.playback_speed_combo = QComboBox()
+        for multiplier in PLAYBACK_SPEEDS:
+            self.playback_speed_combo.addItem(f"{multiplier:g}x", multiplier)
+        self._select_speed(self.settings_obj.value("playback_speed", str(DEFAULT_PLAYBACK_SPEED)))
+
         save_btn = QPushButton("Save")
         reset_btn = QPushButton("Reset to Default")
         save_btn.clicked.connect(self.on_save)
@@ -918,11 +980,21 @@ class PlaybackSettingsPage(QWidget):
 
         form_layout.addWidget(QLabel("Minimum Frames:"), 0, 0)
         form_layout.addWidget(self.playback_min_frames_input, 0, 1)
-        form_layout.addWidget(reset_btn, 1, 0)
-        form_layout.addWidget(save_btn, 1, 1)
+        form_layout.addWidget(QLabel("Default Speed:"), 1, 0)
+        form_layout.addWidget(self.playback_speed_combo, 1, 1)
+        form_layout.addWidget(reset_btn, 2, 0)
+        form_layout.addWidget(save_btn, 2, 1)
         layout.addLayout(form_layout)
 
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+    def _select_speed(self, value):
+        try:
+            speed = float(value)
+        except (TypeError, ValueError):
+            speed = DEFAULT_PLAYBACK_SPEED
+        index = self.playback_speed_combo.findData(speed)
+        self.playback_speed_combo.setCurrentIndex(index if index >= 0 else 0)
 
     def on_save(self):
         text = self.playback_min_frames_input.text().strip()
@@ -936,12 +1008,16 @@ class PlaybackSettingsPage(QWidget):
             return
 
         self.settings_obj.setValue("playback_min_frames", str(min_val))
+        self.settings_obj.setValue("playback_speed", str(self.playback_speed_combo.currentData()))
         QMessageBox.information(self, "Saved", "Playback settings saved")
 
     def on_reset(self):
         self.settings_obj.setValue("playback_min_frames", "5")
+        self.settings_obj.setValue("playback_speed", str(DEFAULT_PLAYBACK_SPEED))
         self.playback_min_frames_input.setText(self.settings_obj.value("playback_min_frames"))
-        QMessageBox.information(self, "Reset", "Minimum playback frames reset to 5")
+        self._select_speed(DEFAULT_PLAYBACK_SPEED)
+        QMessageBox.information(
+            self, "Reset", f"Playback settings reset (5 frames, {DEFAULT_PLAYBACK_SPEED:g}x)")
 
 
 class DetectionLabelsPage(QWidget):
@@ -999,7 +1075,9 @@ class DetectionLabelsPage(QWidget):
         self.label_table.setItem(row_position, 0, item)
 
         delete_btn = QPushButton("")
-        delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
+        # x-lg.svg is fill="currentColor", which QSvgRenderer resolves to black — tint it
+        # so the glyph stays visible in dark mode.
+        delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
         delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
         delete_btn.clicked.connect(self.delete_label_row)
         self.label_table.setCellWidget(row_position, 1, delete_btn)
@@ -1077,8 +1155,12 @@ class AccessibilityPage(QWidget):
         self.text_thickness = int(self.settings_obj.value("text_thickness", "2"))
         self.text_scale = float(self.settings_obj.value("text_scale", "2.0"))
 
-        form_layout = QGridLayout(self)
-        form_layout.setContentsMargins(10, 10, 10, 10)
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(10, 10, 10, 10)
+        outer_layout.setSpacing(16)
+        outer_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        form_layout = QGridLayout()
         form_layout.setVerticalSpacing(10)
         form_layout.setHorizontalSpacing(6)
         form_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -1122,8 +1204,60 @@ class AccessibilityPage(QWidget):
 
         form_layout.addWidget(reset_btn, 4, 0)
         form_layout.addWidget(save_btn, 4, 1)
+        outer_layout.addLayout(form_layout)
+
+        # Live preview so the numeric fields stop being a guessing game — it is drawn
+        # with the same cv2 calls the clip exporter uses, so what you see here is what
+        # lands on the exported frames.
+        preview_column = QVBoxLayout()
+        preview_column.setSpacing(4)
+        preview_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+        preview_caption = QLabel("Preview")
+        preview_column.addWidget(preview_caption)
+        self.preview_label = QLabel()
+        self.preview_label.setFixedSize(PREVIEW_DISPLAY_WIDTH, PREVIEW_DISPLAY_HEIGHT)
+        preview_column.addWidget(self.preview_label)
+        outer_layout.addLayout(preview_column)
+
+        # Preview tracks the *unsaved* field values, so the effect is visible while typing.
+        self.box_thickness_input.textChanged.connect(self.update_preview)
+        self.text_thickness_input.textChanged.connect(self.update_preview)
+        self.text_scale_input.textChanged.connect(self.update_preview)
+        self.update_preview()
 
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+
+    def _current_preview_values(self):
+        """Read the live field values, falling back to the last saved ones while a field
+        is mid-edit (empty or out of range)."""
+        def as_int(text, fallback, low, high):
+            try:
+                value = int(text.strip())
+            except (AttributeError, ValueError):
+                return fallback
+            return value if low <= value <= high else fallback
+
+        try:
+            scale = float(self.text_scale_input.text().strip())
+            if not 0.1 <= scale <= 10.0:
+                scale = self.text_scale
+        except (AttributeError, ValueError):
+            scale = self.text_scale
+
+        return (as_int(self.box_thickness_input.text(), self.box_thickness, 1, 20),
+                as_int(self.text_thickness_input.text(), self.text_thickness, 1, 20),
+                scale)
+
+    def update_preview(self):
+        """Redraw the annotation sample with the currently entered values."""
+        box_thickness, text_thickness, text_scale = self._current_preview_values()
+        image = render_annotation_preview(
+            self.annotation_color, box_thickness, text_thickness, text_scale)
+
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        height, width, _ = rgb.shape
+        q_image = QImage(rgb.data, width, height, 3 * width, QImage.Format.Format_RGB888)
+        self.preview_label.setPixmap(QPixmap.fromImage(q_image.copy()))
 
     def update_color_button(self):
         """Update the color button to show the current color"""
@@ -1137,6 +1271,7 @@ class AccessibilityPage(QWidget):
         if color.isValid():
             self.annotation_color = (color.red(), color.green(), color.blue())
             self.update_color_button()
+            self.update_preview()
 
     def on_save(self):
         """Save accessibility settings"""
@@ -1195,7 +1330,8 @@ class AccessibilityPage(QWidget):
         self.box_thickness_input.setText("2")
         self.text_thickness_input.setText("2")
         self.text_scale_input.setText("2.0")
-        
+        self.update_preview()
+
         QMessageBox.information(self, "Reset", "Accessibility settings reset to defaults.")
 
 class CloudUploadPage(HistoricalExperimentsPage):
@@ -1266,6 +1402,7 @@ class CloudUploadPage(HistoricalExperimentsPage):
 
     def _on_auto_upload_clicked(self, checked):
         if not checked:
+            print("[upload] Auto-upload disabled by user")
             self.settings_obj.setValue("enable_auto_upload", "false")
             return
         reply = QMessageBox.question(
@@ -1277,10 +1414,12 @@ class CloudUploadPage(HistoricalExperimentsPage):
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
+            print("[upload] Auto-upload enable declined at confirmation dialog")
             self.auto_upload_checkbox.blockSignals(True)
             self.auto_upload_checkbox.setChecked(False)
             self.auto_upload_checkbox.blockSignals(False)
             return
+        print("[upload] Auto-upload enabled by user")
         self.settings_obj.setValue("enable_auto_upload", "true")
 
 class CustomTracker:
@@ -1544,6 +1683,31 @@ def get_annotation_settings(settings_obj):
     text_scale = float(settings_obj.value("text_scale", "2.0"))
     
     return annotation_color, box_thickness, text_thickness, text_scale
+
+
+def render_annotation_preview(annotation_color, box_thickness, text_thickness, text_scale):
+    """Draw a sample detection box for the Accessibility settings preview.
+
+    Deliberately uses the same cv2.rectangle / cv2.putText calls (and the same RGB->BGR
+    flip) as encode_track_clips, so the preview is a faithful rendering of what will be
+    burned into the exported clips rather than an approximation.
+    """
+    # Muted ocean backdrop so the annotation color is judged against something
+    # representative rather than flat white.
+    gradient = np.linspace(0, 1, PREVIEW_RENDER_HEIGHT, dtype=np.float32).reshape(-1, 1)
+    base = np.array([110, 84, 46], dtype=np.float32)
+    image = np.repeat((base + gradient * np.array([28, 22, 16], dtype=np.float32))[:, None, :],
+                      PREVIEW_RENDER_WIDTH, axis=1).astype(np.uint8)
+
+    annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
+    # Box sits low-left so a large text scale has room to render before it clips —
+    # clipping here is a genuine signal that the label is oversized.
+    x1, y1, x2, y2 = 40, 150, 380, 290
+    cv2.rectangle(image, (x1, y1), (x2, y2), annotation_color_bgr, box_thickness)
+    cv2.putText(image, "Shark: 0.87", (x1, y1 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
+    return cv2.resize(image, (PREVIEW_DISPLAY_WIDTH, PREVIEW_DISPLAY_HEIGHT),
+                      interpolation=cv2.INTER_AREA)
 
 
 def encode_track_clips(payload, output_dir, video_name, annotation_color,
@@ -1816,6 +1980,7 @@ class VideoProcessingWorker(QObject):
         # based on whether the previous frame had a detection.
         sampler = iter_sampled_frames(cap)
         had_detection = None
+        sampling_stats = {}
         try:
             while True:
                 frame_num, frame = sampler.send(had_detection)
@@ -1845,8 +2010,8 @@ class VideoProcessingWorker(QObject):
                     last_preview = now
 
                 self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
-        except StopIteration:
-            pass
+        except StopIteration as stop:
+            sampling_stats = stop.value or {}
 
         infer_time = time.perf_counter() - infer_start
         cap.release()
@@ -1886,6 +2051,19 @@ class VideoProcessingWorker(QObject):
                   f"inference={infer_time:.1f}s ({frames_sampled}/{total_frames} frames, "
                   f"{total_detections} dets) segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
                   f"tracks={track_count} (export+clip deferred to background)")
+
+            # Adaptive frame-sampling analytics: how much source-video time the
+            # acceleration skipped vs. the wall time spent on inference, then a timeline of
+            # when acceleration was engaged vs. when inference ran full-rate.
+            video_name = Path(self.video_path).name
+            print(format_sampling_stats(video_name, infer_time, sampling_stats))
+            timeline = format_sampling_timeline(video_name, sampling_stats)
+            if timeline:
+                print(timeline)
+
+            fps_eff = sampling_stats.get('fps') or 30
+            accel_skipped_frames = sampling_stats.get('accelerated_skipped_frames', 0)
+            skipped_frames = sampling_stats.get('baseline_skipped_frames', 0) + accel_skipped_frames
             self.video_timing_ready.emit({
                 'video': Path(self.video_path).name,
                 'inference': infer_time,
@@ -1895,6 +2073,8 @@ class VideoProcessingWorker(QObject):
                 'total_frames': total_frames,
                 'detections': total_detections,
                 'tracks': track_count,
+                'skipped_frames': skipped_frames,
+                'accelerated_skipped_seconds': accel_skipped_frames / fps_eff,
             })
             self.processing_finished(significant_tracks)
 
@@ -1967,193 +2147,6 @@ class VideoProcessingWorker(QObject):
                 })
             print("Done saving csv")       
         
-    # TODO: DEAD CODE (local-export path) — training-frame export now runs
-    # asynchronously via the module-level `export_training_frames_locally()` /
-    # `PostProcessJob`. This method is retained only for its cloud-upload branch
-    # (export_locally=False), which currently has no caller. Remove or wire up
-    # once the async path is confirmed on-device.
-    def upload_frames_for_training(
-        self,
-        tracks,
-        export_locally: bool = False,
-        exclude_images: bool = False,
-        annotation_format: str = "coco",
-    ):
-        """
-        Bundle all track frames and annotations into a zip, then upload or save locally.
-
-        Args:
-            tracks (dict): Mapping of track_id -> track dict as produced by CustomTracker.
-            export_locally (bool): If True, save the zip to disk instead of uploading.
-            exclude_images (bool): If True, do not include any image files in the zip.
-            annotation_format (str): "coco" for a single COCO JSON, or "yolo" for one
-                .txt per image (class_id cx cy w h, normalized 0-1).
-
-        Returns:
-            (success: bool, message: str)
-        """
-        api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
-        fmt = (annotation_format or "coco").strip().lower()
-        if fmt not in ("coco", "yolo"):
-            return False, f"Unsupported annotation_format: {annotation_format!r}. Use 'coco' or 'yolo'."
-
-        # Shared category list: same names for COCO categories and YOLO obj.names (index = YOLO label_id, id = COCO category_id)
-        category_names = [
-            "great white shark", "kelp", "human", "surfer", "dolphin",
-            "bat ray", "bird", "boat", "seal", "kayaker",
-        ]
-        num_classes = len(category_names)
-
-        # COCO skeleton (used only when fmt == "coco")
-        coco = {
-            "licenses": [{"name": "", "id": 0, "url": ""}],
-            "info": {
-                "contributor": "",
-                "date_created": "",
-                "description": "",
-                "url": "",
-                "version": "",
-                "year": "",
-            },
-            "categories": [
-                {"id": i + 1, "name": name, "supercategory": ""}
-                for i, name in enumerate(category_names)
-            ],
-            "images": [],
-            "annotations": [],
-        }
-
-        image_id = 1
-        annotation_id = 1
-
-        buffer = io.BytesIO()
-        yolo_subset = "train"  # valid subset: train | valid
-        yolo_data_dir = f"obj_{yolo_subset}_data"
-        yolo_train_paths = []  # paths for train.txt (only when fmt == "yolo")
-
-        try:
-            with zipfile.ZipFile(buffer, "w") as zipf:
-                video_stem = Path(getattr(self, "video_path", "video")).stem
-
-                for track_id, track in tracks.items():
-                    positions = track.get("positions")
-                    frames = track.get("frames")
-
-                    if positions is None or frames is None:
-                        continue
-
-                    for frame_idx, (pos, frame) in enumerate(zip(positions, frames)):
-                        x, y, w, h = pos
-
-                        if frame is None:
-                            continue
-                        try:
-                            height, width = frame.shape[:2]
-                        except Exception:
-                            continue
-
-                        x_min = int(x - w / 2)
-                        y_min = int(y - h / 2)
-                        box_w = int(w)
-                        box_h = int(h)
-
-                        x_min = max(0, x_min)
-                        y_min = max(0, y_min)
-                        if x_min >= width or y_min >= height:
-                            continue
-                        box_w = min(box_w, width - x_min)
-                        box_h = min(box_h, height - y_min)
-                        if box_w <= 0 or box_h <= 0:
-                            continue
-
-                        image_basename = f"{video_stem}_track{track_id}_frame{frame_idx:04d}"
-                        if fmt == "yolo":
-                            image_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".jpg")
-                            label_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".txt")
-                        else:
-                            image_filename = image_basename + ".jpg"
-                            image_path_in_zip = os.path.join("images", image_filename)
-
-                        if not exclude_images:
-                            success, encoded = cv2.imencode(".jpg", frame)
-                            if not success:
-                                continue
-                            zipf.writestr(image_path_in_zip, encoded.tobytes())
-                            if fmt == "yolo":
-                                yolo_train_paths.append(image_path_in_zip)
-
-                        if fmt == "coco":
-                            coco["images"].append(
-                                {
-                                    "id": image_id,
-                                    "width": int(width),
-                                    "height": int(height),
-                                    "file_name": image_filename,
-                                    "license": 0,
-                                    "flickr_url": "",
-                                    "coco_url": "",
-                                    "date_captured": 0,
-                                }
-                            )
-                            coco["annotations"].append(
-                                {
-                                    "id": annotation_id,
-                                    "image_id": image_id,
-                                    "category_id": 1,
-                                    "segmentation": [],
-                                    "area": float(box_w * box_h),
-                                    "bbox": [float(x_min), float(y_min), float(box_w), float(box_h)],
-                                    "iscrowd": 0,
-                                    "attributes": {
-                                        "occluded": False,
-                                        "rotation": 0.0,
-                                        "track_id": track_id,
-                                        "keyframe": True,
-                                    },
-                                }
-                            )
-                            image_id += 1
-                            annotation_id += 1
-                        else:
-                            # YOLO: one .txt per image, "label_id cx cy rw rh" normalized [0, 1]
-                            cx_norm = x / width
-                            cy_norm = y / height
-                            rw = w / width
-                            rh = h / height
-                            label_line = f"0 {cx_norm:.6f} {cy_norm:.6f} {rw:.6f} {rh:.6f}\n"
-                            zipf.writestr(label_path_in_zip, label_line)
-
-                if fmt == "coco":
-                    zipf.writestr("instances_default.json", json.dumps(coco))
-                elif fmt == "yolo":
-                    # train.txt: one path per line (obj_train_data/image1.jpg)
-                    zipf.writestr("train.txt", "\n".join(yolo_train_paths) + ("\n" if yolo_train_paths else ""))
-                    # obj.names: same names as COCO categories, one per line (index = label_id)
-                    zipf.writestr("obj.names", "\n".join(category_names) + "\n")
-                    # obj.data
-                    obj_data = f"classes = {num_classes}\nnames = obj.names\ntrain = train.txt\n"
-                    zipf.writestr("obj.data", obj_data)
-
-            # Decide whether to save locally or upload
-            if export_locally:
-                export_dir = get_results_dir()
-                os.makedirs(export_dir, exist_ok=True)
-                export_path = os.path.join(export_dir, f"{video_stem}_training_frames.zip")
-                with open(export_path, "wb") as f:
-                    f.write(buffer.getvalue())
-                return True, f"Training frames zip saved to {export_path}"
-            else:
-                buffer.seek(0)
-                files = {
-                    "file": (f"{Path(self.output_dir).name}_{video_stem}.zip", buffer, "application/zip"),
-                }
-                response = requests.post(api_url, files=files, params = {'request': 'training_data'})
-                response.raise_for_status()
-                return True, "Training frames uploaded successfully"
-        except requests.RequestException as e:
-            return False, f"Failed to upload training frames: {str(e)}"
-        except Exception as e:
-            return False, f"An unexpected error occurred while uploading training frames: {str(e)}"
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -2365,7 +2358,6 @@ class ModelLoader(QObject):
 
 
 class MainWindow(QMainWindow):
-    upload_finished = pyqtSignal(bool, str)  # (success, message)
     resized = pyqtSignal()
 
     def __init__(self):
@@ -2386,9 +2378,6 @@ class MainWindow(QMainWindow):
         self.model_ready = False
         self._pending_start = False
         QTimer.singleShot(0, self._start_model_loading)
-
-        # Connect the upload_finished signal
-        self.upload_finished.connect(self.on_upload_finished)
     
     def initialize_settings(self):
         # Drone Settings
@@ -2417,6 +2406,8 @@ class MainWindow(QMainWindow):
             self.settings_obj.setValue("min_frames", "5")
         if not self.settings_obj.value("playback_min_frames"):
             self.settings_obj.setValue("playback_min_frames", "5")
+        if not self.settings_obj.value("playback_speed"):
+            self.settings_obj.setValue("playback_speed", str(DEFAULT_PLAYBACK_SPEED))
 
         # Cloud Settings
         if not self.settings_obj.value("enable_auto_upload"):
@@ -2455,6 +2446,10 @@ class MainWindow(QMainWindow):
         settings_dialog.settings_updated.connect(self.update_available_drones)
         settings_dialog.detection_labels_page.labels_updated.connect(self.refresh_label_combos)
         settings_dialog.exec()
+        # Pick up a default-speed change made in Playback Settings without needing a restart.
+        if hasattr(self, "speed_button_group"):
+            self.frame_player.set_speed(self.playback_speed)
+            self._check_speed_button(self.playback_speed)
         
     def init_attributes(self):
         self.is_processing = False
@@ -2479,8 +2474,6 @@ class MainWindow(QMainWindow):
         self._awaiting_first_frame = False
         self.batch_timings = []  # per-video phase timings for the batch summary
         self.api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
-        self.is_uploading = False
-        self.upload_thread = None
         self.progress_dialog = None
         self.confidence_threshold = .4 
         self.cleanup_trees = False
@@ -2511,14 +2504,6 @@ class MainWindow(QMainWindow):
         self.setup_stack_widget()
         self.setup_home_page()
         self.setup_review_widget()
-        self.setup_bottom_menu_bar()
-
-    def setup_bottom_menu_bar(self):
-        self.bottom_menu_bar = QMenuBar()
-        self.bottom_menu_bar.setNativeMenuBar(False)
-        help_action = self.bottom_menu_bar.addAction("Help")
-        help_action.triggered.connect(self.show_help_docs)
-        self.layout.addWidget(self.bottom_menu_bar)
 
     def show_help_docs(self):
         guide_path = resource_path("docs/USER_GUIDE_VISUAL.md")
@@ -2583,18 +2568,11 @@ class MainWindow(QMainWindow):
         banner_layout.setSpacing(8)
 
         # Left button (exposed as attribute for later connections)
-        self.banner_left_button = QPushButton()
-        self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
-        self.banner_left_button.setFixedSize(40, 40)
-        self.banner_left_button.setFlat(True)
-        self.banner_left_button.setStyleSheet(
-            BANNER_BUTTON
-        )
-        self.banner_left_button.setToolTip("Previous Experiments")
-        
+        self.banner_left_button = self._make_banner_button(
+            "Review Previous Experiments", "clock-history.svg", "Previous Experiments")
         self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
         self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
-        
+
         logo_label = QLabel()
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_label.setScaledContents(False)
@@ -2614,29 +2592,47 @@ class MainWindow(QMainWindow):
         logo_label.setPixmap(pixmap)
 
         # Right button (exposed as attribute for later connections)
-        self.banner_right_button = QPushButton()
-        self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
+        self.banner_right_button = self._make_banner_button(
+            "Settings", "gear-fill.svg", "Settings")
         self.banner_right_button.clicked.connect(self.load_drone_settings)
-        self.banner_right_button.setFixedSize(40, 40)
-        self.banner_right_button.setFlat(True)
-        self.banner_right_button.setStyleSheet(
-            BANNER_BUTTON
-        )
-        self.banner_right_button.setToolTip("Settings")
 
-        # Layout: left button, spacer, logo, spacer, right button
+        # Help used to live in a bottom QMenuBar as a bare top-level QAction, which macOS
+        # simply does not render — so it was invisible in the Mac build. It's a banner
+        # button now, available from both the home and review screens.
+        self.banner_help_button = self._make_banner_button(
+            "Help", "question-circle-fill.svg", "Open the user guide")
+        self.banner_help_button.clicked.connect(self.show_help_docs)
+
+        # Layout: left button, spacer, logo, spacer, right buttons
         banner_layout.addWidget(self.banner_left_button, 0, Qt.AlignmentFlag.AlignLeft)
         banner_layout.addStretch(1)
         banner_layout.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignCenter)
         banner_layout.addStretch(1)
         banner_layout.addWidget(self.banner_right_button, 0, Qt.AlignmentFlag.AlignRight)
+        banner_layout.addWidget(self.banner_help_button, 0, Qt.AlignmentFlag.AlignRight)
 
         banner_widget.setFixedHeight(60)
         self.layout.addWidget(banner_widget)
 
         # keep reference for tests/other code
         self.banner = banner_widget
-    
+
+    def _make_banner_button(self, text, icon_name, tooltip):
+        """Build a labelled banner button (icon + text) on the fixed navy brand surface.
+
+        Icon-only chrome was unlabelled and unguessable; every banner control now carries
+        its name. Width follows the label instead of the old fixed 40x40.
+        """
+        button = QPushButton(f" {text}")
+        button.setIcon(banner_icon(resource_path(f"assets/images/{icon_name}")))
+        button.setMinimumHeight(32)
+        button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        button.setFlat(True)
+        button.setStyleSheet(BANNER_BUTTON)
+        button.setToolTip(tooltip)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
+
     def toggle_banner_buttons(self, review=True):
         self.banner_left_button.clicked.disconnect()
         # self.banner_right_button.clicked.disconnect()
@@ -2644,10 +2640,14 @@ class MainWindow(QMainWindow):
         self.banner_right_button.setEnabled(True)
         self.banner_left_button.show()
         self.banner_right_button.show()
-        
+
+        # Help is reachable from every screen — it is deliberately never disabled here.
+        self.banner_help_button.setEnabled(True)
+        self.banner_help_button.show()
+
         if review == True:
             # Review Window
-            self.banner_left_button.setText("")
+            self.banner_left_button.setText(" Home")
             self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/house-fill.svg")))
             self.banner_left_button.setToolTip("Go to Home")
             self.banner_left_button.clicked.connect(self.go_to_home)
@@ -2657,25 +2657,24 @@ class MainWindow(QMainWindow):
             self.banner_left_button.setVisible(show_home)
             self.banner_left_button.setEnabled(show_home)
 
-            self.banner_right_button.setText("")
-            self.banner_right_button.setIcon(QIcon())
-            self.banner_right_button.setFixedSize(40, 40)
+            # Settings is unavailable mid-review; hide it rather than leaving a greyed
+            # label sitting next to Help.
             self.banner_right_button.setEnabled(False)
-            self.banner_right_button.setToolTip("")
-            # self.banner_right_button.hide()
+            self.banner_right_button.hide()
         else:
             # Home Screen
+            self.banner_left_button.setText(" Review Previous Experiments")
             self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
             self.banner_left_button.setFlat(True)
             self.banner_left_button.setStyleSheet(
                 BANNER_BUTTON
             )
             self.banner_left_button.setToolTip("Previous Experiments")
-        
+
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
             self.banner_left_button.clicked.connect(self.go_to_review_history) # sets top widget as review
 
-            self.banner_right_button.setText("")
+            self.banner_right_button.setText(" Settings")
             self.banner_right_button.setIcon(banner_icon(resource_path("assets/images/gear-fill.svg")))
             self.banner_right_button.setEnabled(True)
             self.banner_right_button.setToolTip("Settings")
@@ -2699,7 +2698,7 @@ class MainWindow(QMainWindow):
         self.stack_widget.addWidget(self.home_widget)
         self.stack_widget.addWidget(self.review_widget)
     
-    def update_available_drones(self):
+    def update_available_drones(self, select_drone=None):
         value = self.settings_obj.value("drone_settings")
         if not value:
             return  # No drones saved yet
@@ -2713,11 +2712,47 @@ class MainWindow(QMainWindow):
         self.drone_select.clear()
         self.drone_select.addItems(drone_names)
 
-        last_drone_type = self.settings_obj.value("last_drone_type")
-        if last_drone_type:
-            idx = self.drone_select.findText(str(last_drone_type))
+        # Trailing shortcut into the Add New Drone dialog, so users don't have to dig
+        # through Settings just to register the drone they're about to process with.
+        self.drone_select.addItem(ADD_DRONE_ITEM_TEXT)
+        self.drone_select.setItemData(
+            self.drone_select.count() - 1, ADD_DRONE_SENTINEL, Qt.ItemDataRole.UserRole
+        )
+
+        # Never restore onto the sentinel — findText only matches real drone names.
+        preferred = select_drone or self.settings_obj.value("last_drone_type")
+        if preferred:
+            idx = self.drone_select.findText(str(preferred))
             if idx >= 0:
                 self.drone_select.setCurrentIndex(idx)
+
+    def on_drone_selected(self, index):
+        """Handle the trailing "Add New Drone…" entry in the drone dropdown.
+
+        Wired to `activated` (user-initiated only) rather than `currentIndexChanged`, so
+        repopulating the combo programmatically can never pop the dialog.
+        """
+        if self.drone_select.itemData(index, Qt.ItemDataRole.UserRole) != ADD_DRONE_SENTINEL:
+            self._last_drone_index = index
+            return
+
+        dialog = NewDroneDialog(self)
+        added_name = None
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            drone_name, width, height, fov_input = dialog.get_inputs()
+            error = add_drone_to_settings(self.settings_obj, drone_name, width, height, fov_input)
+            if error:
+                QMessageBox.warning(self, "Invalid Input", error)
+            else:
+                added_name = drone_name.strip()
+
+        if added_name:
+            self.update_available_drones(select_drone=added_name)
+        else:
+            # Cancelled or rejected: fall back to whatever was selected before.
+            self.drone_select.setCurrentIndex(min(getattr(self, "_last_drone_index", 0),
+                                                  max(self.drone_select.count() - 2, 0)))
+        self._last_drone_index = self.drone_select.currentIndex()
 
     def setup_home_page(self):
         layout = QVBoxLayout(self.home_widget)
@@ -2731,14 +2766,10 @@ class MainWindow(QMainWindow):
 
         # Remove buttons in horizontal layout
         remove_layout = QHBoxLayout()
-        self.remove_button = QPushButton("Remove Selected Video(s)")
-        self.remove_button.clicked.connect(self.remove_selected_videos)
-        self.remove_button.setEnabled(False)  # Initially disabled
-        # remove_layout.addWidget(self.remove_button)
-
         self.remove_all_button = QPushButton("Remove All Videos")
         self.remove_all_button.clicked.connect(self.remove_all_videos)
         self.remove_all_button.setEnabled(False)  # Initially disabled
+        self.remove_all_button.setVisible(False)  # Only shown once videos are selected
         remove_layout.addWidget(self.remove_all_button)
         layout.addLayout(remove_layout)
 
@@ -2769,6 +2800,8 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(QLabel("Select Drone Model:"), 0, 0)
         self.drone_select = QComboBox()
         self.update_available_drones()
+        self._last_drone_index = self.drone_select.currentIndex()
+        self.drone_select.activated.connect(self.on_drone_selected)
         self.drone_select.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         form_layout.addWidget(self.drone_select, 0, 1)
@@ -2809,6 +2842,9 @@ class MainWindow(QMainWindow):
             return
         if not self.altitude_input.text():
             QMessageBox.warning(self, "Failed to Start Processing", "Please enter the flight altitude for the selected videos")
+            return
+        if self.drone_select.currentData(Qt.ItemDataRole.UserRole) == ADD_DRONE_SENTINEL:
+            QMessageBox.warning(self, "Failed to Start Processing", "Please select a drone model for the selected videos")
             return
         if not self.is_processing:
             if not self.model_ready:
@@ -2923,7 +2959,6 @@ class MainWindow(QMainWindow):
     def start_processing(self):
         self.is_processing = True
         self.batch_timings = []
-        self.remove_button.setEnabled(False)
         self.remove_all_button.setEnabled(False)
         self.video_list.setEnabled(False)
         self.select_videos_button.setEnabled(False)
@@ -3136,16 +3171,12 @@ class MainWindow(QMainWindow):
         self.progress_display_dialog.close()
         
         # Reset button states
-        self.remove_button.setEnabled(True)
-        self.remove_all_button.setEnabled(True)
         self.video_list.setEnabled(True)
         self.select_videos_button.setEnabled(True)
         self.drone_select.setEnabled(True)
         self.altitude_input.setEnabled(True)
         self.flight_location_input.setEnabled(True)
-        self.process_button.setEnabled(True)
-
-        self.remove_all_button.setEnabled(self.video_list.rowCount() > 0)
+        self.update_remove_buttons()  # re-derives Remove All / Process from the list
 
         if self.processing_thread:
             # Disconnect all signals from the worker
@@ -3193,8 +3224,11 @@ class MainWindow(QMainWindow):
 
         print("Processing cancelled")
 
-    def update_remove_buttons(self):    
+    def update_remove_buttons(self):
         has_any_items = self.video_list.rowCount() > 0
+        # "Remove All Videos" is meaningless with an empty list, so hide it outright
+        # rather than leaving a disabled button sitting there.
+        self.remove_all_button.setVisible(has_any_items)
         self.remove_all_button.setEnabled(has_any_items and not self.is_processing)
         self.process_button.setEnabled(has_any_items and not self.is_processing)
 
@@ -3224,21 +3258,24 @@ class MainWindow(QMainWindow):
                 self.video_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
                 # Second column: delete button
                 delete_btn = QPushButton("")
-                delete_btn.setIcon(QIcon(resource_path("assets/images/x-lg.svg")))
+                # x-lg.svg is fill="currentColor", which QSvgRenderer resolves to black — tint it
+                # so the glyph stays visible in dark mode.
+                delete_btn.setIcon(colored_svg_icon(resource_path("assets/images/x-lg.svg"), theme_icon_color()))
                 delete_btn.setStyleSheet(FLAT_ICON_BUTTON)
                 def delete_row():
                     button = self.sender()
-                    if button:
-                        index = self.video_list.indexAt(button.pos())
-                        self.video_list.removeRow(index.row())
+                    if not button:
+                        return
+                    # Find the row by identity rather than indexAt(button.pos()): the
+                    # cell-widget position can resolve to a neighbouring row.
+                    for row in range(self.video_list.rowCount()):
+                        if self.video_list.cellWidget(row, 1) is button:
+                            self.video_list.removeRow(row)
+                            break
+                    self.update_remove_buttons()
 
                 delete_btn.clicked.connect(delete_row)
                 self.video_list.setCellWidget(row_position, 1, delete_btn)
-        self.update_remove_buttons()
-
-    def remove_selected_videos(self):
-        for item in self.video_list.selectedItems():
-            self.video_list.takeItem(self.video_list.row(item))
         self.update_remove_buttons()
 
     def remove_all_videos(self):
@@ -3309,9 +3346,11 @@ class MainWindow(QMainWindow):
             tot_frames = sum(t.get('frames_sampled', 0) for t in self.batch_timings)
             tot_tracks = sum(t.get('tracks', 0) for t in self.batch_timings)
             tot_dets = sum(t.get('detections', 0) for t in self.batch_timings)
+            tot_accel_skip = sum(t.get('accelerated_skipped_seconds', 0) for t in self.batch_timings)
             print(f"[batch] {n} videos | {tot_tracks} tracks, {tot_dets} detections, "
                   f"{tot_frames} frames sampled | inference={tot_inf:.1f}s "
-                  f"segmentation={tot_seg:.1f}s csv={tot_csv:.2f}s | wall clock={time_str}")
+                  f"segmentation={tot_seg:.1f}s csv={tot_csv:.2f}s | "
+                  f"video time skipped by acceleration={tot_accel_skip:.1f}s | wall clock={time_str}")
 
         # Close processing window and show completion popup with both time and detections
         self.progress_display_dialog.close()
@@ -3819,6 +3858,8 @@ class MainWindow(QMainWindow):
         # self.frame_player_container.addStretch()  # Add stretch after frame player
         layout.addWidget(self.frame_player)
 
+        self.setup_playback_controls(layout)
+
         self.box_icon = QSvgWidget(resource_path("assets/images/MdiSharkFinOutline.svg"), parent=self.frame_player)
         self.box_icon.setFixedSize(30, 30)
         self.box_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -3888,6 +3929,118 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown()
         self.review_dropdown.currentIndexChanged.connect(self.render_historical_experiments)
         self.review_dropdown.currentIndexChanged.connect(self._update_review_dropdown_tooltip)
+
+    def setup_playback_controls(self, layout):
+        """Play/pause, speed and scrub controls for the detection clip.
+
+        Clips are built from frames sampled every 10-60 source frames (see
+        iter_sampled_frames) and written at 10 fps, so they replay tens of times faster
+        than real time and loop immediately — too fast to judge a detection. These
+        controls let a reviewer stop on a frame and step through it.
+        """
+        self.playback_controls = QWidget()
+        row = QHBoxLayout(self.playback_controls)
+        row.setContentsMargins(0, 4, 0, 0)
+        row.setSpacing(8)
+
+        self.play_pause_button = QPushButton()
+        self.play_pause_button.setToolTip("Play or pause the detection clip (Space)")
+        self.play_pause_button.clicked.connect(self.toggle_playback)
+        row.addWidget(self.play_pause_button)
+
+        row.addWidget(QLabel("Speed:"))
+        self.speed_button_group = QButtonGroup(self.playback_controls)
+        self.speed_button_group.setExclusive(True)
+        for multiplier in PLAYBACK_SPEEDS:
+            speed_btn = QPushButton(f"{multiplier:g}x")
+            speed_btn.setCheckable(True)
+            speed_btn.setMaximumWidth(56)
+            self.speed_button_group.addButton(speed_btn)
+            speed_btn.clicked.connect(lambda _checked, m=multiplier: self.set_playback_speed(m))
+            row.addWidget(speed_btn)
+
+        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_slider.setMinimum(0)
+        self.frame_slider.setMaximum(0)
+        self.frame_slider.setToolTip("Scrub through the clip frame by frame")
+        # Dragging implies "I want to look at this frame", so stop playback first.
+        self.frame_slider.sliderPressed.connect(self.frame_player.pause)
+        self.frame_slider.sliderPressed.connect(self._sync_play_pause_button)
+        self.frame_slider.valueChanged.connect(self._on_slider_moved)
+        row.addWidget(self.frame_slider, 1)
+
+        self.frame_counter_label = QLabel("0 / 0")
+        self.frame_counter_label.setMinimumWidth(64)
+        self.frame_counter_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.frame_counter_label)
+
+        layout.addWidget(self.playback_controls)
+
+        self.frame_player.frame_changed.connect(self._on_player_frame_changed)
+        self.frame_player.playback_mode_changed.connect(self._on_playback_mode_changed)
+
+        # Apply the saved default speed (0.5x out of the box — 1x is too fast to review).
+        self.frame_player.set_speed(self.playback_speed)
+        self._check_speed_button(self.playback_speed)
+        self._sync_play_pause_button()
+        self._on_playback_mode_changed("empty")
+
+    @property
+    def playback_speed(self):
+        try:
+            return float(self.settings_obj.value("playback_speed", str(DEFAULT_PLAYBACK_SPEED)))
+        except (TypeError, ValueError):
+            return DEFAULT_PLAYBACK_SPEED
+
+    def set_playback_speed(self, multiplier):
+        """Apply and persist a playback rate so it sticks across detections and sessions."""
+        self.settings_obj.setValue("playback_speed", str(multiplier))
+        self.frame_player.set_speed(multiplier)
+
+    def _check_speed_button(self, multiplier):
+        for button in self.speed_button_group.buttons():
+            button.setChecked(button.text() == f"{multiplier:g}x")
+
+    def toggle_playback(self):
+        self.frame_player.toggle_play_pause()
+        self._sync_play_pause_button()
+
+    def _sync_play_pause_button(self):
+        playing = self.frame_player.is_playing()
+        icon_name = "pause-button-svg.svg" if playing else "play-button-svg.svg"
+        self.play_pause_button.setIcon(
+            colored_svg_icon(resource_path(f"assets/images/{icon_name}"), theme_icon_color()))
+        self.play_pause_button.setText(" Pause" if playing else " Play")
+
+    def _on_player_frame_changed(self, index, total):
+        self.frame_counter_label.setText(f"{index + 1} / {total}")
+        if self.frame_slider.maximum() != total - 1:
+            self.frame_slider.setMaximum(max(0, total - 1))
+        # Guard so echoing the player's position back doesn't re-trigger a seek.
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(index)
+        self.frame_slider.blockSignals(False)
+
+    def _on_slider_moved(self, value):
+        self.frame_player.seek(value)
+
+    def _on_playback_mode_changed(self, mode):
+        """Show controls only for the backend that can actually use them.
+
+        "frames" (MP4 clips) supports everything; "movie" (legacy GIFs) supports
+        play/pause and speed but not reliable frame seeking; "static"/"empty" (clips
+        below playback_min_frames, the mask overlay, no selection) support nothing.
+        """
+        self.playback_controls.setVisible(mode in ("frames", "movie"))
+        scrubbable = mode == "frames"
+        self.frame_slider.setEnabled(scrubbable)
+        self.frame_counter_label.setVisible(scrubbable)
+        if not scrubbable:
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(0)
+            self.frame_slider.setMaximum(0)
+            self.frame_slider.blockSignals(False)
+        self._sync_play_pause_button()
 
     def update_button_position(self):
         if self.frame_player and self.toggle_display_mode_button:
@@ -4347,15 +4500,13 @@ class MainWindow(QMainWindow):
         self.current_detection_index = 0
         
         # Reset button states
-        self.remove_button.setEnabled(True)
-        self.remove_all_button.setEnabled(False)
         self.video_list.setEnabled(True)
         self.select_videos_button.setEnabled(True)
         self.drone_select.setEnabled(True)
         self.altitude_input.setEnabled(True)
         self.flight_location_input.setEnabled(True)
-        self.process_button.setEnabled(False)
-        
+        self.update_remove_buttons()  # list is now empty: hides Remove All, disables Process
+
         self.confirming_detections = False
         self.reviewing_history = False
         self.edit_mode = False
@@ -4367,11 +4518,19 @@ class MainWindow(QMainWindow):
     def show_confidence_warning(self):
         # if self.reviewing_history:
         row = self.historical_items.currentRow()
-        conf = self.historical_items.item(row, 4).text()
-        if float(conf) < self.low_confidence_threshold:
-            self.low_confidence_warning.setVisible(True)
-        else:
+        # When an experiment has no detections the table is empty, currentRow()
+        # is -1 and item(-1, 4) is None -> guard so we don't crash building the
+        # historical list (previously: "'NoneType' object has no attribute 'text'").
+        conf_item = self.historical_items.item(row, 4) if row >= 0 else None
+        if conf_item is None:
             self.low_confidence_warning.setVisible(False)
+            return
+        try:
+            conf = float(conf_item.text())
+        except (TypeError, ValueError):
+            self.low_confidence_warning.setVisible(False)
+            return
+        self.low_confidence_warning.setVisible(conf < self.low_confidence_threshold)
         # else:
         #     _, track = self.sorted_tracks[self.current_detection_index]
         #     if track['longest_conf'] < self.low_confidence_threshold:
@@ -4466,105 +4625,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export Complete", f"Results exported to {file_path}")
         except Exception as e:
             QMessageBox.critical(self, "Export Error", f"Failed to export results: {str(e)}")
-
-    def upload_images(self):
-        if self.is_uploading:
-            QMessageBox.warning(self, "Upload in Progress", "An upload is already in progress.")
-            return
-
-        if not self.sorted_tracks:
-            QMessageBox.warning(self, "No Data", "There are no results to upload.")
-            return
-
-        msg_box = QMessageBox()
-        msg_box.setWindowTitle("Upload Data")
-        msg_box.setText("Do you want to upload the current data?")
-        msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        msg_box.setDefaultButton(QMessageBox.StandardButton.No)
-
-        if msg_box.exec() == QMessageBox.StandardButton.Yes:
-            self.is_uploading = True
-            self.upload_to_gcs()
-
-    def upload_to_gcs(self):
-        if self.progress_dialog:
-            self.progress_dialog.close()
-        
-        self.progress_dialog = QProgressDialog("Preparing and uploading files...", "Cancel", 0, 0, self)
-        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress_dialog.setAutoReset(False)
-        self.progress_dialog.setAutoClose(False)
-        self.progress_dialog.show()
-
-        # Create temporary directory structure
-        temp_dir = tempfile.mkdtemp()
-        try:
-            # Create required directories
-            for folder in ['bounding_boxes', 'false_positives', 'frames']:
-                os.makedirs(os.path.join(temp_dir, folder))
-
-            # Save frames and bounding boxes
-            for _, track in self.sorted_tracks:
-                video_name = track['video_name']
-                track_id = track['unique_id']
-                label = track['label'].lower()
-                
-                # Save best frame with bounding box
-                frame_with_box = track['frames'][0].copy()  # Use first frame
-                x, y, w, h = track['positions'][0]
-                cv2.rectangle(frame_with_box, 
-                             (int(x - w/2), int(y - h/2)), 
-                             (int(x + w/2), int(y + h/2)), 
-                             (0, 255, 0), 2)
-                
-                frame_filename = f"{video_name}_{label}{track_id}_conf{int(track['best_conf']*100):02d}_len{track['longest_length']:.1f}ft.jpg"
-                
-                if label == 'shark':
-                    cv2.imwrite(os.path.join(temp_dir, 'bounding_boxes', frame_filename), frame_with_box)
-                else:
-                    cv2.imwrite(os.path.join(temp_dir, 'false_positives', frame_filename), frame_with_box)
-                
-                # Save original frame
-                cv2.imwrite(os.path.join(temp_dir, 'frames', frame_filename), track['frames'][0])
-
-            # Create zip file
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, 'w') as zipf:
-                for folder in ['bounding_boxes', 'false_positives', 'frames']:
-                    folder_path = os.path.join(temp_dir, folder)
-                    for file in os.listdir(folder_path):
-                        file_path = os.path.join(folder_path, file)
-                        arcname = os.path.join(folder, file)
-                        zipf.write(file_path, arcname)
-
-            buffer.seek(0)
-            files = {'file': ('upload.zip', buffer, 'application/zip')}
-            response = requests.post(self.api_url, files=files)
-            response.raise_for_status()
-
-            self.upload_finished.emit(True, "Data uploaded successfully")
-        except Exception as e:
-            self.upload_finished.emit(False, f"Upload failed: {str(e)}")
-        finally:
-            # Clean up temporary directory
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def on_upload_finished(self, success, message):
-        self.is_uploading = False
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-            
-        if success:
-            QMessageBox.information(self, "Upload Complete", message)
-        else:
-            QMessageBox.critical(self, "Upload Failed", message)
-
-        if self.upload_thread:
-            self.upload_thread.wait()
-            self.upload_thread = None
-
-        self.is_uploading = False
 
     def ensure_track_consistency(self):
         if len(self.tracks) != len(self.sorted_tracks):
@@ -4710,39 +4770,66 @@ class MainWindow(QMainWindow):
                 failures.append(f"{csv_name} (Track {track_id}): {e}")
         
         if str(self.settings_obj.value("enable_auto_upload").lower()) == "true":
-            if list(experiments_with_changes):
+            exps = list(experiments_with_changes)
+            print(f"[upload] Auto-upload enabled; {len(exps)} experiment(s) with changes to upload")
+            if exps:
                 dlg = QDialog(self)
                 dlg.setWindowTitle("Upload in Progress")
                 dlg.setModal(False)
 
                 layout = QVBoxLayout()
-                layout.addWidget(QLabel(f"Uploading {len(experiments_with_changes)} experiment{'s' * (len(experiments_with_changes) > 1)}"))
+                layout.addWidget(QLabel(f"Uploading {len(exps)} experiment{'s' * (len(exps) > 1)}"))
                 dlg.setLayout(layout)
                 dlg.show()
 
+                # Run each upload on its own background QThread so the GUI stays
+                # responsive, then wait for all of them via a local event loop
+                # (which keeps the event loop pumping, unlike thread.wait()).
                 errors = {}
-                for exp in list(experiments_with_changes):
-                    result = []
+                threads = []
+                loop = QEventLoop()
+                remaining = len(exps)
+
+                def _on_upload_done(success, message, exp):
+                    nonlocal remaining
+                    if not success:
+                        errors[exp] = message
+                    remaining -= 1
+                    print(f"[upload] Finished '{Path(exp).name}': "
+                          f"{'OK' if success else 'ERROR - ' + message}; {remaining} remaining")
+                    if remaining == 0:
+                        loop.quit()
+
+                for exp in exps:
                     thread = UploadThread(api_url=self.api_url, experiment_dir=exp)
-                    thread.upload_finished.connect(lambda success, msg, exp=exp:
-                                                    result.extend((success, msg, exp)))
-                    thread.run()
-                    if result[0] == False:
-                        errors[exp] = result[1]
+                    thread.upload_finished.connect(
+                        lambda success, message, exp=exp: _on_upload_done(success, message, exp))
+                    threads.append(thread)
+
+                for thread in threads:
+                    thread.start()
+
+                loop.exec()
+
+                for thread in threads:
+                    thread.wait()
+
+                print(f"[upload] Auto-upload batch complete: "
+                      f"{len(exps) - len(errors)} succeeded, {len(errors)} failed")
 
                 dlg.hide()
-                msg = QMessageBox(self)
-                msg.setStandardButtons(QMessageBox.StandardButton.Ok)      
+                result_box = QMessageBox(self)
+                result_box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 if not errors:
-                    msg.setWindowTitle("Upload Complete")
-                    msg.setText(f"Successfully uploaded {len(experiments_with_changes)} experiment{'s' * (len(experiments_with_changes) > 1)}")
+                    result_box.setWindowTitle("Upload Complete")
+                    result_box.setText(f"Successfully uploaded {len(exps)} experiment{'s' * (len(exps) > 1)}")
                 else:
-                    message = f"Error uploading the following:\n"
-                    for exp, msg in errors.items:
-                        error =  f"{exp}: {msg}\n"  
-                        message += error
-                    msg.setText(message)
-                msg.exec()
+                    result_box.setWindowTitle("Upload Error")
+                    message = "Error uploading the following:\n"
+                    for exp, err in errors.items():
+                        message += f"{exp}: {err}\n"
+                    result_box.setText(message)
+                result_box.exec()
 
         # Feedback
         if failures and updated_files:
@@ -4797,7 +4884,10 @@ class UploadThread(QThread):
         self.experiment_dir = experiment_dir
 
     def run(self):
+        zip_name = f'{Path(self.experiment_dir).name}.zip'
+        print(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
         try:
+            file_count = 0
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, 'w') as zipf:
                 for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
@@ -4808,16 +4898,25 @@ class UploadThread(QThread):
                                 file_path = os.path.join(root, file)
                                 arcname = os.path.relpath(file_path, self.experiment_dir)
                                 zipf.write(file_path, arcname)
+                                file_count += 1
+                    else:
+                        print(f"[upload]   skipping missing folder: {folder}")
 
+            zip_size = buffer.tell()
             buffer.seek(0)
-            files = {'file': (f'{Path(self.experiment_dir).name}.zip', buffer, 'application/zip')}
+            print(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
+                  f"POST -> {self.api_url}")
+            files = {'file': (zip_name, buffer, 'application/zip')}
             response = requests.post(self.api_url, files=files)
             response.raise_for_status()
 
+            print(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
             self.upload_finished.emit(True, "Folder uploaded successfully")
         except requests.RequestException as e:
+            print(f"[upload] {zip_name}: FAILED (request error): {e}")
             self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
         except Exception as e:
+            print(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
             self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
 
     # def run(self):
@@ -4850,6 +4949,14 @@ def signal_handler(signum, frame):
 
 class FramePlayer(QLabel):
     resized = pyqtSignal()
+    # (current index, total frames) — drives the review scrubber and frame counter.
+    frame_changed = pyqtSignal(int, int)
+    # "frames" | "movie" | "static" | "empty" — tells the review controls which of the
+    # three playback backends is live so they can enable/disable themselves.
+    playback_mode_changed = pyqtSignal(str)
+
+    # Clips are written at 10 fps by encode_track_clips(), so one frame per 100 ms is 1x.
+    BASE_INTERVAL_MS = 100
 
     def __init__(self, settings_obj=None, parent=None):
         super().__init__(parent)
@@ -4859,22 +4966,65 @@ class FramePlayer(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.frames = []
         self.current_frame = 0
+        self._speed = 1.0
         self.timer = QTimer()
         self.timer.timeout.connect(self.next_frame)
-        self.timer.setInterval(100)  # 10 FPS
+        self.timer.setInterval(self.BASE_INTERVAL_MS)
         self._static_pixmap = None
+
+    # --- playback control -------------------------------------------------
+    # Two backends sit behind these: a QTimer stepping self.frames (MP4 clips, the
+    # current format) and a QMovie (legacy .gif clips). Both must honour every call.
+
+    def set_speed(self, multiplier):
+        """Set playback rate as a multiple of the clip's native 10 fps."""
+        multiplier = float(multiplier) or 1.0
+        self._speed = multiplier
+        self.timer.setInterval(max(1, int(round(self.BASE_INTERVAL_MS / multiplier))))
+        if self._movie:
+            self._movie.setSpeed(int(round(multiplier * 100)))
+
+    def is_playing(self):
+        if self._movie:
+            return self._movie.state() == QMovie.MovieState.Running
+        return self.timer.isActive()
+
+    def play(self):
+        if self._movie:
+            self._movie.setPaused(False)
+        elif self.frames:
+            self.timer.start()
+
+    def pause(self):
+        if self._movie:
+            self._movie.setPaused(True)
+        else:
+            self.timer.stop()
+
+    def toggle_play_pause(self):
+        self.pause() if self.is_playing() else self.play()
+
+    def seek(self, index):
+        """Jump to a frame without changing play/pause state (frame-list mode only)."""
+        if not self.frames:
+            return
+        self.current_frame = max(0, min(int(index), len(self.frames) - 1))
+        self.show_frame(self.current_frame)
 
     def set_frames(self, frames):
         self.frames = frames
         self.current_frame = 0
         if frames:
             self.show_frame(0)
+            self.set_speed(self._speed)  # re-apply the interval for the new clip
             self.timer.start()
+            self.playback_mode_changed.emit("frames")
         else:
             self.clear()
             self.timer.stop()
+            self.playback_mode_changed.emit("empty")
         self.resized.emit()
-            
+
     def show_frame(self, index):
         if 0 <= index < len(self.frames):
             frame = self.frames[index]
@@ -4886,8 +5036,12 @@ class FramePlayer(QLabel):
             pixmap = QPixmap.fromImage(q_image)
             scaled_pixmap = pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
             self.setPixmap(scaled_pixmap)
-            
+            self.frame_changed.emit(index, len(self.frames))
+
     def next_frame(self):
+        if not self.frames:
+            self.timer.stop()
+            return
         self.current_frame = (self.current_frame + 1) % len(self.frames)
         self.show_frame(self.current_frame)
 
@@ -4922,8 +5076,11 @@ class FramePlayer(QLabel):
             self.setMovie(None)
             self._movie = None
 
+        self.frames = []
+        self.timer.stop()
         self._static_pixmap = pixmap
         self.update()
+        self.playback_mode_changed.emit("static")
         self.resized.emit()
 
     def set_video(self, path: str):
@@ -4953,6 +5110,7 @@ class FramePlayer(QLabel):
         if not frames:
             self.clear()
             self.setText(f"Clip not found or empty:\n{os.path.basename(path)}")
+            self.playback_mode_changed.emit("empty")
             return
 
         # Very short clips look jittery animated; show the center frame instead
@@ -4970,6 +5128,8 @@ class FramePlayer(QLabel):
 
     def set_gif(self, path: str):
         self._static_pixmap = None
+        self.timer.stop()
+        self.frames = []
 
         movie = QMovie(path)
         movie.setCacheMode(QMovie.CacheMode.CacheAll)
@@ -4987,9 +5147,11 @@ class FramePlayer(QLabel):
         movie.setCacheMode(QMovie.CacheMode.CacheAll)
         self._movie = movie
         self.setMovie(self._movie)
+        self._movie.setSpeed(int(round(self._speed * 100)))
         self._movie.start()
         self._movie.finished.connect(lambda: self._movie.start())
         self.update()
+        self.playback_mode_changed.emit("movie")
         self.resized.emit()
 
     def paintEvent(self, event):
@@ -5036,7 +5198,10 @@ class FramePlayer(QLabel):
             self._movie.stop()
             self.setMovie(None)
             self._movie = None
+        self.timer.stop()
+        self.frames = []
         self.update()
+        self.playback_mode_changed.emit("empty")
     
     def content_rect(self):
         """
@@ -5238,56 +5403,24 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
     return parser.parse_args()
 
-def main():
-    args = parse_args()
-    if args.testing:
-        print('Testing')
-        os.environ["QT_DEBUG_PLUGINS"] = "1"
-        os.environ["QT_QPA_PLATFORM"] = "minimal"
-        multiprocessing.freeze_support()
-        app = QApplication(sys.argv)
-        app.setQuitOnLastWindowClosed(True)
-        apply_theme(app)
-        
-        app_icon_path = {
-            'win32': 'assets/logo/SharkEye.ico',
-            'darwin': 'assets/logo/SharkEye.icns'
-        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-        app_icon_path = {
-            'win32': 'assets/logo/SharkEye.ico',
-            'darwin': 'assets/logo/SharkEye.icns'
-        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-        
-        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-        
-        window = MainWindow()
-        window.show()
-        sys.exit(app.exec())
-    else:
-        input_dir = Path(args.input_dir)
-        output_dir = Path(args.output_dir)
-        video_paths = input_dir.rglob("*.mp4")
-        if not video_paths:
-            print(f"No .mp4 videos found in {input_dir}")
-            exit(1)
+def _install_qt_message_filter():
+    """Route Qt's own log messages through Python, dropping one known-benign
+    warning that clutters startup logs on macOS.
 
-        # Run prediction
-        output_dir.mkdir(parents=True, exist_ok=True)
-        results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+    During UI construction Qt emits 'QImage::QImage(), XPM is not supported'
+    (from a bundled icon / the third-party SwitchControl widget). It has no
+    functional effect -- the widgets still render -- so we suppress just that
+    line and forward every other Qt message to stderr unchanged.
+    """
+    def handler(msg_type, context, message):
+        if "XPM is not supported" in message:
+            return
+        print(message, file=sys.stderr)
+    qInstallMessageHandler(handler)
 
-        # Save results to CSV
-        if results:
-            csv_path = output_dir / "output.csv"
-            with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
-                writer = csv.DictWriter(file, fieldnames=results[0].keys())
-                writer.writeheader()
-                writer.writerows(results)
-            print(f"Results saved to {csv_path}")
-        else:
-            print("No valid tracks were found.")
 
 if __name__ == '__main__':
+    _install_qt_message_filter()
     args = parse_args()
     if args.input_dir and args.output_dir:
         input_dir = Path(args.input_dir)
@@ -5319,19 +5452,14 @@ if __name__ == '__main__':
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(True)
         apply_theme(app)
-        
+
         app_icon_path = {
             'win32': 'assets/logo/SharkEye.ico',
             'darwin': 'assets/logo/SharkEye.icns'
         }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-        app_icon_path = {
-            'win32': 'assets/logo/SharkEye.ico',
-            'darwin': 'assets/logo/SharkEye.icns'
-        }.get(sys.platform, 'assets/logo/SharkEye.iconset/icon_32x32.png')
-        
+
         app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-        app.setWindowIcon(QIcon(resource_path(app_icon_path)))
-        
+
         window = MainWindow()
         window.show()
         sys.exit(app.exec())

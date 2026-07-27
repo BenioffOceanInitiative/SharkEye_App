@@ -64,8 +64,15 @@ def banner_icon(svg_path: str, size: int = 20) -> QIcon:
 # Borderless, transparent icon-only button. Was copy-pasted verbatim at several sites.
 FLAT_ICON_BUTTON = "background: transparent; border: none;"
 
-# Banner button: flat + light text/glyph on the brand surface.
-BANNER_BUTTON = f"color: {ON_BRAND}; {FLAT_ICON_BUTTON} font-size: 18px;"
+# Banner button: flat + light text/glyph on the brand surface. Buttons carry an icon *and*
+# a text label, so the padding keeps the two from crowding each other.
+BANNER_BUTTON = (
+    f"QPushButton {{ color: {ON_BRAND}; {FLAT_ICON_BUTTON} font-size: 13px;"
+    " padding: 4px 10px; text-align: left; }"
+    f"QPushButton:hover {{ color: {ON_BRAND}; background: rgba(255, 255, 255, 0.12);"
+    " border-radius: 4px; }"
+    f"QPushButton:disabled {{ color: rgba(255, 255, 255, 0.35); }}"
+)
 
 
 def banner_surface_style() -> str:

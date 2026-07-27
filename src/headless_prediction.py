@@ -1,6 +1,7 @@
 import multiprocessing
 import sys
 import os
+import time
 import argparse
 import cv2
 import torch
@@ -13,7 +14,8 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
-from frame_sampling import iter_sampled_frames, parse_detections
+from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
+                            format_sampling_timeline)
 import signal
 import json
 import requests
@@ -311,6 +313,8 @@ class HeadlessVideoProcessor():
         # Sequential forward sampling (no per-frame keyframe seeking); no preview needed.
         sampler = iter_sampled_frames(cap)
         had_detection = None
+        sampling_stats = {}
+        infer_start = time.perf_counter()
         try:
             while True:
                 frame_num, frame = sampler.send(had_detection)
@@ -324,10 +328,18 @@ class HeadlessVideoProcessor():
                     custom_tracker.update(detections, frame, timestamp)
 
                 self.progress_update = int((frame_num + 1) / total_frames * 100)
-        except StopIteration:
-            pass
+        except StopIteration as stop:
+            sampling_stats = stop.value or {}
 
+        infer_time = time.perf_counter() - infer_start
         cap.release()
+
+        # Adaptive frame-sampling analytics for troubleshooting/throughput tuning.
+        video_name = Path(self.video_path).name
+        tqdm.write(format_sampling_stats(video_name, infer_time, sampling_stats))
+        timeline = format_sampling_timeline(video_name, sampling_stats)
+        if timeline:
+            tqdm.write(timeline)
         custom_tracker.save_best_frames(self.output_dir, self.video_path)
 
         all_track_info = [] 
