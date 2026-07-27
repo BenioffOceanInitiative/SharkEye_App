@@ -6,7 +6,7 @@ Import colors and styles from here instead of hardcoding them in widgets so the 
 consistent and legible in both themes.
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QIcon, QPixmap, QPainter, QPalette
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWidgets import QApplication
@@ -42,10 +42,17 @@ def warning_text_color() -> str:
 
 
 # --- Icon helpers ----------------------------------------------------------
-def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
-    """Render an SVG tinted to a solid ``color`` (used to theme monochrome glyphs)."""
+def colored_svg_icon(svg_path: str, color: QColor, size: int | QSize = 16) -> QIcon:
+    """Render an SVG tinted to a solid ``color`` (used to theme monochrome glyphs).
+
+    ``size`` may be an int (square) or a ``QSize`` to preserve a non-square aspect ratio.
+    """
     renderer = QSvgRenderer(svg_path)
-    pixmap = QPixmap(size, size)
+    if isinstance(size, QSize):
+        width, height = max(size.width(), 1), max(size.height(), 1)
+    else:
+        width = height = max(int(size), 1)
+    pixmap = QPixmap(width, height)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     renderer.render(painter)
@@ -53,6 +60,30 @@ def colored_svg_icon(svg_path: str, color: QColor, size: int = 16) -> QIcon:
     painter.fillRect(pixmap.rect(), color)
     painter.end()
     return QIcon(pixmap)
+
+
+def colored_svg_icon_fit(
+    svg_path: str, color: QColor, max_edge: int = 16
+) -> tuple[QIcon, QSize]:
+    """Like ``colored_svg_icon``, but keeps the SVG's native aspect ratio.
+
+    Returns ``(icon, icon_size)`` where the longer edge is ``max_edge``.
+    """
+    renderer = QSvgRenderer(svg_path)
+    default = renderer.defaultSize()
+    if default.isEmpty():
+        icon_size = QSize(max_edge, max_edge)
+    elif default.width() >= default.height():
+        icon_size = QSize(
+            max_edge,
+            max(1, round(max_edge * default.height() / default.width())),
+        )
+    else:
+        icon_size = QSize(
+            max(1, round(max_edge * default.width() / default.height())),
+            max_edge,
+        )
+    return colored_svg_icon(svg_path, color, icon_size), icon_size
 
 
 def banner_icon(svg_path: str, size: int = 20) -> QIcon:

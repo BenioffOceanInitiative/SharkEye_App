@@ -40,6 +40,8 @@ Each run gets a timestamped folder (e.g. MMDDYYYY\_HHMMSS) containing:
   * **Meets Thresholds** — An indicator showing whether the track satisfies the confidence threshold and minimum frames (True/False)  
   * **Confidence of Longest Length** — The confidence score associated with the longest detection segment.  
   * **Label** — The classification or category assigned to the detected object.  
+  * **manual\_length\_px** — Optional manually measured length in pixels from the Frame Editor. Empty until you confirm a drawn line.  
+  * **manual\_length\_ft** — Optional manually measured length in feet from the Frame Editor. Empty until you confirm a drawn line. When set, this value is shown in the review table’s **Length** column instead of the automatic estimate.  
 * **bounding\_boxes** — Image of detection with bounding boxes, track ID, confidence, and length in feet.  
 * **frames** — Image of the detection  
 * **masks** — Image of the detection overlaid with a mask.  
@@ -56,7 +58,7 @@ The review screen lets you view all detected results from the processed videos. 
 ### Video player
 
 The center of the window displays the currently selected detection. It will display either a looping clip of the entire video with a bounding box similar to the preview screen, or a static image with a mask overlay. You can toggle between the two modes by pressing the switch in the bottom right of the frame, which is placed between two shark fin icons.
-![][image7]
+![][image7a]
 If the selected detection has confidence below 0.65, a warning will appear like “Low confidence in this detection. Please review before saving\!” appears. 
 
 ### Detection Table
@@ -66,7 +68,7 @@ The table lists each detection (or “track”) for the current or selected expe
 * **Video** — Source video file name.  
 * **Timestamp** — Time in the video (e.g. MM:SS).  
 * **Confidence** — Detection confidence (0–1). Low values may be shown in red.  
-* **Length** — Estimated length in feet.  
+* **Length** — Estimated length in feet. If you have confirmed a manual measurement with the Frame Editor, this column shows that manual length instead of the automatic estimate.  
 * **Label** — Current label (e.g. Shark, Kelp, Dolphin, Surfer, Boat, Bird, Duplicate, None, Other). Use this dropdown to correct incorrectly labeled entries.  
 * **Delete Button** — Button to remove delete an entry.
 
@@ -76,6 +78,31 @@ To enable making changes to a track or its label, use the buttons:
 * **Save Changes** — Saves any label changes (and deletions) to the experiment’s CSV and related data.
 
 If Cloud upload is enabled in Settings, the app may then share the updated experiment data with the development team. A confirmation window will appear when the upload is complete. See the ***Cloud Features*** section for additional details. 
+
+### Manual Length Correction (Frame Editor)
+
+When the mask view is active, you can open the **Frame Editor** to draw your own measurement line over the shark and save a corrected length.
+
+![][image16]
+
+1. Select a detection in the table.  
+2. Toggle the player to **mask mode** using the switch in the bottom right of the frame (between the two shark fin icons).  
+3. Press the **Edit Frame** button (draw-line icon) in the bottom left of the frame. The player is replaced by the in-place Frame Editor.  
+4. At the top of the editor, confirm the **Drone** model and **Altitude (m)**. These must match the flight so the length in feet is accurate.  
+5. Press **Draw Line (R)** (or press **R**) to enter drawing mode.  
+6. Click and drag on the image to draw a straight segment along the shark. A live length readout appears near the cursor while you draw.
+![][image17]
+7. To add another segment to the same path, hold **Shift** and click-drag from the end of the existing line.  
+8. Use the mouse wheel to **zoom**, and (when not in drawing mode) click-drag to **pan**. Press **R** again or click **Move Frame (R)** to leave drawing mode so you can pan freely.  
+9. Press **Clear Line** if you need to erase the line and start over.  
+10. Press **Confirm Changes** to save the measured length. A popup confirms that a new length was saved. Press **Cancel Changes** to leave without saving.
+![][image18]
+**What gets saved**
+
+* The measured length is written to that track’s row in the experiment CSV as **manual\_length\_px** and **manual\_length\_ft**.  
+* The automatic length fields are left unchanged.  
+* The **Length** column in the review table updates immediately to show the manual length in feet.  
+* Re-opening the experiment later will continue to show the manual length whenever those CSV fields are filled in.
 
 ### Reviewing Previous Experiments
 

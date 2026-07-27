@@ -40,7 +40,7 @@ jobs:
           
       - name: Run download_models_from_gcs.py
         run: python model_weights/download_models_from_gcs.py
-        
+
       - name: Build with PyInstaller spec
         run: pyinstaller SharkEye.spec
 
@@ -68,4 +68,7 @@ jobs:
 
       - name: Upload build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform windows
 
