@@ -129,5 +129,8 @@ jobs:
       #     parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
       #     name: ${{ env.ZIP_NAME }}
 
-      - name: Upload ARM64 build to Google Cloud Bucket
+      - name: Upload Intel build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform macos_intel

@@ -12,8 +12,9 @@
 /src/segmentation/sam_vit_h_4b8939.pth
 /2020/
 /venv/
-/DJI_0091_Trim_1/
-
+/version.json
+/DJI_0091_Trim_1g/
+/assets/image_sources.txt
 Sharkeye Todo.md
 sharkeye_log.txt
 .DS_Store
