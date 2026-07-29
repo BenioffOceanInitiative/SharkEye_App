@@ -111,5 +111,15 @@ jobs:
           echo "ZIP_NAME_ARM64=$dmgName" >> "$GITHUB_ENV"
           echo "Created $dmgName"
 
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_macOS_Silicon_$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
       - name: Upload ARM64 build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"

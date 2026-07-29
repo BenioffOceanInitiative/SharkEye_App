@@ -129,6 +129,18 @@ def calculate_adjusted_shark_length(length_raw):
     length_adj = length_raw * asl_correction_factor * depth_correction_factor
     return length_adj
 
+def get_video_length(video_path):
+    video = cv2.VideoCapture(video_path)
+
+    # Get total number of frames and frames per second
+    fps = video.get(cv2.CAP_PROP_FPS)
+    frame_count = float(video.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Calculate duration in seconds
+    duration = frame_count / fps
+    video.release()
+    return duration
+
 class SwitchControl(SwitchControl):
     """
     Child class of SwitchControl that:
@@ -5106,7 +5118,11 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
             if is_significant:
                 # Use segmentation model to generate lengths
+                seg_start = time.perf_counter()
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                seg_end = time.perf_counter()
+                seg_duration = seg_end - seg_start
+                track['segmentation_duration'] = seg_duration
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
 
                 track['longest_length'] = pixel_length
@@ -5204,23 +5220,48 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 'Meets Thresholds': meets_thresholds,
                 'Confidence of Longest Length': track['longest_conf'],
                 'Label': 'Shark',
+                'Segmentation Duration': track['segmentation_duration'],
             }
 
             all_track_info.append(track_info)
     
         return all_track_info            
 
-def mass_prediction(video_path, current_output_dir):
+def mass_prediction(video_paths, current_output_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     print(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
-    videos_tqdm = tqdm(video_path)
+    videos_tqdm = tqdm(video_paths)
     all_track_results = []
+    processing_logs = {}
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
+        path_start = time.perf_counter()
         processor = HeadlessVideoProcessor(path, model, current_output_dir)
-        all_track_results.extend(processor.run())
+        path_results = processor.run()
+        path_end = time.perf_counter()
+
+        total_processing_duration = path_end - path_start
+        total_tracks = len(path_results)
+        total_segmentation_duration = 0
+        video_length = get_video_length(path)
+
+        for track in path_results:
+            total_segmentation_duration += track['Segmentation Duration']
+
+        processing_logs[str(path.name)] = {
+            'video_length': video_length,
+            'total_tracks': total_tracks,
+            'total_processing_duration': total_processing_duration,
+            'total_segmentation_duration': total_segmentation_duration,    
+        }
+
+        all_track_results.extend(path_results)
+
+    log_path = current_output_dir / "processing_logs.json"
+    with open(log_path, "w") as f:
+        json.dump(processing_logs, f)
     
     return all_track_results
 
