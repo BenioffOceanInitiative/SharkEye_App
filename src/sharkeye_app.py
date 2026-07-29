@@ -24,7 +24,7 @@ from scipy.optimize import linear_sum_assignment
 import csv
 from tqdm import tqdm
 import re
-from utility import resource_path, get_results_dir
+from utility import resource_path, get_results_dir, select_torch_device
 from help_docs_window import HelpDocsWindow
 from frame_line_editor import FrameLineEditorWidget
 import signal
@@ -86,6 +86,46 @@ from theme import (
 DEFAULT_DETECTION_LABELS = [
     "Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Duplicate", "Glare", "None", "Other"
 ]
+
+DEFAULT_DRONE_SETTINGS = {
+    "Mavic 2 Pro": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(73)
+        }
+    },
+    "Air 2S": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(63.5),
+            "(5472, 3078)": math.radians(82.9)
+        }
+    }
+}
+
+
+def ensure_app_settings(settings_obj=None):
+    """Seed QSettings defaults when missing (fresh CI runners, first launch, etc.)."""
+    settings_obj = settings_obj or QSettings("BOSL", "SharkEye_App")
+    if not settings_obj.value("drone_settings"):
+        settings_obj.setValue("drone_settings", json.dumps(DEFAULT_DRONE_SETTINGS))
+    if not settings_obj.value("confidence_threshold"):
+        settings_obj.setValue("confidence_threshold", "0.40")
+    if not settings_obj.value("min_frames"):
+        settings_obj.setValue("min_frames", "5")
+    if not settings_obj.value("playback_min_frames"):
+        settings_obj.setValue("playback_min_frames", "5")
+    if not settings_obj.value("enable_auto_upload"):
+        settings_obj.setValue("enable_auto_upload", "false")
+    if not settings_obj.value("ignore_update"):
+        settings_obj.setValue("ignore_update", "false")
+    if not settings_obj.value("detection_labels"):
+        save_detection_labels(settings_obj, list(DEFAULT_DETECTION_LABELS))
+    return settings_obj
+
+
+def get_drone_settings_dict(settings_obj=None):
+    """Return the drone settings dict, seeding defaults if needed."""
+    settings_obj = ensure_app_settings(settings_obj)
+    return json.loads(settings_obj.value("drone_settings"))
 
 
 def get_detection_labels(settings_obj):
@@ -1812,7 +1852,7 @@ class VideoProcessingWorker(QObject):
     def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
         super().__init__()
         # Read settings 
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
@@ -1820,7 +1860,7 @@ class VideoProcessingWorker(QObject):
         self.altitude = altitude
         self.flight_location = flight_location
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
-        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
+        self.drone_settings = get_drone_settings_dict(self.settings_obj)
         
     def run(self):
         self.progress_status_changed.emit("Running Inference")
@@ -2390,8 +2430,7 @@ class ModelLoader(QObject):
     def run(self):
         model = None
         try:
-            device = torch.device('cuda' if torch.cuda.is_available() else
-                          'mps' if torch.backends.mps.is_available() else 'cpu')
+            device = select_torch_device()
             print(f"Using device: {device}")
             model = YOLO(MODEL_PATH).to(device)
             # Warm up the model with one dummy inference so the first real video doesn't
@@ -2451,43 +2490,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.check_for_update)
     
     def initialize_settings(self):
-        # Drone Settings
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
-        default_drones = {
-                "Mavic 2 Pro": {
-                    "Resolution": {
-                        "(2688, 1512)": math.radians(73)
-                    }
-                },
-                "Air 2S": {
-                    "Resolution": {
-                        "(2688, 1512)": math.radians(63.5),
-                        "(5472, 3078)": math.radians(82.9)
-                    }
-                }
-            }
-
-        if not self.settings_obj.value("drone_settings"):
-            self.settings_obj.setValue("drone_settings", json.dumps(default_drones))
-        
-        # Confidence
-        if not self.settings_obj.value("confidence_threshold"):
-            self.settings_obj.setValue("confidence_threshold", ".40")
-        if not self.settings_obj.value("min_frames"):
-            self.settings_obj.setValue("min_frames", "5")
-        if not self.settings_obj.value("playback_min_frames"):
-            self.settings_obj.setValue("playback_min_frames", "5")
-
-        # Cloud Settings
-        if not self.settings_obj.value("enable_auto_upload"):
-            self.settings_obj.setValue("enable_auto_upload", "false")
-
-        # Update check: when "true", the app skips the startup version check.
-        if not self.settings_obj.value("ignore_update"):
-            self.settings_obj.setValue("ignore_update", "false")
-
-        if not self.settings_obj.value("detection_labels"):
-            save_detection_labels(self.settings_obj, list(DEFAULT_DETECTION_LABELS))
+        self.settings_obj = ensure_app_settings()
 
     def populate_label_combo(self, combo, current_label):
         labels = get_detection_labels(self.settings_obj)
@@ -5432,12 +5435,12 @@ class FramePlayer(QLabel):
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
     def __init__(self, video_path, model, output_dir):
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
-        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
+        self.drone_settings = get_drone_settings_dict(self.settings_obj)
     
     progress_update = 0
     processing_complete = {}
@@ -5448,9 +5451,9 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
         # Same significance thresholds the tracker uses (static method has no self).
-        settings_obj = QSettings("BOSL", "SharkEye_App")
-        min_frames = int(settings_obj.value("min_frames"))
-        confidence_threshold = float(settings_obj.value("confidence_threshold"))
+        settings_obj = ensure_app_settings()
+        min_frames = int(settings_obj.value("min_frames", "5"))
+        confidence_threshold = float(settings_obj.value("confidence_threshold", "0.40"))
 
         images_saved = 0
 
@@ -5587,7 +5590,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         return all_track_info            
 
 def mass_prediction(video_paths, current_output_dir):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+    device = select_torch_device()
     print(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     

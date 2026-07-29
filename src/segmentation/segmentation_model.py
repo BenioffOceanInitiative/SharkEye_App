@@ -6,7 +6,7 @@ import time
 import math
 import threading
 from segment_anything import sam_model_registry, SamPredictor
-from utility import resource_path
+from utility import resource_path, select_torch_device
 from pathlib import Path
 
 try:
@@ -33,11 +33,8 @@ _MODEL_TYPES = {
 
 
 def _get_device() -> torch.device:
-    return torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    return select_torch_device()
+
 
 
 def _empty_torch_cache() -> None:

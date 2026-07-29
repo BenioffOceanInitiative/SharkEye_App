@@ -1,10 +1,29 @@
 import os
 import sys
 
+
+def select_torch_device():
+    """Prefer CUDA, then MPS, then CPU.
+
+    GitHub Actions macOS runners advertise MPS but typically cannot allocate
+    shared GPU memory, so skip MPS when CI=true.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
+        return torch.device("cpu")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
+
 
 def get_results_dir():
     if getattr(sys, 'frozen', False):
@@ -19,7 +38,8 @@ def get_results_dir():
     results_dir = os.path.join(base_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     return results_dir
-  
+
+
 def resource_path(relative_path):
     """ Get the absolute path to a resource, works for dev and PyInstaller. """
     if getattr(sys, 'frozen', False):
@@ -36,6 +56,7 @@ def resource_path(relative_path):
         base_path = os.path.abspath(os.path.join(base_path, '..'))
     
     return os.path.join(base_path, relative_path)
+
 
 def get_video_path(video_name):
     """

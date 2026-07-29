@@ -64,6 +64,9 @@ jobs:
           set -euxo pipefail
           rm -rf build dist __pycache__
 
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform macos_silicon
+
       - name: Build ARM64 with PyInstaller spec
         shell: bash
         run: |
@@ -124,5 +127,3 @@ jobs:
       - name: Upload ARM64 build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"
 
-      - name: Update latest_version.json
-        run: python src/manage_version.py --platform macos_silicon

@@ -135,7 +135,7 @@ def upload_results(results_dir: Path, build_name: str, commit_hash: str, save_re
     try:
         blob.download_to_filename(results_dir / 'previous_logs.csv')
         previous_logs_df = pd.read_csv(results_dir / 'previous_logs.csv', index_col=0)
-        final_logs = pd.concat([new_logs_df, previous_logs_df[::-1]], ignore_index=True)
+        final_logs = pd.concat([new_logs_df, previous_logs_df], ignore_index=True)
     except Exception:
         print("Couldn't retrieve previous logs")
         final_logs = new_logs_df
