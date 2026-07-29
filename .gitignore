@@ -36,4 +36,5 @@ model_weights/train6-weights-best.pt
 model_weights/train7-weights-best.pt
 model_weights/train8-weights-best.pt
 CUSTOM_TRACKER_BREAKDOWN.md
+version.json
 assets/images/image_sources.txt

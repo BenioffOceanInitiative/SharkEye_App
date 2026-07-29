@@ -58,6 +58,16 @@ jobs:
           Write-Host "Created $zipName"
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_Windows$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
       - name: Upload ZIP to Google Drive
         uses: willo32/google-drive-upload-action@v1
         with:
