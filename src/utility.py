@@ -12,9 +12,10 @@ def select_torch_device():
 
     if torch.cuda.is_available():
         return torch.device("cuda")
-    if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
-        return torch.device("cpu")
+    # if os.environ.get("CI", "").lower() in ("1", "true", "yes"):
+    #     return torch.device("cpu")
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
         return torch.device("mps")
     return torch.device("cpu")
 
