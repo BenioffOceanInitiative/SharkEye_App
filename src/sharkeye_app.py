@@ -52,6 +52,22 @@ from segmentation.segmentation_model import (
 )
 import ast
 
+# Windowed (console=False) PyInstaller builds set stdout/stderr to None on Windows.
+# tqdm.write/print then raise AttributeError ('NoneType' has no attribute 'write').
+def _ensure_stdio():
+    if sys.stdout is None or sys.stderr is None:
+        try:
+            log_path = os.path.join(tempfile.gettempdir(), "sharkeye_console.log")
+            log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        except Exception:
+            log_fh = io.StringIO()
+        if sys.stdout is None:
+            sys.stdout = log_fh
+        if sys.stderr is None:
+            sys.stderr = log_fh
+
+_ensure_stdio()
+
 # Add these constants for length calculation
 DRONE_ALTITUDE_M = 40
 SENSOR_WIDTH_MM = 13.2
@@ -1424,7 +1440,7 @@ class CustomTracker:
             self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
 
         if self.unique_sharks != self.last_reported_sharks:
-            tqdm.write("Shark Detected: Shark Count: {}".format(self.unique_sharks))
+            print("Shark Detected: Shark Count: {}".format(self.unique_sharks))
             self.last_reported_sharks = self.unique_sharks
 
         return active_tracks
@@ -1844,7 +1860,7 @@ class PostProcessJob(QRunnable):
 class VideoProcessingWorker(QObject):
     progress_update = pyqtSignal(int)
     processing_complete = pyqtSignal(dict, str)
-    frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
+    frame_processed = pyqtSignal(QImage)  # owned image — do not queue raw ndarray across threads
     progress_status_changed = pyqtSignal(str)  # current process summary for MainWindow.progress_status
     postproc_ready = pyqtSignal(dict, str, str)  # (payload, output_dir, video_name) for async export + clip encoding
     video_timing_ready = pyqtSignal(dict)  # per-video phase timing for the batch summary
@@ -1863,7 +1879,43 @@ class VideoProcessingWorker(QObject):
         self.drone_settings = get_drone_settings_dict(self.settings_obj)
         
     def run(self):
+        # File log for frozen builds (console=False) so inference crashes are diagnosable.
+        _log_path = os.path.join(tempfile.gettempdir(), "sharkeye_infer.log")
+
+        def _log(msg):
+            try:
+                with open(_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+            except Exception:
+                pass
+
+        try:
+            self._run_inference(_log)
+        except Exception:
+            import traceback
+            _log("FATAL:\n" + traceback.format_exc())
+            # Don't re-raise: an uncaught worker exception can abort the frozen
+            # Qt process (BEX64 / 0xc0000409). Let the UI tear down cleanly.
+            try:
+                self.progress_status_changed.emit("")
+                self.processing_complete.emit({}, os.path.basename(self.video_path))
+            except Exception:
+                pass
+
+    def _run_inference(self, _log):
         self.progress_status_changed.emit("Running Inference")
+        _log(f"start video={self.video_path}")
+        # Re-bind the model on this worker thread. It was loaded/warmed on ModelLoader's
+        # QThread; sharing a CUDA module across QThreads is a common frozen-Windows abort.
+        try:
+            device = select_torch_device()
+            self.model.to(device)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            _log(f"model on {device}")
+        except Exception as e:
+            _log(f"model rebind failed: {e}")
+
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
@@ -1871,7 +1923,8 @@ class VideoProcessingWorker(QObject):
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+        _log(f"opened {video_width}x{video_height} frames={total_frames} fps={fps}")
+
         custom_tracker.fov_radians = self.drone_settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
 
@@ -1907,6 +1960,8 @@ class VideoProcessingWorker(QObject):
 
                 results = self.model(frame, classes=[0], verbose=False)
                 frames_sampled += 1
+                if frames_sampled == 1:
+                    _log(f"first infer ok frame={frame_num} shape={getattr(frame, 'shape', None)}")
 
                 detections = parse_detections(results, self.detection_threshold)
                 had_detection = bool(detections)
@@ -1922,7 +1977,15 @@ class VideoProcessingWorker(QObject):
                     # widget is far smaller than a source frame, so shipping full 4K wastes CPU.
                     preview = self.draw_bounding_boxes(frame, detections) if had_detection else frame
                     preview = downscale_for_preview(preview)
-                    self.frame_processed.emit(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                    # Build an owned QImage on the worker thread. Queuing raw np.ndarray
+                    # via pyqtSignal has aborted frozen Windows builds in Qt6Core
+                    # (0xc0000409) before any frame appeared.
+                    rgb = np.ascontiguousarray(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                    h, w, _ = rgb.shape
+                    qimg = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format.Format_RGB888).copy()
+                    self.frame_processed.emit(qimg)
+                    if frames_sampled == 1:
+                        _log(f"first preview emitted {w}x{h}")
                     last_preview = now
 
                 self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
@@ -1931,6 +1994,7 @@ class VideoProcessingWorker(QObject):
 
         infer_time = time.perf_counter() - infer_start
         cap.release()
+        _log(f"infer loop done sampled={frames_sampled} dets={total_detections} t={infer_time:.2f}s")
 
         if not QThread.currentThread().isInterruptionRequested():
             significant_tracks = custom_tracker.get_significant_tracks()
@@ -1978,6 +2042,10 @@ class VideoProcessingWorker(QObject):
                 'tracks': track_count,
             })
             self.processing_finished(significant_tracks)
+        else:
+            _log("interrupted before save")
+            self.progress_status_changed.emit("")
+            self.processing_complete.emit({}, os.path.basename(self.video_path))
 
     def _extract_postproc_payload(self, tracks):
         """Move frame buffers out of `tracks` into a standalone payload for async
@@ -4679,17 +4747,20 @@ class MainWindow(QMainWindow):
     def generate_filename(self, track, new_label):
         return f"{track['video_name']}_{new_label.lower()}{track['unique_id']}_time{track['time']}_det{track['detections']}_avgConf{int(track['avg_conf']*100):02d}_bestConf{int(track['best_conf']*100):02d}_len{track['length'].replace('ft', 'ft').replace('in', 'in')}.jpg"
 
-    def update_frame_display(self, frame):
+    def update_frame_display(self, q_image):
         # First frame of this video arrived — switch the busy bar back to determinate.
         if getattr(self, "_awaiting_first_frame", False):
             self._awaiting_first_frame = False
             if getattr(self, "progress_bar", None) is not None:
                 self.progress_bar.setRange(0, 100)
-        height, width, channel = frame.shape
-        bytes_per_line = 3 * width
-        q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        if q_image is None or q_image.isNull():
+            return
         pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(self.frame_display.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled_pixmap = pixmap.scaled(
+            self.frame_display.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         self.frame_display.setPixmap(scaled_pixmap)
         self.frame_display.show()
 
