@@ -20,6 +20,41 @@ except NameError:
 SRC = HERE / "src"                                   # your source dir
 ENTRY = SRC / "sharkeye_app.py"                      # your main script
 
+# ---------- build version stamp ----------
+# Write a version.json bundled at the app root so the installed app can identify
+# itself (used for update checks against sharkeye-app-build/latest_version.json).
+import json, platform, subprocess
+
+
+def _detect_os_key():
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform.startswith("darwin"):
+        return "macos_silicon" if platform.machine().lower() in ("arm64", "aarch64") else "macos_intel"
+    return sys.platform
+
+
+def _git(args, default=""):
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=str(HERE),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        return default
+
+
+_commit = os.environ.get("GITHUB_SHA") or _git(["rev-parse", "HEAD"])
+_committed_at = _git(["show", "-s", "--format=%cI", _commit]) if _commit else ""
+_version_info = {
+    "os": _detect_os_key(),
+    "commit": _commit,
+    "committed_at": _committed_at,
+}
+_version_path = HERE / "version.json"
+_version_path.write_text(json.dumps(_version_info, indent=2) + "\n", encoding="utf-8")
+print("SharkEye build version.json:", _version_info)
+
 # ---------- hidden imports ----------
 hidden_imports = []
 hidden_imports += collect_submodules("PyQt6.QtCore")
@@ -54,6 +89,7 @@ datas += [
     (str(HERE / "model_weights" / "runs-detect-train-weights-best.pt"), "model_weights"),
     (str(HERE / "model_weights" / "sam_vit_b_01ec64.pth"),              "model_weights"),
     (str(HERE / "docs"), "docs"),
+    (str(_version_path), "."),                        # build identifier: os/commit/committed_at
 ]
 
 # ---------- native binaries (DLLs/SOs) ----------

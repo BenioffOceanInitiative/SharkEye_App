@@ -357,7 +357,9 @@ class HeadlessVideoProcessor():
                 'Lowest Confidence': min(track['confidences']),
                 'Highest Confidence Length': track['longest_length'],
                 'Number of Detections': len(track['confidences']),
-                'Meets Thresholds': meets_thresholds
+                'Meets Thresholds': meets_thresholds,
+                'manual_length_px': '',
+                'manual_length_ft': '',
             }
 
             all_track_info.append(track_info)

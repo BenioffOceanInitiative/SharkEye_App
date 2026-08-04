@@ -113,3 +113,6 @@ jobs:
 
       - name: Upload ARM64 build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME_ARM64 }}"
+
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform macos_silicon
