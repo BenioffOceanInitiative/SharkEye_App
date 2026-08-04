@@ -14,6 +14,9 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
+from log_config import get_logger
+
+logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
                             format_sampling_timeline)
 import signal
@@ -111,7 +114,7 @@ class CustomTracker:
             self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
 
         if self.unique_sharks != self.last_reported_sharks:
-            tqdm.write("Shark Detected: Shark Count: {}".format(self.unique_sharks))
+            logger.info("Shark detected — unique shark count: %d", self.unique_sharks)
             self.last_reported_sharks = self.unique_sharks
 
         return active_tracks
@@ -206,7 +209,7 @@ class CustomTracker:
             # length and get no mask.
             is_significant = num_frames >= self.min_frames and avg_confidence > self.confidence_threshold
             if not is_significant:
-                print('Track detected below threshold')
+                logger.debug('Track detected below threshold')
 
             longest_frame = track['longest_frame']
             longest_timestamp = track['longest_timestamp']
@@ -258,7 +261,7 @@ class CustomTracker:
 
             images_saved += 1
 
-        tqdm.write(f"Shark Images Saved: {images_saved}")
+        logger.info(f"[segmentation] saved {images_saved} track image(s)")
 
     def reset(self):
         """Reset tracker state"""
@@ -336,10 +339,10 @@ class HeadlessVideoProcessor():
 
         # Adaptive frame-sampling analytics for troubleshooting/throughput tuning.
         video_name = Path(self.video_path).name
-        tqdm.write(format_sampling_stats(video_name, infer_time, sampling_stats))
+        logger.info(format_sampling_stats(video_name, infer_time, sampling_stats))
         timeline = format_sampling_timeline(video_name, sampling_stats)
         if timeline:
-            tqdm.write(timeline)
+            logger.info(timeline)
         custom_tracker.save_best_frames(self.output_dir, self.video_path)
 
         all_track_info = [] 
@@ -381,7 +384,7 @@ class HeadlessVideoProcessor():
     
 def mass_prediction(video_paths, current_output_dir, sam_model_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
     videos_tqdm = tqdm(video_paths)
@@ -426,9 +429,9 @@ def main():
             writer = csv.DictWriter(file, fieldnames=results[0].keys())
             writer.writeheader()
             writer.writerows(results)
-        print(f"Results saved to {csv_path}")
+        logger.info(f"Results saved to {csv_path}")
     else:
-        print("No valid tracks were found.")
+        logger.warning("No valid tracks were found.")
 
 if __name__ == '__main__':
     main()       

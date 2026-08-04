@@ -7,6 +7,9 @@ import math
 import threading
 from segment_anything import sam_model_registry, SamPredictor
 from utility import resource_path
+from log_config import get_logger
+
+logger = get_logger("sharkeye.segment")
 from pathlib import Path
 
 try:
@@ -62,9 +65,9 @@ def _load_sam_predictor(checkpoint_path: Path) -> SamPredictor:
 
     missing, unexpected = sam.load_state_dict(ckpt, strict=False)
     if missing:
-        print(f"[SAM] Missing keys: {len(missing)} (often OK for buffers)")
+        logger.info(f"[SAM] Missing keys: {len(missing)} (often OK for buffers)")
     if unexpected:
-        print(f"[SAM] Unexpected keys: {len(unexpected)} (ignored)")
+        logger.info(f"[SAM] Unexpected keys: {len(unexpected)} (ignored)")
 
     sam.to(device=device)
     return SamPredictor(sam)
@@ -90,7 +93,7 @@ class SamPredictorCache:
             if cls._predictor is not None and cls._checkpoint_key == sam_checkpoint:
                 return cls._predictor
             cls.release()
-            print(f"[SAM] Loading model from {checkpoint_path.name}")
+            logger.info(f"[SAM] Loading model from {checkpoint_path.name}")
             cls._predictor = _load_sam_predictor(checkpoint_path)
             cls._checkpoint_key = sam_checkpoint
             return cls._predictor
@@ -197,7 +200,7 @@ def run_prediction(
 
     end_time = time.time()
     if show_time:
-        print("\nTime taken to compute prediction:", end_time - start_time)
+        logger.debug("Time taken to compute prediction: %.3fs", end_time - start_time)
     return masks
 
 
@@ -232,7 +235,6 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
     """ Takes in a segmentation mask in the form of a boolean numpy array and returns the length of
     the longest line within the mask. If draw_line is True, will display the mask and the calculated line"""
     mask = np.squeeze(mask)  # Adjust dimensions
-    start_time = time.time()
     cleaned_mask = largest_region(mask)
     points = np.argwhere(cleaned_mask)
 
@@ -251,8 +253,6 @@ def find_pixel_length(mask, draw_line=False, viz_name=None):
 
     longest_line = best_pair
     max_length = max_dist
-    end_time = time.time()
-    print(f"Elapsed time to find length {(end_time - start_time)}")
     # Visualization
     if draw_line:
         fig, ax = plt.subplots(figsize=(8, 8))
@@ -294,22 +294,22 @@ if __name__ == "__main__":
         image = load_image('./src/segmentation/data/DJI_0091_Trim_1_images_frame113.jpg')
         bboxes = convert_yolo('./src/segmentation/data/DJI_0091_Trim_1_annotations_frame113.txt')[0]
 
-        print("Running prediction on cropped image")
+        logger.debug("Running prediction on cropped image")
         cropped = crop_image(image, bboxes)
         prediction = run_prediction(image, cropped, cropped=True)
-        print(calculate_shark_length_from_pixel(find_pixel_length(prediction, draw_line=True)))
+        logger.debug(calculate_shark_length_from_pixel(find_pixel_length(prediction, draw_line=True)))
 
-        print(" Running prediction on image with bounding boxes")
+        logger.debug(" Running prediction on image with bounding boxes")
         prediction = run_prediction(image, bboxes)
-        print(calculate_shark_length_from_pixel(find_pixel_length(prediction, draw_line=True)))
+        logger.debug(calculate_shark_length_from_pixel(find_pixel_length(prediction, draw_line=True)))
 
         np.save('./mask.npy', prediction)
         release_sam_model()
 
     else:
         image = load_image('./src/segmentation/data/DJI_0091_Trim_1_images_frame113.jpg')
-        print(image)
+        logger.debug(image)
         mask = np.load('./src/segmentation/mask.npy')
 
         draw_mask(mask, image)
-        print(calculate_shark_length_from_pixel(find_pixel_length(mask, draw_line=True)))
+        logger.debug(calculate_shark_length_from_pixel(find_pixel_length(mask, draw_line=True)))

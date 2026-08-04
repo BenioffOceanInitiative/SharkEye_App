@@ -13,13 +13,22 @@ parsing lands in one place instead of the three copies that used to exist.
 import cv2
 
 
-def iter_sampled_frames(cap, min_skip=10, max_skip=60, empty_backoff_frames=None):
+def iter_sampled_frames(cap, min_skip=10, max_skip=60, empty_backoff_frames=None,
+                        max_skip_seconds=2.0):
     """Yield ``(frame_index, frame)`` sampled forward through an open ``cv2.VideoCapture``.
 
     The stride adapts to detections: the consumer sends back a truthy value when the
     yielded frame produced a detection. On a hit the stride resets to ``min_skip``; after a
     run of empty frames spanning ``empty_backoff_frames`` it doubles toward ``max_skip``
     (matching the original inline behavior).
+
+    ``max_skip`` is a frame count, but the meaningful ceiling on how long an object can go
+    unsampled is wall-clock, not frames — the same 60-frame stride is 2s at 30fps but 2.5s
+    at 24fps. ``max_skip_seconds`` therefore imposes a wall-clock cap: the effective
+    ``max_skip`` is clamped to ``round(fps * max_skip_seconds)``. This only ever *tightens*
+    the stride (for low-frame-rate clips where 60 frames would exceed the time budget) and
+    never loosens it, so higher-fps footage keeps its existing, denser cadence. Pass
+    ``max_skip_seconds=None`` to disable the clamp and use the raw frame count.
 
     On normal completion the generator *returns* a stats dict (readable via
     ``StopIteration.value``) describing how the adaptive stride spent the clip — how many
@@ -42,6 +51,11 @@ def iter_sampled_frames(cap, min_skip=10, max_skip=60, empty_backoff_frames=None
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     if empty_backoff_frames is None:
         empty_backoff_frames = int(fps)  # ~1 second of consecutive empty frames
+
+    # Cap the accelerated stride at a wall-clock budget (never below min_skip, never
+    # looser than the caller's frame-count max_skip).
+    if max_skip_seconds:
+        max_skip = max(min_skip, min(max_skip, int(round(fps * max_skip_seconds))))
 
     frame_skip = min_skip
     consecutive_empty = 0
@@ -132,12 +146,16 @@ def format_sampling_stats(video_name, infer_wall_seconds, stats):
     skipped_s = skipped / fps
     accel_skipped_s = accel_skipped / fps
     realtime_x = duration_s / infer_wall_seconds if infer_wall_seconds > 0 else 0.0
-    ms_per_frame = (infer_wall_seconds / sampled * 1000) if sampled else 0.0
 
+    # NOTE: the sampler skips *inference* on `skipped` frames, but still decodes every
+    # frame to advance the capture — so `skipped` frames are NOT decode savings. The
+    # per-phase decode vs. yolo split lives in the app's [timing] line; here we report
+    # only the sampling coverage and how much source-video time inference actually
+    # visited (the acceleration payoff).
     return (f"[stats] {video_name}: source={duration_s:.1f}s ({total_frames}f @{fps:.0f}fps) | "
-            f"inference wall={infer_wall_seconds:.1f}s ({realtime_x:.1f}x realtime, "
-            f"{ms_per_frame:.0f}ms/frame) | sampled={sampled}f, skipped={skipped}f | "
-            f"video time skipped total={skipped_s:.1f}s, by acceleration={accel_skipped_s:.1f}s")
+            f"processed wall={infer_wall_seconds:.1f}s ({realtime_x:.1f}x realtime) | "
+            f"inferred on {sampled}f, inference-skipped {skipped}f | "
+            f"video time inference-skipped total={skipped_s:.1f}s, by acceleration={accel_skipped_s:.1f}s")
 
 
 def _format_clock(seconds):

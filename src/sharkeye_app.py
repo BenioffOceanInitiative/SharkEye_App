@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QProgressBar, QStackedWidget, QSizePolicy, QMessageBox, QDialog, QLayout, 
                              QTableWidget, QTableWidgetItem, QDialogButtonBox, QLineEdit, QTreeWidget, 
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
-                             QSlider, QButtonGroup, QMenuBar)
+                             QSlider, QMenuBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QEventLoop, qInstallMessageHandler, QUrl
 from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
@@ -32,6 +32,9 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
+from log_config import get_logger
+
+logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
 from frame_line_editor import FrameLineEditorWidget
 import signal
@@ -224,6 +227,12 @@ class SwitchControl(SwitchControl):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # The base widget is a QCheckBox custom-painted as a pill switch. On macOS the
+        # native style still draws a focus ring around the (invisible) checkbox indicator,
+        # which surfaces as a stray square over the switch handle. The switch is toggled by
+        # clicking, so suppress that focus ring; harmless/no-op on other platforms.
+        self.setAttribute(Qt.WidgetAttribute.WA_MacShowFocusRect, False)
 
         #
         # Disable dragging on the circle
@@ -794,10 +803,10 @@ class HistoricalExperimentsPage(QWidget):
     def on_upload(self):
         checked = self.find_checked_boxes()
         api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
-        print(f"[upload] Manual upload requested for {len(checked)} selected experiment(s)")
+        logger.info(f"[upload] Manual upload requested for {len(checked)} selected experiment(s)")
         for experiment_dir in checked:
             zip_name = f'{Path(experiment_dir).name}.zip'
-            print(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
+            logger.info(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
             try:
                 file_count = 0
                 buffer = io.BytesIO()
@@ -814,18 +823,18 @@ class HistoricalExperimentsPage(QWidget):
 
                 zip_size = buffer.tell()
                 buffer.seek(0)
-                print(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
+                logger.info(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
                       f"POST -> {api_url}")
                 files = {'file': (zip_name, buffer, 'application/zip')}
                 response = requests.post(api_url, files=files)
                 response.raise_for_status()
-                print(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
+                logger.info(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
                 upload_status, message = "Upload Finished", "Folder uploaded successfully"
             except requests.RequestException as e:
-                print(f"[upload] {zip_name}: FAILED (request error): {e}")
+                logger.error(f"[upload] {zip_name}: FAILED (request error): {e}")
                 upload_status, message = "Upload Error", "Failed to Upload folder to cloud storage: {}".format(str(e))
             except Exception as e:
-                print(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
+                logger.error(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
                 upload_status, message = "Upload Error", "An unexpected error occurred: {}".format(str(e))
             QMessageBox.information(self, upload_status, message)
 
@@ -1434,7 +1443,7 @@ class CloudUploadPage(HistoricalExperimentsPage):
 
     def _on_auto_upload_clicked(self, checked):
         if not checked:
-            print("[upload] Auto-upload disabled by user")
+            logger.info("[upload] Auto-upload disabled by user")
             self.settings_obj.setValue("enable_auto_upload", "false")
             return
         reply = QMessageBox.question(
@@ -1446,12 +1455,12 @@ class CloudUploadPage(HistoricalExperimentsPage):
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            print("[upload] Auto-upload enable declined at confirmation dialog")
+            logger.info("[upload] Auto-upload enable declined at confirmation dialog")
             self.auto_upload_checkbox.blockSignals(True)
             self.auto_upload_checkbox.setChecked(False)
             self.auto_upload_checkbox.blockSignals(False)
             return
-        print("[upload] Auto-upload enabled by user")
+        logger.info("[upload] Auto-upload enabled by user")
         self.settings_obj.setValue("enable_auto_upload", "true")
 
     def _on_check_updates_clicked(self, checked):
@@ -1518,7 +1527,7 @@ class CustomTracker:
             self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
 
         if self.unique_sharks != self.last_reported_sharks:
-            tqdm.write("Shark Detected: Shark Count: {}".format(self.unique_sharks))
+            logger.info("Shark detected — unique shark count: %d", self.unique_sharks)
             self.last_reported_sharks = self.unique_sharks
 
         return active_tracks
@@ -1608,7 +1617,6 @@ class CustomTracker:
             if not self.is_significant_track(track):
                 continue
 
-            print("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
 
@@ -1632,7 +1640,6 @@ class CustomTracker:
                 # Use segmentation model to generate lengths
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
-                print("Running Segmentation")
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length,
                                                                          original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
                                                                          drone_altitude=self.drone_altitude,
@@ -1672,7 +1679,7 @@ class CustomTracker:
 
             images_saved += 1
 
-        print(f"Shark Images Saved: {images_saved}")
+        logger.info(f"[segmentation] saved {images_saved} track image(s)")
 
     def reset(self):
         """Reset tracker state"""
@@ -1793,7 +1800,7 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                     frame_size = (w_px, h_px)
                     writer = cv2.VideoWriter(clip_path, fourcc, fps, frame_size)
                     if not writer.isOpened():
-                        print(f"Could not open video writer for {clip_path}; skipping track {key}")
+                        logger.error(f"Could not open video writer for {clip_path}; skipping track {key}")
                         writer = None
                         break
 
@@ -1805,7 +1812,7 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
 
             if writer is not None:
                 writer.release()
-                print(f"Saved clip: {clip_path}")
+                logger.info(f"Saved clip: {clip_path}")
         finally:
             # Free the frame buffers as we go
             track['frames'] = None
@@ -1821,7 +1828,7 @@ def export_training_frames_locally(payload, video_stem, annotation_format="yolo"
     """
     fmt = (annotation_format or "yolo").strip().lower()
     if fmt not in ("coco", "yolo"):
-        print(f"Unsupported annotation_format {annotation_format!r}; skipping training export")
+        logger.warning(f"Unsupported annotation_format {annotation_format!r}; skipping training export")
         return
 
     category_names = [
@@ -1920,9 +1927,9 @@ def export_training_frames_locally(payload, video_stem, annotation_format="yolo"
         export_path = os.path.join(export_dir, f"{video_stem}_training_frames.zip")
         with open(export_path, "wb") as f:
             f.write(buffer.getvalue())
-        print(f"Training frames zip saved to {export_path}")
+        logger.info(f"Training frames zip saved to {export_path}")
     except Exception as e:
-        print(f"Training frame export failed: {e}")
+        logger.error(f"Training frame export failed: {e}")
 
 
 class PostProcessJob(QRunnable):
@@ -1948,7 +1955,7 @@ class PostProcessJob(QRunnable):
             export_training_frames_locally(self.payload, video_stem, annotation_format="yolo")
             t_export = time.perf_counter() - t0
         except Exception as e:
-            print(f"Async training-frame export failed: {e}")
+            logger.error(f"Async training-frame export failed: {e}")
         try:
             t0 = time.perf_counter()
             encode_track_clips(self.payload, self.output_dir, self.video_name,
@@ -1956,8 +1963,8 @@ class PostProcessJob(QRunnable):
                                self.text_thickness, self.text_scale)
             t_clip = time.perf_counter() - t0
         except Exception as e:
-            print(f"Async clip encoding failed: {e}")
-        print(f"[timing] {self.video_name}: (background) export={t_export:.2f}s clip={t_clip:.2f}s")
+            logger.error(f"Async clip encoding failed: {e}")
+        logger.info(f"[timing] {self.video_name}: (background) export={t_export:.2f}s clip={t_clip:.2f}s")
 
 
 class VideoProcessingWorker(QObject):
@@ -1985,7 +1992,6 @@ class VideoProcessingWorker(QObject):
         self.progress_status_changed.emit("Running Inference")
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -2004,6 +2010,13 @@ class VideoProcessingWorker(QObject):
         frames_sampled = 0
         total_detections = 0
         infer_start = time.perf_counter()
+        # Split the loop wall-time into its real phases. On 4K/5.3K H.265 footage the
+        # dominant cost is *video decode* (the sampler grab()s through every skipped
+        # frame to advance), not YOLO inference — decode is ~30fps-bound while inference
+        # is ~40ms/frame. Timing them separately keeps the [timing] line honest instead
+        # of attributing the whole wall to "inference".
+        decode_time = 0.0   # time inside the sampler (grab/retrieve = H.265 decode)
+        model_time = 0.0     # time inside YOLO inference on sampled frames
 
         # Live preview is a courtesy view, not the output. Cap empty-frame updates at
         # ~20 fps so we don't color-convert, copy across the thread boundary, and
@@ -2019,13 +2032,17 @@ class VideoProcessingWorker(QObject):
         sampling_stats = {}
         try:
             while True:
+                _t_decode = time.perf_counter()
                 frame_num, frame = sampler.send(had_detection)
+                decode_time += time.perf_counter() - _t_decode
 
                 if QThread.currentThread().isInterruptionRequested():
-                    print("Processing interrupted")
+                    logger.warning("Processing interrupted")
                     break
 
+                _t_model = time.perf_counter()
                 results = self.model(frame, classes=[0], verbose=False)
+                model_time += time.perf_counter() - _t_model
                 frames_sampled += 1
 
                 detections = parse_detections(results, self.detection_threshold)
@@ -2056,7 +2073,7 @@ class VideoProcessingWorker(QObject):
             significant_tracks = custom_tracker.get_significant_tracks()
             filtered_count = len(custom_tracker.tracks) - len(significant_tracks)
             if filtered_count:
-                print(f"Filtered out {filtered_count} track(s) below confidence/minimum-frame thresholds")
+                logger.info(f"Filtered out {filtered_count} track(s) below confidence/minimum-frame thresholds")
 
             # Only save results if not interrupted
             self.progress_status_changed.emit("Running Segmentation")
@@ -2082,20 +2099,37 @@ class VideoProcessingWorker(QObject):
             self.postproc_ready.emit(payload, self.output_dir, Path(self.video_path).name)
 
             # Per-phase timing breakdown (export + clip are timed in the background job).
+            # `infer_time` is the whole sampling-loop wall; break it into decode vs. YOLO
+            # so the real bottleneck is visible. `other` is preview/tracking/progress
+            # overhead (the remainder of the loop).
             track_count = len(significant_tracks)
-            print(f"[timing] {Path(self.video_path).name}: "
-                  f"inference={infer_time:.1f}s ({frames_sampled}/{total_frames} frames, "
-                  f"{total_detections} dets) segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
+            other_time = max(0.0, infer_time - decode_time - model_time)
+            decode_pct = (decode_time / infer_time * 100) if infer_time > 0 else 0.0
+            ms_per_infer = (model_time / frames_sampled * 1000) if frames_sampled else 0.0
+            logger.info(f"[timing] {Path(self.video_path).name}: "
+                  f"loop={infer_time:.1f}s [decode={decode_time:.1f}s ({decode_pct:.0f}%), "
+                  f"yolo={model_time:.1f}s ({frames_sampled} frames, {ms_per_infer:.0f}ms/f), "
+                  f"other={other_time:.1f}s] {total_detections} dets | "
+                  f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
                   f"tracks={track_count} (export+clip deferred to background)")
+
+            # Per-track discovery line: one row per significant track so a run's actual
+            # findings (when, how confident, how long, how many detections) are legible
+            # from the log instead of only a bare count.
+            for tid, tr in significant_tracks.items():
+                confs = tr.get('confidences') or [0.0]
+                logger.info(f"[track {tid}] t={CustomTracker._format_timestamp(tr.get('best_timestamp', 0))} "
+                      f"peak_conf={max(confs):.2f} avg_conf={np.mean(confs):.2f} "
+                      f"dets={len(confs)} length={tr.get('longest_length', 0):.1f}ft")
 
             # Adaptive frame-sampling analytics: how much source-video time the
             # acceleration skipped vs. the wall time spent on inference, then a timeline of
             # when acceleration was engaged vs. when inference ran full-rate.
             video_name = Path(self.video_path).name
-            print(format_sampling_stats(video_name, infer_time, sampling_stats))
+            logger.info(format_sampling_stats(video_name, infer_time, sampling_stats))
             timeline = format_sampling_timeline(video_name, sampling_stats)
             if timeline:
-                print(timeline)
+                logger.info(timeline)
 
             fps_eff = sampling_stats.get('fps') or 30
             accel_skipped_frames = sampling_stats.get('accelerated_skipped_frames', 0)
@@ -2155,7 +2189,6 @@ class VideoProcessingWorker(QObject):
 
     def save_detections_csv(self, tracks, output_dir, tracker=None):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
-        print(f"Starting save to {csv_path}")
         with open(csv_path, 'w', newline='') as csvfile:
             fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
@@ -2184,8 +2217,8 @@ class VideoProcessingWorker(QObject):
                     'manual_length_px': '',
                     'manual_length_ft': '',
                 })
-            print("Done saving csv")       
-        
+            logger.info(f"[csv] wrote {len(tracks)} track(s) -> {csv_path}")
+
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -2380,7 +2413,7 @@ class ModelLoader(QObject):
         try:
             device = torch.device('cuda' if torch.cuda.is_available() else
                           'mps' if torch.backends.mps.is_available() else 'cpu')
-            print(f"Using device: {device}")
+            logger.info(f"Using device: {device}")
             model = YOLO(MODEL_PATH).to(device)
             # Warm up the model with one dummy inference so the first real video doesn't
             # pay the one-time kernel-compilation cost mid-run (which showed up as a
@@ -2388,11 +2421,11 @@ class ModelLoader(QObject):
             try:
                 warmup_frame = np.zeros((ORIGINAL_HEIGHT, ORIGINAL_WIDTH, 3), dtype=np.uint8)
                 model(warmup_frame, classes=[0], verbose=False)
-                print("Model warmup complete")
+                logger.info("Model warmup complete")
             except Exception as e:
-                print(f"Model warmup skipped: {e}")
+                logger.warning(f"Model warmup skipped: {e}")
         except Exception as e:
-            print(f"Model load failed: {e}")
+            logger.error(f"Model load failed: {e}")
 
         # Preload + warm up SAM here too. Loading the ~375MB checkpoint (and compiling the
         # first image-encoder kernels) otherwise happened inside the first video's
@@ -2401,9 +2434,9 @@ class ModelLoader(QObject):
             predictor = get_sam_predictor()
             predictor.set_image(np.zeros((640, 640, 3), dtype=np.uint8))
             predictor.reset_image()  # free the warmup embedding; keep the loaded weights
-            print("SAM warmup complete")
+            logger.info("SAM warmup complete")
         except Exception as e:
-            print(f"SAM warmup skipped: {e}")
+            logger.warning(f"SAM warmup skipped: {e}")
 
         self.finished.emit(model)
 
@@ -2506,7 +2539,7 @@ class MainWindow(QMainWindow):
         settings_dialog.detection_labels_page.labels_updated.connect(self.refresh_label_combos)
         settings_dialog.exec()
         # Pick up a default-speed change made in Playback Settings without needing a restart.
-        if hasattr(self, "speed_button_group"):
+        if hasattr(self, "speed_cycle_button"):
             self.frame_player.set_speed(self.playback_speed)
             self._check_speed_button(self.playback_speed)
 
@@ -2532,7 +2565,7 @@ class MainWindow(QMainWindow):
     def on_version_check_finished(self, update_available, os_key, error):
         if error:
             # Never interrupt the user over a failed/unreachable update check.
-            print(f"Version check failed: {error}")
+            logger.error(f"Version check failed: {error}")
             return
         if update_available:
             self.show_update_dialog(os_key)
@@ -2659,7 +2692,7 @@ class MainWindow(QMainWindow):
             )
             self._pending_start = False
             return
-        print("Models ready")
+        logger.info("Models ready")
         # If the user already clicked Process while the model was loading, start now.
         if self._pending_start:
             self._pending_start = False
@@ -2674,9 +2707,11 @@ class MainWindow(QMainWindow):
         # Banner container with left/right buttons and centered logo
         banner_widget = QWidget()
         banner_widget.setStyleSheet(banner_surface_style())
-        banner_layout = QHBoxLayout(banner_widget)
+        # A grid whose single cell holds three overlapping full-width layers (left group,
+        # right group, logo). The logo therefore centers on the *whole* banner width, so it
+        # never drifts when the leading/trailing button groups differ in width.
+        banner_layout = QGridLayout(banner_widget)
         banner_layout.setContentsMargins(20, 8, 20, 8)
-        banner_layout.setSpacing(8)
 
         # Left button (exposed as attribute for later connections)
         self.banner_left_button = self._make_banner_button(
@@ -2714,13 +2749,23 @@ class MainWindow(QMainWindow):
             "Help", "question-circle-fill.svg", "Open the user guide")
         self.banner_help_button.clicked.connect(self.show_help_docs)
 
-        # Layout: left button, spacer, logo, spacer, right buttons
-        banner_layout.addWidget(self.banner_left_button, 0, Qt.AlignmentFlag.AlignLeft)
-        banner_layout.addStretch(1)
-        banner_layout.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignCenter)
-        banner_layout.addStretch(1)
-        banner_layout.addWidget(self.banner_right_button, 0, Qt.AlignmentFlag.AlignRight)
-        banner_layout.addWidget(self.banner_help_button, 0, Qt.AlignmentFlag.AlignRight)
+        # Trailing group: settings + help, sized to their content so it hugs the right
+        # edge without spanning the cell (a full-width sibling would repaint over — and
+        # erase — the left button beneath it).
+        right_group = QWidget()
+        right_row = QHBoxLayout(right_group)
+        right_row.setContentsMargins(0, 0, 0, 0)
+        right_row.setSpacing(8)
+        right_row.addWidget(self.banner_right_button)
+        right_row.addWidget(self.banner_help_button)
+
+        # All three occupy cell (0, 0). Each is content-sized and edge/center-aligned, so
+        # they sit at the left edge, right edge, and true center without overlapping — the
+        # logo is centered on the full banner width regardless of the side groups' widths.
+        v_center = Qt.AlignmentFlag.AlignVCenter
+        banner_layout.addWidget(self.banner_left_button, 0, 0, Qt.AlignmentFlag.AlignLeft | v_center)
+        banner_layout.addWidget(right_group, 0, 0, Qt.AlignmentFlag.AlignRight | v_center)
+        banner_layout.addWidget(logo_label, 0, 0, Qt.AlignmentFlag.AlignCenter)
 
         banner_widget.setFixedHeight(60)
         self.layout.addWidget(banner_widget)
@@ -3062,7 +3107,7 @@ class MainWindow(QMainWindow):
             if drone_name in drone_data and "Resolution" in drone_data[drone_name]:
                 return [eval(res) for res in drone_data[drone_name]["Resolution"].keys()]
         except Exception as e:
-            print(f"Error loading drone resolutions: {e}")
+            logger.error(f"Error loading drone resolutions: {e}")
             return []
         
         return []
@@ -3156,7 +3201,7 @@ class MainWindow(QMainWindow):
 
     def process_video(self, video_path):
         self.current_video = video_path
-        print(f"[{self.current_video_index + 1}/{self.total_videos}] Processing {os.path.basename(video_path)}")
+        logger.info(f"[{self.current_video_index + 1}/{self.total_videos}] Processing {os.path.basename(video_path)}")
 
         # Reset all video list items to remove any existing emojis
         for i in range(self.video_list.rowCount()):
@@ -3301,7 +3346,7 @@ class MainWindow(QMainWindow):
             
             # Wait for a short time for the thread to finish
             if not self.processing_thread.wait(1000):  # Wait for 1 seconds
-                print("Thread did not finish in time, forcefully terminating")
+                logger.warning("Thread did not finish in time, forcefully terminating")
                 self.processing_thread.terminate()
                 self.processing_thread.wait()
 
@@ -3333,7 +3378,7 @@ class MainWindow(QMainWindow):
         self.processed_videos = 0
         self.tracks = {}
 
-        print("Processing cancelled")
+        logger.info("Processing cancelled")
 
     def update_remove_buttons(self):
         has_any_items = self.video_list.rowCount() > 0
@@ -3346,7 +3391,15 @@ class MainWindow(QMainWindow):
     def select_videos(self):
         file_dialog = QFileDialog()
         video_files, _ = file_dialog.getOpenFileNames(self, "Select Video Files", "", "Video Files (*.mp4 *.avi *.mov)")
+        self.add_video_paths(video_files)
 
+    def add_video_paths(self, video_files):
+        """Add one or more video file paths to the queue table, skipping duplicates.
+
+        Shared by the QFileDialog flow (`select_videos`) and any programmatic caller
+        (e.g. the headless automation harness), so injecting videos never has to poke
+        at the QTableWidget internals directly.
+        """
         # Get the current list of file paths in the table
         current_files = set()
         for row in range(self.video_list.rowCount()):
@@ -3458,8 +3511,8 @@ class MainWindow(QMainWindow):
             tot_tracks = sum(t.get('tracks', 0) for t in self.batch_timings)
             tot_dets = sum(t.get('detections', 0) for t in self.batch_timings)
             tot_accel_skip = sum(t.get('accelerated_skipped_seconds', 0) for t in self.batch_timings)
-            print(f"[batch] {n} videos | {tot_tracks} tracks, {tot_dets} detections, "
-                  f"{tot_frames} frames sampled | inference={tot_inf:.1f}s "
+            logger.info(f"[batch] {n} videos | {tot_tracks} tracks, {tot_dets} detections, "
+                  f"{tot_frames} frames sampled | processing(loop)={tot_inf:.1f}s "
                   f"segmentation={tot_seg:.1f}s csv={tot_csv:.2f}s | "
                   f"video time skipped by acceleration={tot_accel_skip:.1f}s | wall clock={time_str}")
 
@@ -3500,7 +3553,7 @@ class MainWindow(QMainWindow):
             self.show_confidence_warning()
             self.highlight_current_detection()
         else:
-            print(f"Error: Invalid detection index: {index}")
+            logger.error(f"Error: Invalid detection index: {index}")
             self.show_no_detections_message()
 
     def show_no_detections_message(self):
@@ -3560,9 +3613,9 @@ class MainWindow(QMainWindow):
 
                 self.detection_list.item(row_position, 0).setData(Qt.ItemDataRole.UserRole, index)
             except KeyError as e:
-                print(f"Missing key in track data: {e}")
+                logger.warning(f"Missing key in track data: {e}")
             except Exception as e:
-                print(f"Error creating table row for track: {str(e)}")
+                logger.error(f"Error creating table row for track: {str(e)}")
 
         self.detection_list.resizeColumnsToContents()
         self.detection_list.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -3577,7 +3630,7 @@ class MainWindow(QMainWindow):
             key, track = self.sorted_tracks[index]
             new_label = combo.currentText()
             track['label'] = new_label
-            print(f"Label updated for track {key} to {new_label}")
+            logger.info(f"Label updated for track {key} to {new_label}")
     
     def mark_for_deletion(self):
         reply = QMessageBox.question(
@@ -3631,13 +3684,13 @@ class MainWindow(QMainWindow):
         if total_tracks == 1:
             try:
                 shutil.rmtree(exp_dir)
-                print(f"Deleted experiment directory: {exp_dir}")
+                logger.info(f"Deleted experiment directory: {exp_dir}")
                 self.sort_tracks()
                 self.setup_review_dropdown()
                 self.render_historical_experiments()
                 return
             except Exception as e:
-                print(f"Error deleting experiment directory {exp_dir}: {e}")
+                logger.error(f"Error deleting experiment directory {exp_dir}: {e}")
 
         # Delete track-specific files
         deleted_files = 0
@@ -3649,8 +3702,8 @@ class MainWindow(QMainWindow):
                     file.unlink()
                     deleted_files += 1
                 except Exception as e:
-                    print(f"Error deleting {file}: {e}")
-        print(f"Deleted track {track_id} from {csv_name} ({deleted_files} files removed)")
+                    logger.error(f"Error deleting {file}: {e}")
+        logger.info(f"Deleted track {track_id} from {csv_name} ({deleted_files} files removed)")
 
         # Remove row from CSV in detection_results
         csv_path = det_dir / csv_name
@@ -3658,14 +3711,14 @@ class MainWindow(QMainWindow):
             try:
                 df = pd.read_csv(csv_path)
                 if len(df) == 1:
-                    print(f"Removing last detection for video. Deleting CSV")
+                    logger.info(f"Removing last detection for video. Deleting CSV")
                     csv_path.unlink()
                 else:
                     df = df[df['Track Id'].astype(int) != int(track_id)]
                     df.to_csv(csv_path, index=False)
-                    print(f"Removed track {track_id} from {csv_path}")
+                    logger.info(f"Removed track {track_id} from {csv_path}")
             except Exception as e:
-                print(f"Error updating CSV {csv_path}: {e}")
+                logger.error(f"Error updating CSV {csv_path}: {e}")
 
         # Remove from in-memory tracks and update detection list
         for video_name in list(self.tracks.keys()):
@@ -3744,7 +3797,7 @@ class MainWindow(QMainWindow):
         try:
             self.show_historical_gif()
         except Exception as e:
-            print(f"Error refreshing preview after label change: {e}")
+            logger.error(f"Error refreshing preview after label change: {e}")
         
     def sort_tracks(self):
         # Flatten all tracks from all videos into a single list
@@ -3770,7 +3823,7 @@ class MainWindow(QMainWindow):
             key=lambda x: (x[1]['video_name'], x[1]['timestamps'][0], x[1]['id'])
         )
 
-        print(f"Sorted {len(self.sorted_tracks)} tracks across {len(self.tracks)} videos")
+        logger.info(f"Sorted {len(self.sorted_tracks)} tracks across {len(self.tracks)} videos")
 
     def go_to_review_history(self):
         self.confirming_detections = False
@@ -4094,15 +4147,13 @@ class MainWindow(QMainWindow):
         row.addWidget(self.play_pause_button)
 
         row.addWidget(QLabel("Speed:"))
-        self.speed_button_group = QButtonGroup(self.playback_controls)
-        self.speed_button_group.setExclusive(True)
-        for multiplier in PLAYBACK_SPEEDS:
-            speed_btn = QPushButton(f"{multiplier:g}x")
-            speed_btn.setCheckable(True)
-            speed_btn.setMaximumWidth(56)
-            self.speed_button_group.addButton(speed_btn)
-            speed_btn.clicked.connect(lambda _checked, m=multiplier: self.set_playback_speed(m))
-            row.addWidget(speed_btn)
+        # A single button that cycles through PLAYBACK_SPEEDS; its label is the active rate.
+        self.speed_cycle_button = QPushButton()
+        self.speed_cycle_button.setMaximumWidth(56)
+        self.speed_cycle_button.setToolTip("Click to cycle playback speed")
+        self.speed_cycle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.speed_cycle_button.clicked.connect(self.cycle_playback_speed)
+        row.addWidget(self.speed_cycle_button)
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
@@ -4142,9 +4193,21 @@ class MainWindow(QMainWindow):
         self.settings_obj.setValue("playback_speed", str(multiplier))
         self.frame_player.set_speed(multiplier)
 
+    def cycle_playback_speed(self):
+        """Advance to the next configured playback rate, wrapping back to the first."""
+        speeds = list(PLAYBACK_SPEEDS)
+        try:
+            i = speeds.index(self.playback_speed)
+        except ValueError:
+            i = -1
+        nxt = speeds[(i + 1) % len(speeds)]
+        self.set_playback_speed(nxt)
+        self._check_speed_button(nxt)
+
     def _check_speed_button(self, multiplier):
-        for button in self.speed_button_group.buttons():
-            button.setChecked(button.text() == f"{multiplier:g}x")
+        # The cycle button's label reflects the active rate.
+        if hasattr(self, "speed_cycle_button"):
+            self.speed_cycle_button.setText(f"{multiplier:g}x")
 
     def toggle_playback(self):
         self.frame_player.toggle_play_pause()
@@ -4156,6 +4219,9 @@ class MainWindow(QMainWindow):
         self.play_pause_button.setIcon(
             colored_svg_icon(resource_path(f"assets/images/{icon_name}"), theme_icon_color()))
         self.play_pause_button.setText(" Pause" if playing else " Play")
+        # Drawing on a playback frame requires it to be paused, so keep the draw-line
+        # button's enabled state in sync with play/pause.
+        self._update_edit_frame_button()
 
     def _on_player_frame_changed(self, index, total):
         self.frame_counter_label.setText(f"{index + 1} / {total}")
@@ -4176,6 +4242,7 @@ class MainWindow(QMainWindow):
         play/pause and speed but not reliable frame seeking; "static"/"empty" (clips
         below playback_min_frames, the mask overlay, no selection) support nothing.
         """
+        self._playback_mode = mode
         self.playback_controls.setVisible(mode in ("frames", "movie"))
         scrubbable = mode == "frames"
         self.frame_slider.setEnabled(scrubbable)
@@ -4186,6 +4253,7 @@ class MainWindow(QMainWindow):
             self.frame_slider.setMaximum(0)
             self.frame_slider.blockSignals(False)
         self._sync_play_pause_button()
+        self._update_edit_frame_button()
 
     def update_button_position(self):
         if self.frame_player and self.toggle_display_mode_button:
@@ -4251,7 +4319,12 @@ class MainWindow(QMainWindow):
         self.low_confidence_warning.raise_()
 
     def _update_edit_frame_button(self):
-        """Show the Edit Frame overlay only while a mask is being displayed."""
+        """Show the draw-line overlay whenever there's a measurable frame to edit.
+
+        Two sources: the mask overlay (edits the saved best frame) and clip playback
+        (edits the frame currently shown). A playback frame must be paused before it
+        can be drawn on, so the button is disabled while the clip is playing.
+        """
         if not hasattr(self, "edit_frame_button"):
             return
         editing = (
@@ -4259,10 +4332,23 @@ class MainWindow(QMainWindow):
             and hasattr(self, "frame_editor")
             and self.frame_stack.currentWidget() is self.frame_editor
         )
-        visible = bool(getattr(self, "mask_active", False)) and not editing
+        mask_showing = bool(getattr(self, "mask_active", False))
+        playback_frames = getattr(self, "_playback_mode", None) == "frames"
+        visible = (mask_showing or playback_frames) and not editing
         self.edit_frame_button.setVisible(visible)
-        if visible:
-            self.edit_frame_button.raise_()
+        if not visible:
+            return
+        if playback_frames and not mask_showing:
+            paused = not self.frame_player.is_playing()
+            self.edit_frame_button.setEnabled(paused)
+            self.edit_frame_button.setToolTip(
+                "Draw a measurement line on this frame" if paused
+                else "Pause the clip to draw on a frame"
+            )
+        else:
+            self.edit_frame_button.setEnabled(True)
+            self.edit_frame_button.setToolTip("Draw a measurement line on this frame")
+        self.edit_frame_button.raise_()
 
     def _current_frame_image_path(self):
         """Resolve the original frame image path for the currently selected track."""
@@ -4281,26 +4367,40 @@ class MainWindow(QMainWindow):
         return str(frame_path) if frame_path.exists() else None
 
     def open_frame_editor(self):
-        """Replace the active frame view with the in-place line editor."""
-        frame_path = self._current_frame_image_path()
-        if not frame_path:
-            dlg = QMessageBox(self)
-            dlg.setWindowTitle("Alert")
-            dlg.setText("Error: No frame available to edit")
-            dlg.exec()
-            return
+        """Replace the active frame view with the in-place line editor.
 
+        From the mask overlay this edits the saved best frame; during clip playback it
+        edits the frame currently paused in the player (captured full-res from memory).
+        """
         self.frame_editor._update_drone_settings()
         initial_drone = self.settings_obj.value("last_drone_type") or None
-        if not self.frame_editor.load_image(frame_path, initial_drone=initial_drone):
-            dlg = QMessageBox(self)
-            dlg.setWindowTitle("Alert")
-            dlg.setText("Error: Failed to load frame for editing")
-            dlg.exec()
+
+        if getattr(self, "mask_active", False):
+            frame_path = self._current_frame_image_path()
+            if not frame_path:
+                self._frame_editor_error("Error: No frame available to edit")
+                return
+            loaded = self.frame_editor.load_image(frame_path, initial_drone=initial_drone)
+        else:
+            # Playback frame — only reachable while paused (button is disabled otherwise).
+            pixmap = self.frame_player.current_frame_pixmap()
+            if pixmap is None:
+                self._frame_editor_error("Error: No frame available to edit")
+                return
+            loaded = self.frame_editor.load_pixmap(pixmap, initial_drone=initial_drone)
+
+        if not loaded:
+            self._frame_editor_error("Error: Failed to load frame for editing")
             return
 
         self.frame_stack.setCurrentWidget(self.frame_editor)
         self.edit_frame_button.setVisible(False)
+
+    def _frame_editor_error(self, message):
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("Alert")
+        dlg.setText(message)
+        dlg.exec()
 
     def close_frame_editor(self):
         """Return from the in-place editor to the normal frame/mask view."""
@@ -4498,7 +4598,7 @@ class MainWindow(QMainWindow):
             gif_dir = exp_dir / "tracking_gifs"
 
             if not (det_dir.exists() and gif_dir.exists()):
-                print("Error")
+                logger.error("Error")
 
             # each CSV can contain multiple tracks (rows) → iterate rows!
             for csv_name in os.listdir(det_dir):
@@ -4506,7 +4606,7 @@ class MainWindow(QMainWindow):
                 try:
                     df = pd.read_csv(csv_path)
                 except Exception as e:
-                    print(f"Error reading {csv_path}: {e}")
+                    logger.error(f"Error reading {csv_path}: {e}")
                     continue
 
                 # Create one item per track (row)
@@ -4575,7 +4675,7 @@ class MainWindow(QMainWindow):
                         )
 
                     except Exception as e:
-                        print(f"Error creating historical row item from {csv_path}: {e}")
+                        logger.error(f"Error creating historical row item from {csv_path}: {e}")
                 
 
             # configure headers and resizing once
@@ -4599,7 +4699,7 @@ class MainWindow(QMainWindow):
             self._select_first_historical_row()
 
         except Exception as e:
-            print(f"Error while building historical list: {e}")
+            logger.error(f"Error while building historical list: {e}")
             # self.switch_detection_list(show_historical=True)
             # self.reviewing_history = False
 
@@ -4752,9 +4852,9 @@ class MainWindow(QMainWindow):
                 try:
                     if os.path.exists(self.current_output_dir):
                         shutil.rmtree(self.current_output_dir)
-                        print(f"Cleaned up output directory: {self.current_output_dir}")
+                        logger.info(f"Cleaned up output directory: {self.current_output_dir}")
                 except Exception as e:
-                    print(f"Error cleaning up output directory: {str(e)}")
+                    logger.error(f"Error cleaning up output directory: {str(e)}")
         
         # Reset processing state
         self.is_processing = False
@@ -4857,9 +4957,9 @@ class MainWindow(QMainWindow):
                 try:
                     if os.path.exists(self.current_output_dir):
                         shutil.rmtree(self.current_output_dir)
-                        print(f"Cleaned up output directory: {self.current_output_dir}")
+                        logger.info(f"Cleaned up output directory: {self.current_output_dir}")
                 except Exception as e:
-                    print(f"Error cleaning up output directory: {str(e)}")
+                    logger.error(f"Error cleaning up output directory: {str(e)}")
             
         # Ensure threads are properly closed
         if self.processing_thread:
@@ -4910,15 +5010,15 @@ class MainWindow(QMainWindow):
 
     def ensure_track_consistency(self):
         if len(self.tracks) != len(self.sorted_tracks):
-            print("Warning: Inconsistency detected between tracks and sorted_tracks")
+            logger.warning("Warning: Inconsistency detected between tracks and sorted_tracks")
             self.tracks = dict(self.sorted_tracks)
         
         for key, track in self.sorted_tracks:
             if key not in self.tracks:
-                print(f"Warning: Track {key} found in sorted_tracks but not in tracks")
+                logger.warning(f"Warning: Track {key} found in sorted_tracks but not in tracks")
                 self.tracks[key] = track
 
-        print(f"Tracks consistency check complete. Total tracks: {len(self.tracks)}")
+        logger.info(f"Tracks consistency check complete. Total tracks: {len(self.tracks)}")
 
     def _parse_historical_item_text(self, text: str):
         """
@@ -5053,7 +5153,7 @@ class MainWindow(QMainWindow):
         
         if str(self.settings_obj.value("enable_auto_upload").lower()) == "true":
             exps = list(experiments_with_changes)
-            print(f"[upload] Auto-upload enabled; {len(exps)} experiment(s) with changes to upload")
+            logger.info(f"[upload] Auto-upload enabled; {len(exps)} experiment(s) with changes to upload")
             if exps:
                 dlg = QDialog(self)
                 dlg.setWindowTitle("Upload in Progress")
@@ -5077,7 +5177,7 @@ class MainWindow(QMainWindow):
                     if not success:
                         errors[exp] = message
                     remaining -= 1
-                    print(f"[upload] Finished '{Path(exp).name}': "
+                    logger.info(f"[upload] Finished '{Path(exp).name}': "
                           f"{'OK' if success else 'ERROR - ' + message}; {remaining} remaining")
                     if remaining == 0:
                         loop.quit()
@@ -5096,7 +5196,7 @@ class MainWindow(QMainWindow):
                 for thread in threads:
                     thread.wait()
 
-                print(f"[upload] Auto-upload batch complete: "
+                logger.info(f"[upload] Auto-upload batch complete: "
                       f"{len(exps) - len(errors)} succeeded, {len(errors)} failed")
 
                 dlg.hide()
@@ -5167,7 +5267,7 @@ class UploadThread(QThread):
 
     def run(self):
         zip_name = f'{Path(self.experiment_dir).name}.zip'
-        print(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
+        logger.info(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
         try:
             file_count = 0
             buffer = io.BytesIO()
@@ -5182,23 +5282,23 @@ class UploadThread(QThread):
                                 zipf.write(file_path, arcname)
                                 file_count += 1
                     else:
-                        print(f"[upload]   skipping missing folder: {folder}")
+                        logger.warning(f"[upload]   skipping missing folder: {folder}")
 
             zip_size = buffer.tell()
             buffer.seek(0)
-            print(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
+            logger.info(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
                   f"POST -> {self.api_url}")
             files = {'file': (zip_name, buffer, 'application/zip')}
             response = requests.post(self.api_url, files=files)
             response.raise_for_status()
 
-            print(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
+            logger.info(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
             self.upload_finished.emit(True, "Folder uploaded successfully")
         except requests.RequestException as e:
-            print(f"[upload] {zip_name}: FAILED (request error): {e}")
+            logger.error(f"[upload] {zip_name}: FAILED (request error): {e}")
             self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
         except Exception as e:
-            print(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
+            logger.error(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
             self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
 
     # def run(self):
@@ -5259,7 +5359,7 @@ class VersionCheckThread(QThread):
 
 
 def signal_handler(signum, frame):
-    print(f"Received signal {signum}")
+    logger.info(f"Received signal {signum}")
     QApplication.quit()
 
 class FramePlayer(QLabel):
@@ -5329,6 +5429,22 @@ class FramePlayer(QLabel):
             return
         self.current_frame = max(0, min(int(index), len(self.frames) - 1))
         self.show_frame(self.current_frame)
+
+    def current_frame_pixmap(self):
+        """Return the currently displayed clip frame as a full-resolution QPixmap.
+
+        Frame-list ("frames") mode only — the frames are the native-resolution clip
+        frames, so a line drawn on one measures at the original scale. Returns None when
+        no such frame is available (empty player, movie/static backend).
+        """
+        if not self.frames or not (0 <= self.current_frame < len(self.frames)):
+            return None
+        frame = self.frames[self.current_frame]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        # .copy() detaches the QImage from the transient numpy buffer before it's freed.
+        return QPixmap.fromImage(qimg.copy())
 
     def sizeHint(self):
         # Prefer filling the stack, not growing the window to native clip resolution.
@@ -5609,7 +5725,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             if tracker and not tracker.is_significant_track(track):
                 continue
 
-            print("Starting new track")
+            logger.debug("Starting new track")
             num_frames = len(track['positions'])
             avg_confidence = np.mean(track['confidences'])
 
@@ -5659,12 +5775,11 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
 
             images_saved += 1
 
-        print(f"Shark Images Saved: {images_saved}")
+        logger.info(f"Shark Images Saved: {images_saved}")
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -5734,7 +5849,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
 
 def mass_prediction(video_path, current_output_dir):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
     videos_tqdm = tqdm(video_path)
@@ -5777,7 +5892,7 @@ if __name__ == '__main__':
         output_dir = Path(args.output_dir)
         video_paths = input_dir.rglob("*.mp4")
         if not video_paths:
-            print(f"No .mp4 videos found in {input_dir}")
+            logger.warning(f"No .mp4 videos found in {input_dir}")
             exit(1)
 
         # Run prediction
@@ -5791,9 +5906,9 @@ if __name__ == '__main__':
                 writer = csv.DictWriter(file, fieldnames=results[0].keys())
                 writer.writeheader()
                 writer.writerows(results)
-            print(f"Results saved to {csv_path}")
+            logger.info(f"Results saved to {csv_path}")
         else:
-            print("No valid tracks were found.")
+            logger.warning("No valid tracks were found.")
     else:
         if args.testing:
             os.environ["QT_DEBUG_PLUGINS"] = "1"
