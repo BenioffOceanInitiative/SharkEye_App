@@ -3983,67 +3983,30 @@ class MainWindow(QMainWindow):
         self.render_historical_experiments()
         
     def toggle_display_mode(self):
-        # Historical mode: always show mask overlay if available
-        # if self.reviewing_history:
-        if self.gif_active:
-            row = self.historical_items.currentRow()  # Toggle should be disabled in historical mode
-            if row < 0:
-                return
-            experiment_disp = self.historical_items.item(row, 0).text()
-            experiment = format_experiment_date(experiment_disp, to_human=False)
-            video_basename = self.historical_items.item(row, 1).text()
-            track_id = self.historical_items.item(row, 2).text()
-            mask_dir = Path(get_results_dir()) / experiment / "masks"
-            mask_filename = f"{video_basename}_{track_id}.jpg"
-            mask_path = mask_dir / mask_filename
+        """Toggle the segmentation mask overlay.
 
-            if mask_path.exists():
-                mask_overlay = cv2.imread(str(mask_path))
-                frame_rgb = cv2.cvtColor(mask_overlay, cv2.COLOR_BGR2RGB)
-                height, width, channel = frame_rgb.shape
-                bytes_per_line = 3 * width
-                q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                pixmap = QPixmap.fromImage(q_image)
-                scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                self.frame_player.set_static_pixmap(scaled_pixmap)
-                # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFinOutline.svg")))
-                self.mask_active = True
-            else:
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle("Alert")
-                dlg.setText("Error: No mask drawn for this track")
-                dlg.exec()
-                self.mask_active = False
-            # Do NOT start/stop timer in historical mode
-            self.gif_active = False
-            self.update_frame_elements()
+        The mask corresponds to one existing clip frame (the length-source frame), so
+        rather than replacing the player with a static image, we seek the scrubber to
+        that frame and paint the mask there — the media buttons and scrubber stay usable.
+        The mask was preloaded for the selected track in _apply_overlay_boxes."""
+        if not self.frame_player.has_mask():
+            dlg = QMessageBox(self)
+            dlg.setWindowTitle("Alert")
+            dlg.setText("Error: No mask drawn for this track")
+            dlg.exec()
+            self.mask_active = False
+            self.toggle_display_switch.reset_position()
+            self.toggle_display_switch.update()
             self._update_edit_frame_button()
             return
-        else:
-            self.show_historical_gif()
-            return
-        # Non-historical mode: toggle between mask overlay and animation
-        if self.frame_player.timer.isActive():
-            self.frame_player.timer.stop()
-            current_track = self.sorted_tracks[self.current_detection_index]
-            if 'mask_overlay' not in current_track[1]:
-                dlg = QMessageBox(self)
-                dlg.setWindowTitle("Alert")
-                dlg.setText("Error: No mask drawn for this track")
-                dlg.exec()
-            else:
-                mask_overlay = current_track[1]['mask_overlay']
-                if mask_overlay is not None:
-                    frame = mask_overlay
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    height, width, channel = frame_rgb.shape
-                    bytes_per_line = 3 * width
-                    q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-                    pixmap = QPixmap.fromImage(q_image)
-                    scaled_pixmap = pixmap.scaled(self.frame_player.size(), Qt.AspectRatioMode.KeepAspectRatio)
-                    self.frame_player.setPixmap(scaled_pixmap)
-        else:
-            self.frame_player.timer.start()
+
+        show_mask = not self.frame_player.mask_visible()
+        self.frame_player.set_mask_visible(show_mask)
+        self.mask_active = show_mask
+        self.gif_active = not show_mask
+        self._sync_play_pause_button()
+        self.update_frame_elements()
+        self._update_edit_frame_button()
 
     def setup_review_widget(self):
         layout = QVBoxLayout(self.review_widget)
@@ -4217,14 +4180,23 @@ class MainWindow(QMainWindow):
         self.speed_cycle_button.clicked.connect(self.cycle_playback_speed)
         row.addWidget(self.speed_cycle_button)
 
-        # Bounding-box overlay controls. The box is drawn live over the raw clip (see
-        # FramePlayer), so it can be hidden or recolored without re-encoding anything.
-        self.show_boxes = True
+        # Bounding-box overlay controls. The box (and its confidence label) is drawn live
+        # over the raw clip (see FramePlayer), so it can be hidden or recolored without
+        # re-encoding anything. Visibility choices persist across sessions.
+        self.show_boxes = self.settings_obj.value("review_show_boxes", "1") == "1"
+        self.show_confidence = self.settings_obj.value("review_show_confidence", "1") == "1"
+
         self.show_boxes_checkbox = QCheckBox("Boxes")
-        self.show_boxes_checkbox.setChecked(True)
+        self.show_boxes_checkbox.setChecked(self.show_boxes)
         self.show_boxes_checkbox.setToolTip("Show or hide the detection bounding box")
         self.show_boxes_checkbox.toggled.connect(self._on_show_boxes_toggled)
         row.addWidget(self.show_boxes_checkbox)
+
+        self.show_confidence_checkbox = QCheckBox("Conf")
+        self.show_confidence_checkbox.setChecked(self.show_confidence)
+        self.show_confidence_checkbox.setToolTip("Show or hide the confidence value on the box")
+        self.show_confidence_checkbox.toggled.connect(self._on_show_confidence_toggled)
+        row.addWidget(self.show_confidence_checkbox)
 
         self.box_color_button = QPushButton()
         self.box_color_button.setFixedSize(28, 20)
@@ -4312,7 +4284,13 @@ class MainWindow(QMainWindow):
 
     def _on_show_boxes_toggled(self, checked):
         self.show_boxes = bool(checked)
+        self.settings_obj.setValue("review_show_boxes", "1" if checked else "0")
         self.frame_player.set_boxes_visible(self.show_boxes)
+
+    def _on_show_confidence_toggled(self, checked):
+        self.show_confidence = bool(checked)
+        self.settings_obj.setValue("review_show_confidence", "1" if checked else "0")
+        self.frame_player.set_confidence_visible(self.show_confidence)
 
     def _pick_box_color(self):
         color = QColorDialog.getColor(self._review_box_color(), self, "Bounding Box Color")
@@ -4361,6 +4339,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "show_boxes_checkbox"):
             overlay_ok = mode == "frames" and self.frame_player.has_boxes()
             self.show_boxes_checkbox.setEnabled(overlay_ok)
+            self.show_confidence_checkbox.setEnabled(overlay_ok)
             self.box_color_button.setEnabled(overlay_ok)
         scrubbable = mode == "frames"
         self.frame_slider.setEnabled(scrubbable)
@@ -4711,18 +4690,33 @@ class MainWindow(QMainWindow):
                 data = json.loads(sidecar.read_text())
                 longest_index = data.get('longest_index')
                 for b in data.get('boxes', []):
-                    boxes.append(None if b is None else (b['x'], b['y'], b['w'], b['h']))
+                    boxes.append(None if b is None
+                                 else (b['x'], b['y'], b['w'], b['h'], b.get('conf')))
             except Exception as e:
                 logger.warning(f"Could not read box sidecar {sidecar}: {e}")
                 boxes = []
 
         self.frame_player.set_overlay_boxes(boxes, longest_index)
+
+        # Preload the segmentation mask for the length-source frame so the mask toggle can
+        # display it in place (keeping the scrubber) rather than as a static image.
+        mask_img = None
+        try:
+            mask_path = Path(frames_dir).parent / "masks" / f"{video_basename}_{track_id}.jpg"
+            if mask_path.exists():
+                mask_img = cv2.imread(str(mask_path))
+        except Exception as e:
+            logger.warning(f"Could not read mask for {video_basename}_{track_id}: {e}")
+        self.frame_player.set_mask(mask_img, longest_index)
+
         has = bool(boxes)
         self.frame_player.set_box_color(self._review_box_color())
         self.frame_player.set_boxes_visible(self.show_boxes if has else False)
+        self.frame_player.set_confidence_visible(self.show_confidence if has else False)
         if hasattr(self, "show_boxes_checkbox"):
             self.show_boxes_checkbox.setEnabled(has)
             self.box_color_button.setEnabled(has)
+            self.show_confidence_checkbox.setEnabled(has)
 
     def render_historical_experiments(self):
         # Render Historical Experiments and add to List
@@ -5603,8 +5597,17 @@ class FramePlayer(QLabel):
         # self.frames[i] as (x_center, y_center, w, h) in native frame pixels, or None.
         self._boxes = []
         self._show_boxes = True
+        self._show_confidence = True
         self._box_color = QColor(255, 96, 31)
         self._longest_index = None  # index of the frame the length was measured on
+
+        # Segmentation mask overlay. The mask corresponds to one existing clip frame (the
+        # length-source frame), so it's painted in place on that frame rather than
+        # swapping the player into a static image — the scrubber and media controls stay
+        # live. self._mask_frame is a full-res BGR array; self._mask_index is its frame.
+        self._mask_frame = None
+        self._mask_index = None
+        self._show_mask = False
 
     # --- playback control -------------------------------------------------
     # Two backends sit behind these: a QTimer stepping self.frames (MP4 clips, the
@@ -5669,14 +5672,41 @@ class FramePlayer(QLabel):
     def boxes_visible(self):
         return self._show_boxes
 
+    def set_confidence_visible(self, visible):
+        """Show/hide the per-frame confidence value next to the box."""
+        self._show_confidence = bool(visible)
+        self.update()
+
     def set_box_color(self, color):
         if color is not None:
             self._box_color = QColor(color)
             self.update()
 
+    def set_mask(self, mask_bgr, index):
+        """Register the segmentation mask overlay (a full-res BGR frame) and the clip
+        frame index it belongs to. Pass mask_bgr=None to clear."""
+        self._mask_frame = mask_bgr
+        self._mask_index = index
+
+    def has_mask(self):
+        return self._mask_frame is not None and self._mask_index is not None
+
+    def mask_visible(self):
+        return self._show_mask
+
+    def set_mask_visible(self, visible):
+        """Toggle the mask overlay. When enabling, pause and seek to the mask's frame so
+        it's actually on screen; the scrubber/media controls remain usable throughout."""
+        self._show_mask = bool(visible)
+        if self._show_mask and self._mask_index is not None and self.frames:
+            self.pause()
+            self.seek(self._mask_index)
+        self.update()
+
     def _paint_box_overlay(self, painter, dx, dy, dw, dh, frame_w, frame_h):
-        """Draw the current frame's box, mapping native pixel coords into the displayed
-        (KeepAspectRatio-scaled, centered) rect. Matches content_rect()'s geometry."""
+        """Draw the current frame's box (and optionally its confidence), mapping native
+        pixel coords into the displayed (KeepAspectRatio-scaled, centered) rect. Matches
+        content_rect()'s geometry."""
         if not self._show_boxes or not self._boxes or frame_w <= 0 or frame_h <= 0:
             return
         if not (0 <= self.current_frame < len(self._boxes)):
@@ -5684,7 +5714,8 @@ class FramePlayer(QLabel):
         box = self._boxes[self.current_frame]
         if box is None:
             return
-        cx, cy, bw, bh = box
+        cx, cy, bw, bh = box[0], box[1], box[2], box[3]
+        conf = box[4] if len(box) > 4 else None
         sx = dw / frame_w
         sy = dh / frame_h
         rx = dx + (cx - bw / 2) * sx
@@ -5695,6 +5726,11 @@ class FramePlayer(QLabel):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(int(rx), int(ry), int(bw * sx), int(bh * sy))
+        if self._show_confidence and conf is not None:
+            font = painter.font()
+            font.setPointSize(max(9, round(min(dw, dh) / 45)))
+            painter.setFont(font)
+            painter.drawText(int(rx), max(int(ry) - 5, 14), f"{conf:.2f}")
         painter.restore()
 
     def current_frame_pixmap(self):
@@ -5797,6 +5833,9 @@ class FramePlayer(QLabel):
         self.timer.stop()
         self.frames = []
         self._boxes = []
+        self._mask_frame = None
+        self._mask_index = None
+        self._show_mask = False
         self._clear_height_constraints()
         self._static_pixmap = pixmap
         self.clear()  # drop any QLabel pixmap/text so sizeHint stays small
@@ -5813,6 +5852,9 @@ class FramePlayer(QLabel):
         self.timer.stop()
         self.frames = []
         self._boxes = []
+        self._mask_frame = None
+        self._mask_index = None
+        self._show_mask = False
         self._clear_height_constraints()
         self.clear()
 
@@ -5849,6 +5891,9 @@ class FramePlayer(QLabel):
     def set_gif(self, path: str):
         self._static_pixmap = None
         self._boxes = []
+        self._mask_frame = None
+        self._mask_index = None
+        self._show_mask = False
         self._clear_height_constraints()
         self._detach_movie()
         self.clear()
@@ -5907,7 +5952,12 @@ class FramePlayer(QLabel):
         # 3) Frame-sequence Mode (MP4 path) — paint from native frames so resize
         #    refits like the editor instead of using a stale pre-scaled QLabel pixmap.
         if self.frames:
-            frame = self.frames[self.current_frame]
+            # On the mask's own frame, paint the mask overlay instead of the raw frame
+            # (and skip the box — the mask already shows the shark). Every other frame is
+            # normal, so scrubbing off the mask frame returns to the clip seamlessly.
+            showing_mask = (self._show_mask and self._mask_frame is not None
+                            and self.current_frame == self._mask_index)
+            frame = self._mask_frame if showing_mask else self.frames[self.current_frame]
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w, _ = frame_rgb.shape
             q_image = QImage(frame_rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
@@ -5916,7 +5966,8 @@ class FramePlayer(QLabel):
             x = (widget_size.width() - scaled.width()) // 2
             y = (widget_size.height() - scaled.height()) // 2
             painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), pixmap)
-            self._paint_box_overlay(painter, x, y, scaled.width(), scaled.height(), w, h)
+            if not showing_mask:
+                self._paint_box_overlay(painter, x, y, scaled.width(), scaled.height(), w, h)
             return
 
         # 4) Fallback
@@ -5931,6 +5982,9 @@ class FramePlayer(QLabel):
     def clear_frame(self):
         self._static_pixmap = None
         self._boxes = []
+        self._mask_frame = None
+        self._mask_index = None
+        self._show_mask = False
         self._detach_movie()
         self.timer.stop()
         self.frames = []
