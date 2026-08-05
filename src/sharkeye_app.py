@@ -122,6 +122,25 @@ DEFAULT_DETECTION_LABELS = [
     "Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Duplicate", "Glare", "None", "Other"
 ]
 
+# --- YOLO annotation format ---------------------------------------------------
+# Detections are stored on disk as YOLO — the single format for the review overlay,
+# the upload, and retraining. Each sampled frame gets a `frame_<NNNN>.txt` with a
+# line "class cx cy w h" (normalized 0-1, so it survives the <=1080p downscale at
+# upload), alongside a `meta.json` holding the per-frame data YOLO can't carry
+# (confidence, length, timestamp, length-source frame). The class map is fixed:
+# Shark -> 0, Kelp -> 1, everything else -> 2.
+YOLO_CLASS_NAMES = ["shark", "kelp", "other"]
+
+
+def label_to_yolo_class(label):
+    """Map a review label to its YOLO class id (Shark->0, Kelp->1, everything else->2)."""
+    key = (label or "").strip().lower()
+    if key == "shark":
+        return 0
+    if key == "kelp":
+        return 1
+    return 2
+
 DEFAULT_DRONE_SETTINGS = {
     "Mavic 2 Pro": {
         "Resolution": {
@@ -886,10 +905,12 @@ class HistoricalExperimentsPage(QWidget):
             zip_name = f'{Path(experiment_dir).name}.zip'
             logger.info(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
             try:
+                # Bake the reviewer's corrected labels into the YOLO class column first.
+                refresh_yolo_labels_from_csv(experiment_dir)
                 buffer = io.BytesIO()
                 with zipfile.ZipFile(buffer, 'w') as zipf:
-                    # 'shark_frames' = every sampled frame per shark + sidecar; images are
-                    # downscaled to <=1080p to keep the upload under the size limit.
+                    # 'shark_frames' = every sampled frame per shark + YOLO labels; images
+                    # are downscaled to <=1080p to keep the upload under the size limit.
                     file_count = add_experiment_to_zip(zipf, experiment_dir)
 
                 zip_size = buffer.tell()
@@ -1874,10 +1895,13 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         overlay from the sidecar below, so it must not be burned into the pixels.
       * shark_frames/<video_name>_<key>/frame_<NNNN>.jpg — every sampled frame of the
         shark at full resolution, for upload ("every frame per shark").
-      * shark_frames/<video_name>_<key>/boxes.json — a per-frame sidecar (box coords,
-        confidence, length, timestamp) parallel to the clip/JPG sequence, plus the index
-        of the length-source (longest) frame. Drives the overlay and lets a server
-        reconstruct boxes on the uploaded frames.
+      * shark_frames/<video_name>_<key>/frame_<NNNN>.txt — a YOLO label per frame
+        (class cx cy w h, normalized), parallel to the JPG sequence. Class is 0 (shark)
+        here; the reviewer's corrected label is baked in at upload time (see
+        refresh_yolo_labels_from_csv). This is the upload / retraining annotation.
+      * shark_frames/<video_name>_<key>/meta.json — the per-frame metadata YOLO can't
+        carry (confidence, length, timestamp) plus the length-source (longest) frame
+        index. Drives the review overlay's confidence / length-source display.
 
     MP4 encoding via cv2.VideoWriter is C-level and releases the GIL, so it doesn't
     starve the concurrent inference thread. `payload` maps track key -> {'frames',
@@ -1889,6 +1913,10 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
     clips_dir = os.path.join(output_dir, "tracking_gifs")
     os.makedirs(clips_dir, exist_ok=True)
     frames_root = os.path.join(output_dir, "shark_frames")
+    os.makedirs(frames_root, exist_ok=True)
+    # Class-name manifest for the YOLO dataset rooted at shark_frames/.
+    with open(os.path.join(frames_root, "classes.txt"), "w") as f:
+        f.write("\n".join(YOLO_CLASS_NAMES) + "\n")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -1906,7 +1934,7 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
         os.makedirs(track_frames_dir, exist_ok=True)
 
-        boxes = []            # one entry per WRITTEN frame (aligned with the clip/JPGs)
+        meta_frames = []      # per-frame metadata (aligned with the clip/JPGs/.txt files)
         longest_index = None  # which written frame is the length-source frame
         seq = 0
         try:
@@ -1937,16 +1965,25 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
                 length = lengths[frame_idx] if frame_idx < len(lengths) else None
                 t_ms = timestamps[frame_idx] if frame_idx < len(timestamps) else None
-                if pos is not None:
+
+                # YOLO label, parallel to frame_<seq>.jpg. Coords normalized to the frame
+                # size so they survive the <=1080p downscale at upload. Class is 0 (shark)
+                # now; refresh_yolo_labels_from_csv() rewrites it from the reviewer's
+                # corrected label before upload. An empty file = a negative frame (no box).
+                label_path = os.path.join(track_frames_dir, f"frame_{seq:04d}.txt")
+                if pos is not None and frame_size:
                     x, y, w, h = pos
-                    boxes.append({
-                        'x': float(x), 'y': float(y), 'w': float(w), 'h': float(h),
-                        'conf': (float(conf) if conf is not None else None),
-                        'length': (float(length) if length is not None else None),
-                        't_ms': (float(t_ms) if t_ms is not None else None),
-                    })
+                    fw, fh = frame_size
+                    with open(label_path, "w") as lf:
+                        lf.write(f"0 {x / fw:.6f} {y / fh:.6f} {w / fw:.6f} {h / fh:.6f}\n")
                 else:
-                    boxes.append(None)
+                    open(label_path, "w").close()
+
+                meta_frames.append(None if pos is None else {
+                    'conf': (float(conf) if conf is not None else None),
+                    'length': (float(length) if length is not None else None),
+                    't_ms': (float(t_ms) if t_ms is not None else None),
+                })
 
                 if (longest_index is None and longest_ts is not None
                         and t_ms is not None and abs(t_ms - longest_ts) < 1e-6):
@@ -1957,17 +1994,19 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                 writer.release()
                 logger.info(f"Saved clip: {clip_path}")
 
-            sidecar = {
+            meta = {
                 'video': video_name, 'track_id': key, 'fps': fps,
-                # Box coords are in this (full source) pixel space. Recorded so a consumer
-                # can still map them onto the downscaled JPGs shipped in the upload.
+                # The .txt coords are normalized; these dims map them back to full-source
+                # pixels for the review overlay (the JPGs are full-res on disk).
                 'frame_width': (frame_size[0] if frame_size else None),
                 'frame_height': (frame_size[1] if frame_size else None),
-                'longest_index': longest_index, 'boxes': boxes,
+                'longest_index': longest_index,
+                'class_names': YOLO_CLASS_NAMES,
+                'frames': meta_frames,
             }
-            with open(os.path.join(track_frames_dir, "boxes.json"), 'w') as f:
-                json.dump(sidecar, f)
-            logger.info(f"[frames] saved {seq} frame(s) + sidecar -> {track_frames_dir}")
+            with open(os.path.join(track_frames_dir, "meta.json"), 'w') as f:
+                json.dump(meta, f)
+            logger.info(f"[frames] saved {seq} frame(s) + YOLO labels -> {track_frames_dir}")
         except Exception as e:
             logger.error(f"Clip/frame export failed for track {key}: {e}")
         finally:
@@ -1988,10 +2027,8 @@ def export_training_frames_locally(payload, video_stem, annotation_format="yolo"
         logger.warning(f"Unsupported annotation_format {annotation_format!r}; skipping training export")
         return
 
-    category_names = [
-        "great white shark", "kelp", "human", "surfer", "dolphin",
-        "bat ray", "bird", "boat", "seal", "kayaker",
-    ]
+    # Same class scheme as the shark_frames YOLO labels (Shark->0, Kelp->1, else->2).
+    category_names = list(YOLO_CLASS_NAMES)
     num_classes = len(category_names)
 
     coco = {
@@ -4802,25 +4839,59 @@ class MainWindow(QMainWindow):
                 self.frame_player.clear()
                 self.frame_player.setText(f"Video not found:\n{mp4_name} or {gif_name}")
 
-    def _apply_overlay_boxes(self, frames_dir, video_basename, track_id):
-        """Feed the per-frame box sidecar for a clip into the player as a live overlay.
+    def _read_overlay_annotations(self, track_dir):
+        """Return (boxes, longest_index) for a track's frame dir.
 
-        The sidecar lives at shark_frames/<video>_<id>/boxes.json (written by
-        encode_track_clips). Legacy experiments have no sidecar — their clips have boxes
-        baked in — so we clear the overlay and disable the toggle for those."""
-        sidecar = Path(frames_dir) / f"{video_basename}_{track_id}" / "boxes.json"
-        boxes = []
-        longest_index = None
+        Prefers the YOLO format — frame_<NNNN>.txt (class cx cy w h, normalized) plus
+        meta.json (per-frame confidence + length-source index) — and denormalizes the
+        coords to native pixels using meta's frame dims. Falls back to the legacy
+        boxes.json (full-res pixel coords) so pre-migration experiments still render.
+        Each returned box is (x_center, y_center, w, h, conf) in native pixels, or None
+        for a frame with no detection. Returns ([], None) if nothing is readable."""
+        track_dir = Path(track_dir)
+        meta_path = track_dir / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                fw, fh = meta.get('frame_width'), meta.get('frame_height')
+                boxes = []
+                for i, fm in enumerate(meta.get('frames') or []):
+                    box = None
+                    txt = track_dir / f"frame_{i:04d}.txt"
+                    if fw and fh and txt.exists():
+                        line = txt.read_text().strip()
+                        if line:
+                            parts = line.split()
+                            if len(parts) >= 5:
+                                cx, cy, nw, nh = (float(v) for v in parts[1:5])
+                                conf = (fm or {}).get('conf')
+                                box = (cx * fw, cy * fh, nw * fw, nh * fh, conf)
+                    boxes.append(box)
+                return boxes, meta.get('longest_index')
+            except Exception as e:
+                logger.warning(f"Could not read YOLO overlay in {track_dir}: {e}")
+
+        sidecar = track_dir / "boxes.json"  # legacy format
         if sidecar.exists():
             try:
                 data = json.loads(sidecar.read_text())
-                longest_index = data.get('longest_index')
-                for b in data.get('boxes', []):
-                    boxes.append(None if b is None
-                                 else (b['x'], b['y'], b['w'], b['h'], b.get('conf')))
+                boxes = [None if b is None
+                         else (b['x'], b['y'], b['w'], b['h'], b.get('conf'))
+                         for b in data.get('boxes', [])]
+                return boxes, data.get('longest_index')
             except Exception as e:
                 logger.warning(f"Could not read box sidecar {sidecar}: {e}")
-                boxes = []
+        return [], None
+
+    def _apply_overlay_boxes(self, frames_dir, video_basename, track_id):
+        """Feed a clip's per-frame boxes into the player as a live overlay.
+
+        Reads the YOLO annotation for the track (frame_<NNNN>.txt + meta.json, written by
+        encode_track_clips), converting the normalized coords back to native pixels.
+        Legacy experiments have a single boxes.json instead — _read_overlay_annotations
+        falls back to it so old runs still render."""
+        track_dir = Path(frames_dir) / f"{video_basename}_{track_id}"
+        boxes, longest_index = self._read_overlay_annotations(track_dir)
 
         self.frame_player.set_overlay_boxes(boxes, longest_index)
 
@@ -4835,7 +4906,7 @@ class MainWindow(QMainWindow):
             logger.warning(f"Could not read mask for {video_basename}_{track_id}: {e}")
         self.frame_player.set_mask(mask_img, longest_index)
 
-        has = bool(boxes)
+        has = any(b is not None for b in boxes)
         self.frame_player.set_box_color(self._review_box_color())
         self.frame_player.set_boxes_visible(self.show_boxes if has else False)
         self.frame_player.set_confidence_visible(self.show_confidence if has else False)
@@ -5567,11 +5638,59 @@ def _downscale_image_bytes(path, max_w=UPLOAD_IMAGE_MAX_W, max_h=UPLOAD_IMAGE_MA
         return None
 
 
+def refresh_yolo_labels_from_csv(experiment_dir):
+    """Bake the reviewer's corrected labels into the YOLO .txt class column before upload.
+
+    Frames are written at inference time as class 0 (shark). The reviewer may then relabel
+    a track (Kelp, Boat, …); those corrections are persisted to detection_results/*.csv.
+    Here we map each track's current label -> class id (label_to_yolo_class) and rewrite
+    the class token of every frame_*.txt for that track, leaving the geometry untouched, so
+    the uploaded dataset trains on the corrected classes. Best-effort per track."""
+    det_dir = os.path.join(experiment_dir, "detection_results")
+    frames_root = os.path.join(experiment_dir, "shark_frames")
+    if not (os.path.isdir(det_dir) and os.path.isdir(frames_root)):
+        return
+    for csv_name in os.listdir(det_dir):
+        if not csv_name.lower().endswith(".csv"):
+            continue
+        video_base = csv_name[:-4]  # "DJI_0033.MP4.csv" -> "DJI_0033.MP4"
+        try:
+            with open(os.path.join(det_dir, csv_name), newline="") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as e:
+            logger.warning(f"[upload] YOLO relabel skipped for {csv_name}: {e}")
+            continue
+        for row in rows:
+            track_id = (row.get("Track Id") or "").strip()
+            if not track_id:
+                continue
+            cls = label_to_yolo_class(row.get("Label"))
+            track_dir = os.path.join(frames_root, f"{video_base}_{track_id}")
+            if not os.path.isdir(track_dir):
+                continue
+            for fn in os.listdir(track_dir):
+                if not fn.endswith(".txt"):
+                    continue
+                p = os.path.join(track_dir, fn)
+                try:
+                    with open(p) as tf:
+                        line = tf.read().strip()
+                    if not line:
+                        continue  # negative frame — no box to reclass
+                    parts = line.split()
+                    parts[0] = str(cls)
+                    with open(p, "w") as tf:
+                        tf.write(" ".join(parts) + "\n")
+                except Exception as e:
+                    logger.warning(f"[upload] could not relabel {p}: {e}")
+
+
 def add_experiment_to_zip(zipf, experiment_dir, folders=UPLOAD_FOLDERS):
     """Add an experiment's upload folders to an open ZipFile, downscaling images.
 
-    Any .jpg/.jpeg/.png is downscaled to <=1080p (see _downscale_image_bytes); CSVs and
-    the boxes.json sidecars are added verbatim. Returns the number of files written."""
+    Any .jpg/.jpeg/.png is downscaled to <=1080p (see _downscale_image_bytes); everything
+    else — CSVs, the YOLO frame_*.txt labels, meta.json, classes.txt — is added verbatim.
+    Returns the number of files written."""
     count = 0
     for folder in folders:
         folder_path = os.path.join(experiment_dir, folder)
@@ -5607,10 +5726,12 @@ class UploadThread(QThread):
         zip_name = f'{Path(self.experiment_dir).name}.zip'
         logger.info(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
         try:
+            # Bake the reviewer's corrected labels into the YOLO class column first.
+            refresh_yolo_labels_from_csv(self.experiment_dir)
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, 'w') as zipf:
-                # 'shark_frames' carries every sampled frame of each shark (+ a per-frame
-                # box sidecar); add_experiment_to_zip downscales images to <=1080p so the
+                # 'shark_frames' carries every sampled frame of each shark (+ per-frame
+                # YOLO labels); add_experiment_to_zip downscales images to <=1080p so the
                 # full detection sequence fits under the upload size limit.
                 file_count = add_experiment_to_zip(zipf, self.experiment_dir)
 
