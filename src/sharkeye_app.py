@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
                              QSlider, QMenuBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QEventLoop, qInstallMessageHandler, QUrl
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPen, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
@@ -816,18 +816,11 @@ class HistoricalExperimentsPage(QWidget):
             zip_name = f'{Path(experiment_dir).name}.zip'
             logger.info(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
             try:
-                file_count = 0
                 buffer = io.BytesIO()
                 with zipfile.ZipFile(buffer, 'w') as zipf:
-                    for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
-                        folder_path = os.path.join(experiment_dir, folder)
-                        if os.path.exists(folder_path):
-                            for root, _, files in os.walk(folder_path):
-                                for file in files:
-                                    file_path = os.path.join(root, file)
-                                    arcname = os.path.relpath(file_path, experiment_dir)
-                                    zipf.write(file_path, arcname)
-                                    file_count += 1
+                    # 'shark_frames' = every sampled frame per shark + sidecar; images are
+                    # downscaled to <=1080p to keep the upload under the size limit.
+                    file_count = add_experiment_to_zip(zipf, experiment_dir)
 
                 zip_size = buffer.tell()
                 buffer.seek(0)
@@ -1763,48 +1756,56 @@ def render_annotation_preview(annotation_color, box_thickness, text_thickness, t
 
 def encode_track_clips(payload, output_dir, video_name, annotation_color,
                        box_thickness, text_thickness, text_scale, fps=10):
-    """Encode per-track detection clips as MP4 from a self-contained payload.
+    """Persist per-track review/upload artifacts from a self-contained payload.
 
-    MP4 encoding via cv2.VideoWriter is C-level and releases the GIL, so it's far
-    faster than the old per-frame PIL palette quantization and doesn't starve the
-    concurrent inference thread. `payload` maps track key ->
-    {'frames', 'positions', 'lengths', 'confidences'}; the payload owns its own frame
-    buffers (no shared state with the UI's track dicts). Output filenames match what
-    the review player looks for: "<video_name>_<key>.mp4".
+    For each track this writes three things, all from the same in-memory frames:
+      * tracking_gifs/<video_name>_<key>.mp4 — a RAW clip (no baked bounding box). The
+        review player (FramePlayer) draws the box as a live, toggleable/recolorable
+        overlay from the sidecar below, so it must not be burned into the pixels.
+      * shark_frames/<video_name>_<key>/frame_<NNNN>.jpg — every sampled frame of the
+        shark at full resolution, for upload ("every frame per shark").
+      * shark_frames/<video_name>_<key>/boxes.json — a per-frame sidecar (box coords,
+        confidence, length, timestamp) parallel to the clip/JPG sequence, plus the index
+        of the length-source (longest) frame. Drives the overlay and lets a server
+        reconstruct boxes on the uploaded frames.
+
+    MP4 encoding via cv2.VideoWriter is C-level and releases the GIL, so it doesn't
+    starve the concurrent inference thread. `payload` maps track key -> {'frames',
+    'positions', 'lengths', 'confidences', 'timestamps', 'longest_timestamp'}; the
+    payload owns its own frame buffers (no shared state with the UI's track dicts).
+    The `annotation_*` args are retained for signature stability but no longer used to
+    draw — the box is an overlay now, not baked in.
     """
     clips_dir = os.path.join(output_dir, "tracking_gifs")
     os.makedirs(clips_dir, exist_ok=True)
+    frames_root = os.path.join(output_dir, "shark_frames")
 
-    # cv2 works in BGR, so no RGB conversion is needed before writing.
-    annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     for key, track in payload.items():
         positions = track.get('positions') or []
         frames = track.get('frames') or []
         confidences = track.get('confidences') or []
+        lengths = track.get('lengths') or []
+        timestamps = track.get('timestamps') or []
+        longest_ts = track.get('longest_timestamp')
 
         writer = None
         frame_size = None
         clip_path = os.path.join(clips_dir, f"{video_name}_{key}.mp4")
+        track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
+        os.makedirs(track_frames_dir, exist_ok=True)
+
+        boxes = []            # one entry per WRITTEN frame (aligned with the clip/JPGs)
+        longest_index = None  # which written frame is the length-source frame
+        seq = 0
         try:
-            for frame_idx, (pos, frame) in enumerate(zip(positions, frames)):
+            for frame_idx, frame in enumerate(frames):
                 if frame is None:
                     continue
-                x, y, w, h = pos
-                frame_with_box = frame.copy()
-                cv2.rectangle(frame_with_box,
-                              (int(x - w/2), int(y - h/2)),
-                              (int(x + w/2), int(y + h/2)),
-                              annotation_color_bgr, box_thickness)
-
-                conf = confidences[frame_idx] if frame_idx < len(confidences) else 0.0
-                label = f"Shark: {conf:.2f}"
-                cv2.putText(frame_with_box, label, (int(x - w/2), int(y - h/2) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
 
                 if writer is None:
-                    h_px, w_px = frame_with_box.shape[:2]
+                    h_px, w_px = frame.shape[:2]
                     frame_size = (w_px, h_px)
                     writer = cv2.VideoWriter(clip_path, fourcc, fps, frame_size)
                     if not writer.isOpened():
@@ -1812,15 +1813,53 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                         writer = None
                         break
 
-                # Guard against a stray frame of a different size
-                if (frame_with_box.shape[1], frame_with_box.shape[0]) != frame_size:
-                    frame_with_box = cv2.resize(frame_with_box, frame_size)
+                # Guard against a stray frame of a different size for the CLIP only; the
+                # per-frame JPG and box coords stay at the frame's true resolution.
+                clip_frame = frame
+                if (frame.shape[1], frame.shape[0]) != frame_size:
+                    clip_frame = cv2.resize(frame, frame_size)
+                writer.write(clip_frame)
 
-                writer.write(frame_with_box)
+                # Full-resolution, un-boxed frame for upload.
+                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), frame)
+
+                pos = positions[frame_idx] if frame_idx < len(positions) else None
+                conf = confidences[frame_idx] if frame_idx < len(confidences) else None
+                length = lengths[frame_idx] if frame_idx < len(lengths) else None
+                t_ms = timestamps[frame_idx] if frame_idx < len(timestamps) else None
+                if pos is not None:
+                    x, y, w, h = pos
+                    boxes.append({
+                        'x': float(x), 'y': float(y), 'w': float(w), 'h': float(h),
+                        'conf': (float(conf) if conf is not None else None),
+                        'length': (float(length) if length is not None else None),
+                        't_ms': (float(t_ms) if t_ms is not None else None),
+                    })
+                else:
+                    boxes.append(None)
+
+                if (longest_index is None and longest_ts is not None
+                        and t_ms is not None and abs(t_ms - longest_ts) < 1e-6):
+                    longest_index = seq
+                seq += 1
 
             if writer is not None:
                 writer.release()
                 logger.info(f"Saved clip: {clip_path}")
+
+            sidecar = {
+                'video': video_name, 'track_id': key, 'fps': fps,
+                # Box coords are in this (full source) pixel space. Recorded so a consumer
+                # can still map them onto the downscaled JPGs shipped in the upload.
+                'frame_width': (frame_size[0] if frame_size else None),
+                'frame_height': (frame_size[1] if frame_size else None),
+                'longest_index': longest_index, 'boxes': boxes,
+            }
+            with open(os.path.join(track_frames_dir, "boxes.json"), 'w') as f:
+                json.dump(sidecar, f)
+            logger.info(f"[frames] saved {seq} frame(s) + sidecar -> {track_frames_dir}")
+        except Exception as e:
+            logger.error(f"Clip/frame export failed for track {key}: {e}")
         finally:
             # Free the frame buffers as we go
             track['frames'] = None
@@ -2185,6 +2224,8 @@ class VideoProcessingWorker(QObject):
                 'positions': list(track.get('positions', [])),
                 'lengths': list(track.get('lengths', [])),
                 'confidences': list(track.get('confidences', [])),
+                'timestamps': list(track.get('timestamps', [])),
+                'longest_timestamp': track.get('longest_timestamp'),
             }
         return payload
 
@@ -2209,7 +2250,8 @@ class VideoProcessingWorker(QObject):
     def save_detections_csv(self, tracks, output_dir, tracker=None):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp', 'Highest Confidence', 'Average Confidence', 
+            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp',
+                        'Longest Length Timestamp', 'Highest Confidence', 'Average Confidence',
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
                         'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label',
                         'manual_length_px', 'manual_length_ft']
@@ -2224,6 +2266,7 @@ class VideoProcessingWorker(QObject):
                     'Flight Location': self.flight_location,
                     'Track Id': track_id,
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
+                    'Longest Length Timestamp': CustomTracker._format_timestamp(track['longest_timestamp']),
                     'Highest Confidence': max(track['confidences']),
                     'Average Confidence': np.mean(track['confidences']),
                     'Lowest Confidence': min(track['confidences']),
@@ -3581,7 +3624,7 @@ class MainWindow(QMainWindow):
 
     def update_detection_list(self):
         # Use a table format for the detection list, matching the historical items table
-        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
         self.detection_list.setRowCount(0)
         self.detection_list.clearContents()
         self.detection_list.setHorizontalHeaderLabels(labels)
@@ -4107,7 +4150,7 @@ class MainWindow(QMainWindow):
         self.frame_player.resized.connect(self.update_frame_elements)
         self.update_frame_elements()
 
-        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
 
         self.detection_list = QTableWidget()
         self.detection_list.setColumnCount(len(labels))
@@ -4174,6 +4217,23 @@ class MainWindow(QMainWindow):
         self.speed_cycle_button.clicked.connect(self.cycle_playback_speed)
         row.addWidget(self.speed_cycle_button)
 
+        # Bounding-box overlay controls. The box is drawn live over the raw clip (see
+        # FramePlayer), so it can be hidden or recolored without re-encoding anything.
+        self.show_boxes = True
+        self.show_boxes_checkbox = QCheckBox("Boxes")
+        self.show_boxes_checkbox.setChecked(True)
+        self.show_boxes_checkbox.setToolTip("Show or hide the detection bounding box")
+        self.show_boxes_checkbox.toggled.connect(self._on_show_boxes_toggled)
+        row.addWidget(self.show_boxes_checkbox)
+
+        self.box_color_button = QPushButton()
+        self.box_color_button.setFixedSize(28, 20)
+        self.box_color_button.setToolTip("Change the bounding box color")
+        self.box_color_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.box_color_button.clicked.connect(self._pick_box_color)
+        row.addWidget(self.box_color_button)
+        self._update_box_color_button()
+
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(0)
@@ -4228,6 +4288,39 @@ class MainWindow(QMainWindow):
         if hasattr(self, "speed_cycle_button"):
             self.speed_cycle_button.setText(f"{multiplier:g}x")
 
+    # --- bounding-box overlay controls -----------------------------------
+
+    def _review_box_color(self):
+        """The color to draw review bounding boxes in.
+
+        Persisted per-user under "review_box_color"; defaults to the app's annotation
+        color so the review overlay matches exported annotations out of the box."""
+        stored = self.settings_obj.value("review_box_color", None)
+        if stored:
+            try:
+                r, g, b = (int(v) for v in str(stored).split(","))
+                return QColor(r, g, b)
+            except (TypeError, ValueError):
+                pass
+        annotation_color, *_ = get_annotation_settings(self.settings_obj)
+        return QColor(annotation_color[0], annotation_color[1], annotation_color[2])
+
+    def _update_box_color_button(self):
+        c = self._review_box_color()
+        self.box_color_button.setStyleSheet(
+            f"background-color: rgb({c.red()},{c.green()},{c.blue()}); border: 1px solid #888;")
+
+    def _on_show_boxes_toggled(self, checked):
+        self.show_boxes = bool(checked)
+        self.frame_player.set_boxes_visible(self.show_boxes)
+
+    def _pick_box_color(self):
+        color = QColorDialog.getColor(self._review_box_color(), self, "Bounding Box Color")
+        if color.isValid():
+            self.settings_obj.setValue("review_box_color", f"{color.red()},{color.green()},{color.blue()}")
+            self._update_box_color_button()
+            self.frame_player.set_box_color(color)
+
     def toggle_playback(self):
         self.frame_player.toggle_play_pause()
         self._sync_play_pause_button()
@@ -4263,6 +4356,12 @@ class MainWindow(QMainWindow):
         """
         self._playback_mode = mode
         self.playback_controls.setVisible(mode in ("frames", "movie"))
+        # The box overlay is only drawn in frame-sequence (MP4) mode and only when the
+        # player actually has box data, so gate its controls on both.
+        if hasattr(self, "show_boxes_checkbox"):
+            overlay_ok = mode == "frames" and self.frame_player.has_boxes()
+            self.show_boxes_checkbox.setEnabled(overlay_ok)
+            self.box_color_button.setEnabled(overlay_ok)
         scrubbable = mode == "frames"
         self.frame_slider.setEnabled(scrubbable)
         self.frame_counter_label.setVisible(scrubbable)
@@ -4564,11 +4663,14 @@ class MainWindow(QMainWindow):
         gif_name = f"{video_basename}_{track_id}.gif"
         gif_path = gif_dir / gif_name
         
+        frames_dir = Path(get_results_dir()) / experiment / "shark_frames"
+
         if mp4_path.exists():
             # self.toggle_display_mode_button.setIcon(QIcon(resource_path("assets/images/MdiSharkFin.svg")))
             self.toggle_display_switch.reset_position()
             self.toggle_display_switch.update()
             self.frame_player.set_video(str(mp4_path))
+            self._apply_overlay_boxes(frames_dir, video_basename, track_id)
             self.update_frame_elements()
             QTimer.singleShot(0, self.update_frame_elements)
         elif gif_path.exists():
@@ -4584,6 +4686,7 @@ class MainWindow(QMainWindow):
             alt_gif = gif_dir / f"{Path(video_basename).stem}_{track_id}.gif"
             if alt_mp4.exists():
                 self.frame_player.set_video(str(alt_mp4))
+                self._apply_overlay_boxes(frames_dir, Path(video_basename).stem, track_id)
                 self.update_frame_elements()
                 QTimer.singleShot(0, self.update_frame_elements)
             elif alt_gif.exists():
@@ -4593,6 +4696,33 @@ class MainWindow(QMainWindow):
             else:
                 self.frame_player.clear()
                 self.frame_player.setText(f"Video not found:\n{mp4_name} or {gif_name}")
+
+    def _apply_overlay_boxes(self, frames_dir, video_basename, track_id):
+        """Feed the per-frame box sidecar for a clip into the player as a live overlay.
+
+        The sidecar lives at shark_frames/<video>_<id>/boxes.json (written by
+        encode_track_clips). Legacy experiments have no sidecar — their clips have boxes
+        baked in — so we clear the overlay and disable the toggle for those."""
+        sidecar = Path(frames_dir) / f"{video_basename}_{track_id}" / "boxes.json"
+        boxes = []
+        longest_index = None
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text())
+                longest_index = data.get('longest_index')
+                for b in data.get('boxes', []):
+                    boxes.append(None if b is None else (b['x'], b['y'], b['w'], b['h']))
+            except Exception as e:
+                logger.warning(f"Could not read box sidecar {sidecar}: {e}")
+                boxes = []
+
+        self.frame_player.set_overlay_boxes(boxes, longest_index)
+        has = bool(boxes)
+        self.frame_player.set_box_color(self._review_box_color())
+        self.frame_player.set_boxes_visible(self.show_boxes if has else False)
+        if hasattr(self, "show_boxes_checkbox"):
+            self.show_boxes_checkbox.setEnabled(has)
+            self.box_color_button.setEnabled(has)
 
     def render_historical_experiments(self):
         # Render Historical Experiments and add to List
@@ -4608,7 +4738,7 @@ class MainWindow(QMainWindow):
         exp_date = format_experiment_date(self.current_experiment, to_human=True)
 
         experiments_root = get_results_dir()
-        labels = ['Experiment', 'Video', 'ID', 'Timestamp', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
 
         try:
             # newest-first
@@ -4634,7 +4764,14 @@ class MainWindow(QMainWindow):
                         video_path_str = str(row.get('video_name', ''))
                         video_basename = Path(video_path_str).name
                         track_id = int(row.get('Track Id'))
-                        time_str = str(row.get('Highest Conf Timestamp', ''))
+                        # Show the timestamp of the frame the LENGTH was measured on (the
+                        # "longest" frame), so Length Time / Confidence / Length all refer
+                        # to the same frame. Fall back to the highest-conf timestamp for
+                        # legacy CSVs written before this column existed.
+                        length_ts = row.get('Longest Length Timestamp', '')
+                        if _csv_value_is_empty(length_ts):
+                            length_ts = row.get('Highest Conf Timestamp', '')
+                        time_str = str(length_ts)
                         conf_longest = float(row.get('Confidence of Longest Length', 0.0))
                         len_high_conf = float(row.get('Highest Confidence Length', 0.0))
                         manual_ft = row.get('manual_length_ft', '')
@@ -5275,6 +5412,65 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self.resized.emit()
 
+# Experiment uploads go to a Cloud Function whose HTTP request is size-limited, so every
+# image is downscaled to <=1080p before zipping. The per-shark frame set (shark_frames/)
+# at full 5.3K resolution alone is tens of MB per shark and would blow the limit; 1080p
+# JPGs are ~150-300 KB each. On-disk artifacts + the review overlay stay full-res — only
+# the uploaded copy shrinks.
+UPLOAD_FOLDERS = ['bounding_boxes', 'detection_results', 'false_positives',
+                  'frames', 'masks', 'shark_frames']
+UPLOAD_IMAGE_MAX_W = 1920
+UPLOAD_IMAGE_MAX_H = 1080
+
+
+def _downscale_image_bytes(path, max_w=UPLOAD_IMAGE_MAX_W, max_h=UPLOAD_IMAGE_MAX_H):
+    """Return JPG bytes for `path` scaled to fit (max_w, max_h) keeping aspect.
+
+    Returns None on any failure so the caller can fall back to shipping the file
+    verbatim. Images already within bounds are still re-encoded (harmless, keeps one
+    code path)."""
+    try:
+        img = cv2.imread(path)
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        scale = min(max_w / w, max_h / h, 1.0)
+        if scale < 1.0:
+            img = cv2.resize(img, (max(1, round(w * scale)), max(1, round(h * scale))),
+                             interpolation=cv2.INTER_AREA)
+        ok, enc = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        return enc.tobytes() if ok else None
+    except Exception:
+        return None
+
+
+def add_experiment_to_zip(zipf, experiment_dir, folders=UPLOAD_FOLDERS):
+    """Add an experiment's upload folders to an open ZipFile, downscaling images.
+
+    Any .jpg/.jpeg/.png is downscaled to <=1080p (see _downscale_image_bytes); CSVs and
+    the boxes.json sidecars are added verbatim. Returns the number of files written."""
+    count = 0
+    for folder in folders:
+        folder_path = os.path.join(experiment_dir, folder)
+        if not os.path.exists(folder_path):
+            logger.warning(f"[upload]   skipping missing folder: {folder}")
+            continue
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, experiment_dir)
+                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    data = _downscale_image_bytes(file_path)
+                    if data is not None:
+                        zipf.writestr(arcname, data)
+                    else:
+                        zipf.write(file_path, arcname)
+                else:
+                    zipf.write(file_path, arcname)
+                count += 1
+    return count
+
+
 class UploadThread(QThread):
     progress_updated = pyqtSignal(int)
     upload_finished = pyqtSignal(bool, str)
@@ -5288,20 +5484,12 @@ class UploadThread(QThread):
         zip_name = f'{Path(self.experiment_dir).name}.zip'
         logger.info(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
         try:
-            file_count = 0
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, 'w') as zipf:
-                for folder in ['bounding_boxes', 'detection_results', 'false_positives', 'frames', 'masks']:
-                    folder_path = os.path.join(self.experiment_dir, folder)
-                    if os.path.exists(folder_path):
-                        for root, _, files in os.walk(folder_path):
-                            for file in files:
-                                file_path = os.path.join(root, file)
-                                arcname = os.path.relpath(file_path, self.experiment_dir)
-                                zipf.write(file_path, arcname)
-                                file_count += 1
-                    else:
-                        logger.warning(f"[upload]   skipping missing folder: {folder}")
+                # 'shark_frames' carries every sampled frame of each shark (+ a per-frame
+                # box sidecar); add_experiment_to_zip downscales images to <=1080p so the
+                # full detection sequence fits under the upload size limit.
+                file_count = add_experiment_to_zip(zipf, self.experiment_dir)
 
             zip_size = buffer.tell()
             buffer.seek(0)
@@ -5410,6 +5598,14 @@ class FramePlayer(QLabel):
         self.timer.setInterval(self.BASE_INTERVAL_MS)
         self._static_pixmap = None
 
+        # Bounding-box overlay, drawn at paint time rather than baked into the frames, so
+        # it can be toggled on/off and recolored live. self._boxes[i] is the box for
+        # self.frames[i] as (x_center, y_center, w, h) in native frame pixels, or None.
+        self._boxes = []
+        self._show_boxes = True
+        self._box_color = QColor(255, 96, 31)
+        self._longest_index = None  # index of the frame the length was measured on
+
     # --- playback control -------------------------------------------------
     # Two backends sit behind these: a QTimer stepping self.frames (MP4 clips, the
     # current format) and a QMovie (legacy .gif clips). Both must honour every call.
@@ -5448,6 +5644,58 @@ class FramePlayer(QLabel):
             return
         self.current_frame = max(0, min(int(index), len(self.frames) - 1))
         self.show_frame(self.current_frame)
+
+    # --- bounding-box overlay --------------------------------------------
+    # Boxes are drawn on top of the frame in paintEvent (frame-sequence mode only), not
+    # baked into the pixels, so visibility and color are live. Callers supply a list
+    # parallel to self.frames via set_overlay_boxes().
+
+    def set_overlay_boxes(self, boxes, longest_index=None):
+        """Provide per-frame boxes (parallel to self.frames) for the paint-time overlay.
+
+        Each entry is (x_center, y_center, w, h) in native frame pixels, or None for a
+        frame with no box. Pass [] to clear the overlay."""
+        self._boxes = list(boxes) if boxes else []
+        self._longest_index = longest_index
+        self.update()
+
+    def has_boxes(self):
+        return any(b is not None for b in self._boxes)
+
+    def set_boxes_visible(self, visible):
+        self._show_boxes = bool(visible)
+        self.update()
+
+    def boxes_visible(self):
+        return self._show_boxes
+
+    def set_box_color(self, color):
+        if color is not None:
+            self._box_color = QColor(color)
+            self.update()
+
+    def _paint_box_overlay(self, painter, dx, dy, dw, dh, frame_w, frame_h):
+        """Draw the current frame's box, mapping native pixel coords into the displayed
+        (KeepAspectRatio-scaled, centered) rect. Matches content_rect()'s geometry."""
+        if not self._show_boxes or not self._boxes or frame_w <= 0 or frame_h <= 0:
+            return
+        if not (0 <= self.current_frame < len(self._boxes)):
+            return
+        box = self._boxes[self.current_frame]
+        if box is None:
+            return
+        cx, cy, bw, bh = box
+        sx = dw / frame_w
+        sy = dh / frame_h
+        rx = dx + (cx - bw / 2) * sx
+        ry = dy + (cy - bh / 2) * sy
+        painter.save()
+        pen = QPen(self._box_color)
+        pen.setWidth(max(2, round(min(dw, dh) / 250)))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(int(rx), int(ry), int(bw * sx), int(bh * sy))
+        painter.restore()
 
     def current_frame_pixmap(self):
         """Return the currently displayed clip frame as a full-resolution QPixmap.
@@ -5548,6 +5796,7 @@ class FramePlayer(QLabel):
         self._detach_movie()
         self.timer.stop()
         self.frames = []
+        self._boxes = []
         self._clear_height_constraints()
         self._static_pixmap = pixmap
         self.clear()  # drop any QLabel pixmap/text so sizeHint stays small
@@ -5563,6 +5812,7 @@ class FramePlayer(QLabel):
         self._static_pixmap = None
         self.timer.stop()
         self.frames = []
+        self._boxes = []
         self._clear_height_constraints()
         self.clear()
 
@@ -5598,6 +5848,7 @@ class FramePlayer(QLabel):
 
     def set_gif(self, path: str):
         self._static_pixmap = None
+        self._boxes = []
         self._clear_height_constraints()
         self._detach_movie()
         self.clear()
@@ -5665,6 +5916,7 @@ class FramePlayer(QLabel):
             x = (widget_size.width() - scaled.width()) // 2
             y = (widget_size.height() - scaled.height()) // 2
             painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), pixmap)
+            self._paint_box_overlay(painter, x, y, scaled.width(), scaled.height(), w, h)
             return
 
         # 4) Fallback
@@ -5678,6 +5930,7 @@ class FramePlayer(QLabel):
 
     def clear_frame(self):
         self._static_pixmap = None
+        self._boxes = []
         self._detach_movie()
         self.timer.stop()
         self.frames = []
