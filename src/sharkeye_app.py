@@ -95,8 +95,8 @@ from frame_sampling import (iter_sampled_frames, parse_detections, downscale_for
                             format_sampling_stats, format_sampling_timeline)
 try:
     # Keyframe-scan sampling needs PyAV; keep it optional so the app still runs (on
-    # grab-through) if PyAV is unavailable. try_keyframe_sampler itself returns None
-    # unless SHARKEYE_KEYFRAME_SAMPLING=1, so importing it changes no default behavior.
+    # grab-through) if PyAV is unavailable. It is on by default; try_keyframe_sampler
+    # validates each file and returns None on any problem, falling back to grab-through.
     from keyframe_sampling import try_keyframe_sampler
 except Exception:  # pragma: no cover - PyAV missing / import failure
     def try_keyframe_sampler(*_args, **_kwargs):
@@ -1539,12 +1539,29 @@ class CloudUploadPage(HistoricalExperimentsPage):
         self.settings_obj.setValue("ignore_update", "false" if checked else "true")
 
 class CustomTracker:
+    # Cost returned for a track whose last sighting is older than the grace period:
+    # large enough to always exceed distance_threshold (so the Hungarian pairing is
+    # rejected and the detection starts a new id), but finite — linear_sum_assignment
+    # rejects inf/NaN.
+    _UNMATCHABLE_COST = 1e9
+
     def __init__(self, distance_threshold=250):
         self.settings_obj = QSettings("BOSL", "SharkEye_App")
-        
+
         self.tracks = {}
         self.next_id = 1
         self.distance_threshold = distance_threshold
+        # Re-association grace period, in video time (ms). A shark's detection often
+        # blinks out for a moment and resurfaces after moving a short distance; without a
+        # grace window the tracker spawns a fresh id each time and fragments one animal
+        # into several. If a detection reappears within this window of a track's last
+        # sighting we re-link it to that track — matching against a velocity-extrapolated
+        # prediction (see _predict_new_position); past the window the track is treated as
+        # gone and a new id is started (see _calculate_cost). Measured in video time, not
+        # frame count, because a dropout advances no frame counter — update() only runs on
+        # frames that had a detection — so only the timestamp reflects how long the object
+        # was actually missing.
+        self.reassociation_grace_ms = 2000
         self.min_frames = int(self.settings_obj.value("min_frames", "5"))
         self.confidence_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.unique_sharks = 0
@@ -1563,11 +1580,11 @@ class CustomTracker:
             new_unique_shark = True
             self.unique_sharks = 1
         else:
-            predicted_positions = {track_id: self._predict_new_position(track) 
+            predicted_positions = {track_id: self._predict_new_position(track, timestamp)
                                    for track_id, track in self.tracks.items()}
 
-            cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id]) 
-                                     for det in detections] 
+            cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id], timestamp)
+                                     for det in detections]
                                     for track_id, track in self.tracks.items()])
             
             track_indices, detection_indices = linear_sum_assignment(cost_matrix)
@@ -1666,7 +1683,13 @@ class CustomTracker:
         if len(track['positions']) > 1:
             prev_pos = np.array(track['positions'][-2][:2])
             curr_pos = np.array([x, y])
-            track['velocity'] = curr_pos - prev_pos
+            # Velocity in pixels-per-ms so _predict_new_position can extrapolate over the
+            # real elapsed time of a dropout (frame counts don't advance while a shark is
+            # undetected). Guard duplicate / zero-dt samples: keep the prior velocity
+            # rather than dividing by zero.
+            dt_ms = track['timestamps'][-1] - track['timestamps'][-2]
+            if dt_ms > 0:
+                track['velocity'] = (curr_pos - prev_pos) / dt_ms
 
     @staticmethod
     def _format_timestamp(milliseconds):
@@ -1758,18 +1781,35 @@ class CustomTracker:
         self.next_id = 1
         self.unique_sharks = 0
 
-    def _predict_new_position(self, track):
-        """Predict new position based on previous positions and velocity"""
-        if len(track['positions']) > 0:
-            return np.array(track['positions'][-1][:2]) + track['velocity']
-        else:
-            return np.array([0, 0])  # Default prediction if no positions available
+    def _predict_new_position(self, track, timestamp):
+        """Predict where the track's object should be at `timestamp`.
 
-    def _calculate_cost(self, track, detection, predicted_position):
-        """Calculate cost for Hungarian algorithm"""
-        position_cost = np.linalg.norm(predicted_position - np.array(detection[:2]))
-        time_since_last_detection = track['frames_since_last_detection']
-        return position_cost + time_since_last_detection * 10  # Penalize tracks that haven't been detected recently
+        Velocity is stored in pixels-per-ms (see _update_track), so we extrapolate the
+        last known position by the *elapsed video time* since the last detection. That is
+        what lets a shark which dropped out for a moment and kept swimming re-link to its
+        existing track: over a ~1s gap the prediction moves with the animal instead of
+        sitting at its stale last position. Time-based (not frame count) because the
+        tracker only sees frames that had a detection — a dropout advances no frame
+        counter, so only the timestamp reflects how long the object was missing.
+        """
+        if not track['positions']:
+            return np.array([0, 0])  # Default prediction if no positions available
+        last_pos = np.array(track['positions'][-1][:2])
+        elapsed_ms = timestamp - track['timestamps'][-1]
+        return last_pos + track['velocity'] * elapsed_ms
+
+    def _calculate_cost(self, track, detection, predicted_position, timestamp):
+        """Cost for the Hungarian assignment.
+
+        Within the re-association grace period the cost is just the distance from the
+        (time-extrapolated) predicted position to the detection, so a shark that briefly
+        dropped out re-links to its existing id. Past the grace period the track is
+        considered gone and made effectively unmatchable, so the detection starts a fresh
+        id rather than resurrecting a stale track."""
+        elapsed_ms = timestamp - track['timestamps'][-1]
+        if elapsed_ms > self.reassociation_grace_ms:
+            return self._UNMATCHABLE_COST
+        return np.linalg.norm(predicted_position - np.array(detection[:2]))
 
     def is_significant_track(self, track):
         """Return True if a track meets the confidence and minimum-frame settings."""
@@ -2145,6 +2185,10 @@ class VideoProcessingWorker(QObject):
 
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Read fps up front: it's used in the log line below and, in keyframe mode, to
+        # derive per-frame timestamps. `or 30` guards the occasional container that
+        # reports 0 fps. (grab-through mode reads POS_MSEC directly and ignores this.)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -2179,9 +2223,10 @@ class VideoProcessingWorker(QObject):
         preview_interval = 1.0 / 20.0
         last_preview = 0.0
 
-        # Sequential forward sampling. Default: grab-through with an adaptive stride.
-        # When SHARKEYE_KEYFRAME_SAMPLING=1 (and the file decodes cleanly), swap in the
-        # keyframe-scan sampler: decode only keyframes over empty water, go dense around
+        # Sequential forward sampling. Default (unless SHARKEYE_KEYFRAME_SAMPLING=0):
+        # when the file decodes cleanly, use the keyframe-scan sampler; otherwise fall
+        # back to grab-through with an adaptive stride.
+        # The keyframe-scan sampler decodes only keyframes over empty water, goes dense around
         # detections — ~5x faster on long-GOP HEVC (decode-bound) footage with equal
         # recall. try_keyframe_sampler returns None on any problem, so we transparently
         # fall back to grab-through and never regress. In keyframe mode cap stays open
@@ -2189,9 +2234,7 @@ class VideoProcessingWorker(QObject):
         # no longer advanced by reads.
         sampler = try_keyframe_sampler(self.video_path, logger)
         use_keyframe = sampler is not None
-        if use_keyframe:
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        else:
+        if not use_keyframe:
             sampler = iter_sampled_frames(cap)
         had_detection = None
         sampling_stats = {}

@@ -20,8 +20,8 @@ logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
                             format_sampling_timeline)
 try:
-    # Optional PyAV-backed keyframe sampling; falls back to grab-through when
-    # unavailable or not enabled (SHARKEYE_KEYFRAME_SAMPLING=1). See keyframe_sampling.
+    # PyAV-backed keyframe sampling, on by default; falls back to grab-through when
+    # unavailable or disabled (SHARKEYE_KEYFRAME_SAMPLING=0). See keyframe_sampling.
     from keyframe_sampling import try_keyframe_sampler
 except Exception:  # pragma: no cover - PyAV missing / import failure
     def try_keyframe_sampler(*_args, **_kwargs):
@@ -68,10 +68,27 @@ def calculate_shark_length(bbox):
     return length_m * 3.28084 # * depth_correction_factor  # Convert meters to feet
 
 class CustomTracker:
+    # Cost returned for a track whose last sighting is older than the grace period:
+    # large enough to always exceed distance_threshold (so the Hungarian pairing is
+    # rejected and the detection starts a new id), but finite — linear_sum_assignment
+    # rejects inf/NaN.
+    _UNMATCHABLE_COST = 1e9
+
     def __init__(self, sam_model_path, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
         self.tracks = {}
         self.next_id = 1
         self.distance_threshold = distance_threshold
+        # Re-association grace period, in video time (ms). A shark's detection often
+        # blinks out for a moment and resurfaces after moving a short distance; without a
+        # grace window the tracker spawns a fresh id each time and fragments one animal
+        # into several. If a detection reappears within this window of a track's last
+        # sighting we re-link it to that track — matching against a velocity-extrapolated
+        # prediction (see _predict_new_position); past the window the track is treated as
+        # gone and a new id is started (see _calculate_cost). Measured in video time, not
+        # frame count, because a dropout advances no frame counter — update() only runs on
+        # frames that had a detection — so only the timestamp reflects how long the object
+        # was actually missing.
+        self.reassociation_grace_ms = 2000
         self.min_frames = min_frames
         self.confidence_threshold = confidence_threshold
         self.unique_sharks = 0
@@ -89,11 +106,11 @@ class CustomTracker:
             new_unique_shark = True
             self.unique_sharks = 1
         else:
-            predicted_positions = {track_id: self._predict_new_position(track) 
+            predicted_positions = {track_id: self._predict_new_position(track, timestamp)
                                    for track_id, track in self.tracks.items()}
 
-            cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id]) 
-                                     for det in detections] 
+            cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id], timestamp)
+                                     for det in detections]
                                     for track_id, track in self.tracks.items()])
             
             track_indices, detection_indices = linear_sum_assignment(cost_matrix)
@@ -189,7 +206,13 @@ class CustomTracker:
         if len(track['positions']) > 1:
             prev_pos = np.array(track['positions'][-2][:2])
             curr_pos = np.array([x, y])
-            track['velocity'] = curr_pos - prev_pos
+            # Velocity in pixels-per-ms so _predict_new_position can extrapolate over the
+            # real elapsed time of a dropout (frame counts don't advance while a shark is
+            # undetected). Guard duplicate / zero-dt samples: keep the prior velocity
+            # rather than dividing by zero.
+            dt_ms = track['timestamps'][-1] - track['timestamps'][-2]
+            if dt_ms > 0:
+                track['velocity'] = (curr_pos - prev_pos) / dt_ms
 
     @staticmethod
     def _format_timestamp(milliseconds):
@@ -276,18 +299,35 @@ class CustomTracker:
         self.next_id = 1
         self.unique_sharks = 0
 
-    def _predict_new_position(self, track):
-        """Predict new position based on previous positions and velocity"""
-        if len(track['positions']) > 0:
-            return np.array(track['positions'][-1][:2]) + track['velocity']
-        else:
-            return np.array([0, 0])  # Default prediction if no positions available
+    def _predict_new_position(self, track, timestamp):
+        """Predict where the track's object should be at `timestamp`.
 
-    def _calculate_cost(self, track, detection, predicted_position):
-        """Calculate cost for Hungarian algorithm"""
-        position_cost = np.linalg.norm(predicted_position - np.array(detection[:2]))
-        time_since_last_detection = track['frames_since_last_detection']
-        return position_cost + time_since_last_detection * 10  # Penalize tracks that haven't been detected recently
+        Velocity is stored in pixels-per-ms (see _update_track), so we extrapolate the
+        last known position by the *elapsed video time* since the last detection. That is
+        what lets a shark which dropped out for a moment and kept swimming re-link to its
+        existing track: over a ~1s gap the prediction moves with the animal instead of
+        sitting at its stale last position. Time-based (not frame count) because the
+        tracker only sees frames that had a detection — a dropout advances no frame
+        counter, so only the timestamp reflects how long the object was missing.
+        """
+        if not track['positions']:
+            return np.array([0, 0])  # Default prediction if no positions available
+        last_pos = np.array(track['positions'][-1][:2])
+        elapsed_ms = timestamp - track['timestamps'][-1]
+        return last_pos + track['velocity'] * elapsed_ms
+
+    def _calculate_cost(self, track, detection, predicted_position, timestamp):
+        """Cost for the Hungarian assignment.
+
+        Within the re-association grace period the cost is just the distance from the
+        (time-extrapolated) predicted position to the detection, so a shark that briefly
+        dropped out re-links to its existing id. Past the grace period the track is
+        considered gone and made effectively unmatchable, so the detection starts a fresh
+        id rather than resurrecting a stale track."""
+        elapsed_ms = timestamp - track['timestamps'][-1]
+        if elapsed_ms > self.reassociation_grace_ms:
+            return self._UNMATCHABLE_COST
+        return np.linalg.norm(predicted_position - np.array(detection[:2]))
 
     def _count_significant_tracks(self):
         """Count tracks that meet the criteria for being a significant detection"""

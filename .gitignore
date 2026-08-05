@@ -41,3 +41,4 @@ assets/images/image_sources.txt
 
 # Local scratch/benchmark artifacts (logs, sample clips, screenshots)
 scratch_test/
+perf.txt

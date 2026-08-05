@@ -29,10 +29,11 @@ import os
 
 import av
 
-# Default for the SHARKEYE_KEYFRAME_SAMPLING flag when it is unset. Kept opt-in
-# ("0") until the keyframe path is validated inside the frozen PyInstaller bundle
-# (cv2 and PyAV each ship their own libav); flip to "1" to make it the default.
-_DEFAULT_ENABLED = "0"
+# Default for the SHARKEYE_KEYFRAME_SAMPLING flag when it is unset. Now on ("1")
+# by default; set SHARKEYE_KEYFRAME_SAMPLING=0 to force the legacy grab-through
+# path. ``try_keyframe_sampler`` still validates each file decodes cleanly and
+# falls back to grab-through on any problem, so this can never regress a run.
+_DEFAULT_ENABLED = "1"
 
 
 def keyframe_sampling_requested():
