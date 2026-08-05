@@ -64,7 +64,10 @@ jobs:
           
       - name: Run download_models_from_gcs.py
         run: python model_weights/download_models_from_gcs.py
-        
+      
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform macos_intel
+
       - name: Build with PyInstaller spec
         shell: bash
         run: |
@@ -83,12 +86,6 @@ jobs:
           elif [ -d "dist/SharkEye" ]; then
             ls -lah dist/SharkEye || true
           fi
-
-      - name: Test Headless build
-        run: python src/sharkeye_app.py --input_dir .\sample_data\
-
-      - name: Delete test results
-        run: rm -rf headless_predictions
 
       - name: Ad-hoc codesign app
         shell: bash
@@ -116,7 +113,17 @@ jobs:
           || hdiutil create -volname "SharkEye" -srcfolder "dist/SharkEye.app" -ov -format UDZO "$dmgName"
           echo "ZIP_NAME=$dmgName" >> "$GITHUB_ENV"
           echo "Created $dmgName"
-        
+
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_macOS_Intel$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
       # - name: Upload ZIP to Google Drive
       #   uses: willo32/google-drive-upload-action@v1
       #   with:
@@ -127,6 +134,3 @@ jobs:
 
       - name: Upload Intel build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
-
-      - name: Update latest_version.json
-        run: python src/manage_version.py --platform macos_intel

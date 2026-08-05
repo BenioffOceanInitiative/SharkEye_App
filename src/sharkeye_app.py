@@ -31,7 +31,7 @@ from scipy.optimize import linear_sum_assignment
 import csv
 from tqdm import tqdm
 import re
-from utility import resource_path, get_results_dir
+from utility import resource_path, get_results_dir, select_torch_device
 from log_config import get_logger
 
 logger = get_logger("sharkeye.app")
@@ -61,6 +61,22 @@ from segmentation.segmentation_model import (
     get_sam_predictor,
 )
 import ast
+
+# Windowed (console=False) PyInstaller builds set stdout/stderr to None on Windows.
+# tqdm.write/print then raise AttributeError ('NoneType' has no attribute 'write').
+def _ensure_stdio():
+    if sys.stdout is None or sys.stderr is None:
+        try:
+            log_path = os.path.join(tempfile.gettempdir(), "sharkeye_console.log")
+            log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        except Exception:
+            log_fh = io.StringIO()
+        if sys.stdout is None:
+            sys.stdout = log_fh
+        if sys.stderr is None:
+            sys.stderr = log_fh
+
+_ensure_stdio()
 
 # Add these constants for length calculation
 DRONE_ALTITUDE_M = 40
@@ -105,6 +121,48 @@ from theme import (
 DEFAULT_DETECTION_LABELS = [
     "Shark", "Kelp", "Dolphin", "Surfer", "Boat", "Bird", "Duplicate", "Glare", "None", "Other"
 ]
+
+DEFAULT_DRONE_SETTINGS = {
+    "Mavic 2 Pro": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(73)
+        }
+    },
+    "Air 2S": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(63.5),
+            "(5472, 3078)": math.radians(82.9)
+        }
+    }
+}
+
+
+def ensure_app_settings(settings_obj=None):
+    """Seed QSettings defaults when missing (fresh CI runners, first launch, etc.)."""
+    settings_obj = settings_obj or QSettings("BOSL", "SharkEye_App")
+    if not settings_obj.value("drone_settings"):
+        settings_obj.setValue("drone_settings", json.dumps(DEFAULT_DRONE_SETTINGS))
+    if not settings_obj.value("confidence_threshold"):
+        settings_obj.setValue("confidence_threshold", "0.40")
+    if not settings_obj.value("min_frames"):
+        settings_obj.setValue("min_frames", "5")
+    if not settings_obj.value("playback_min_frames"):
+        settings_obj.setValue("playback_min_frames", "5")
+    if not settings_obj.value("playback_speed"):
+        settings_obj.setValue("playback_speed", str(DEFAULT_PLAYBACK_SPEED))
+    if not settings_obj.value("enable_auto_upload"):
+        settings_obj.setValue("enable_auto_upload", "false")
+    if not settings_obj.value("ignore_update"):
+        settings_obj.setValue("ignore_update", "false")
+    if not settings_obj.value("detection_labels"):
+        save_detection_labels(settings_obj, list(DEFAULT_DETECTION_LABELS))
+    return settings_obj
+
+
+def get_drone_settings_dict(settings_obj=None):
+    """Return the drone settings dict, seeding defaults if needed."""
+    settings_obj = ensure_app_settings(settings_obj)
+    return json.loads(settings_obj.value("drone_settings"))
 
 
 def get_detection_labels(settings_obj):
@@ -224,6 +282,18 @@ def calculate_adjusted_shark_length(length_raw):
     depth_correction_factor = (1 + DRONE_ALTITUDE_M)/DRONE_ALTITUDE_M
     length_adj = length_raw * asl_correction_factor * depth_correction_factor
     return length_adj
+
+def get_video_length(video_path):
+    video = cv2.VideoCapture(video_path)
+
+    # Get total number of frames and frames per second
+    fps = video.get(cv2.CAP_PROP_FPS)
+    frame_count = float(video.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Calculate duration in seconds
+    duration = frame_count / fps
+    video.release()
+    return duration
 
 class SwitchControl(SwitchControl):
     """
@@ -2017,7 +2087,7 @@ class PostProcessJob(QRunnable):
 class VideoProcessingWorker(QObject):
     progress_update = pyqtSignal(int)
     processing_complete = pyqtSignal(dict, str)
-    frame_processed = pyqtSignal(np.ndarray)  # Add a boolean flag for detection
+    frame_processed = pyqtSignal(QImage)  # owned image — do not queue raw ndarray across threads
     progress_status_changed = pyqtSignal(str)  # current process summary for MainWindow.progress_status
     postproc_ready = pyqtSignal(dict, str, str)  # (payload, output_dir, video_name) for async export + clip encoding
     video_timing_ready = pyqtSignal(dict)  # per-video phase timing for the batch summary
@@ -2025,7 +2095,7 @@ class VideoProcessingWorker(QObject):
     def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
         super().__init__()
         # Read settings 
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
@@ -2033,17 +2103,54 @@ class VideoProcessingWorker(QObject):
         self.altitude = altitude
         self.flight_location = flight_location
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
-        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
+        self.drone_settings = get_drone_settings_dict(self.settings_obj)
         
     def run(self):
+        # File log for frozen builds (console=False) so inference crashes are diagnosable.
+        _log_path = os.path.join(tempfile.gettempdir(), "sharkeye_infer.log")
+
+        def _log(msg):
+            try:
+                with open(_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+            except Exception:
+                pass
+
+        try:
+            self._run_inference(_log)
+        except Exception:
+            import traceback
+            _log("FATAL:\n" + traceback.format_exc())
+            # Don't re-raise: an uncaught worker exception can abort the frozen
+            # Qt process (BEX64 / 0xc0000409). Let the UI tear down cleanly.
+            try:
+                self.progress_status_changed.emit("")
+                self.processing_complete.emit({}, os.path.basename(self.video_path))
+            except Exception:
+                pass
+
+    def _run_inference(self, _log):
         self.progress_status_changed.emit("Running Inference")
+        _log(f"start video={self.video_path}")
+        # Re-bind the model on this worker thread. It was loaded/warmed on ModelLoader's
+        # QThread; sharing a CUDA module across QThreads is a common frozen-Windows abort.
+        try:
+            device = select_torch_device()
+            self.model.to(device)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            _log(f"model on {device}")
+        except Exception as e:
+            _log(f"model rebind failed: {e}")
+
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
+        _log(f"opened {video_width}x{video_height} frames={total_frames} fps={fps}")
+
         custom_tracker.fov_radians = self.drone_settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
 
@@ -2102,6 +2209,8 @@ class VideoProcessingWorker(QObject):
                 results = self.model(frame, classes=[0], verbose=False)
                 model_time += time.perf_counter() - _t_model
                 frames_sampled += 1
+                if frames_sampled == 1:
+                    _log(f"first infer ok frame={frame_num} shape={getattr(frame, 'shape', None)}")
 
                 detections = parse_detections(results, self.detection_threshold)
                 had_detection = bool(detections)
@@ -2117,7 +2226,15 @@ class VideoProcessingWorker(QObject):
                     # widget is far smaller than a source frame, so shipping full 4K wastes CPU.
                     preview = self.draw_bounding_boxes(frame, detections) if had_detection else frame
                     preview = downscale_for_preview(preview)
-                    self.frame_processed.emit(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                    # Build an owned QImage on the worker thread. Queuing raw np.ndarray
+                    # via pyqtSignal has aborted frozen Windows builds in Qt6Core
+                    # (0xc0000409) before any frame appeared.
+                    rgb = np.ascontiguousarray(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB))
+                    h, w, _ = rgb.shape
+                    qimg = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format.Format_RGB888).copy()
+                    self.frame_processed.emit(qimg)
+                    if frames_sampled == 1:
+                        _log(f"first preview emitted {w}x{h}")
                     last_preview = now
 
                 self.progress_update.emit(int((frame_num + 1) / total_frames * 100))
@@ -2126,6 +2243,7 @@ class VideoProcessingWorker(QObject):
 
         infer_time = time.perf_counter() - infer_start
         cap.release()
+        _log(f"infer loop done sampled={frames_sampled} dets={total_detections} t={infer_time:.2f}s")
 
         if not QThread.currentThread().isInterruptionRequested():
             significant_tracks = custom_tracker.get_significant_tracks()
@@ -2205,6 +2323,10 @@ class VideoProcessingWorker(QObject):
                 'accelerated_skipped_seconds': accel_skipped_frames / fps_eff,
             })
             self.processing_finished(significant_tracks)
+        else:
+            _log("interrupted before save")
+            self.progress_status_changed.emit("")
+            self.processing_complete.emit({}, os.path.basename(self.video_path))
 
     def _extract_postproc_payload(self, tracks):
         """Move frame buffers out of `tracks` into a standalone payload for async
@@ -2473,8 +2595,7 @@ class ModelLoader(QObject):
     def run(self):
         model = None
         try:
-            device = torch.device('cuda' if torch.cuda.is_available() else
-                          'mps' if torch.backends.mps.is_available() else 'cpu')
+            device = select_torch_device()
             logger.info(f"Using device: {device}")
             model = YOLO(MODEL_PATH).to(device)
             # Warm up the model with one dummy inference so the first real video doesn't
@@ -2530,45 +2651,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.check_for_update)
 
     def initialize_settings(self):
-        # Drone Settings
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
-        default_drones = {
-                "Mavic 2 Pro": {
-                    "Resolution": {
-                        "(2688, 1512)": math.radians(73)
-                    }
-                },
-                "Air 2S": {
-                    "Resolution": {
-                        "(2688, 1512)": math.radians(63.5),
-                        "(5472, 3078)": math.radians(82.9)
-                    }
-                }
-            }
-
-        if not self.settings_obj.value("drone_settings"):
-            self.settings_obj.setValue("drone_settings", json.dumps(default_drones))
-        
-        # Confidence
-        if not self.settings_obj.value("confidence_threshold"):
-            self.settings_obj.setValue("confidence_threshold", ".40")
-        if not self.settings_obj.value("min_frames"):
-            self.settings_obj.setValue("min_frames", "5")
-        if not self.settings_obj.value("playback_min_frames"):
-            self.settings_obj.setValue("playback_min_frames", "5")
-        if not self.settings_obj.value("playback_speed"):
-            self.settings_obj.setValue("playback_speed", str(DEFAULT_PLAYBACK_SPEED))
-
-        # Cloud Settings
-        if not self.settings_obj.value("enable_auto_upload"):
-            self.settings_obj.setValue("enable_auto_upload", "false")
-
-        # Update check: when "true", the app skips the startup version check.
-        if not self.settings_obj.value("ignore_update"):
-            self.settings_obj.setValue("ignore_update", "false")
-
-        if not self.settings_obj.value("detection_labels"):
-            save_detection_labels(self.settings_obj, list(DEFAULT_DETECTION_LABELS))
+        self.settings_obj = ensure_app_settings()
 
     def populate_label_combo(self, combo, current_label):
         labels = get_detection_labels(self.settings_obj)
@@ -5080,17 +5163,20 @@ class MainWindow(QMainWindow):
     def generate_filename(self, track, new_label):
         return f"{track['video_name']}_{new_label.lower()}{track['unique_id']}_time{track['time']}_det{track['detections']}_avgConf{int(track['avg_conf']*100):02d}_bestConf{int(track['best_conf']*100):02d}_len{track['length'].replace('ft', 'ft').replace('in', 'in')}.jpg"
 
-    def update_frame_display(self, frame):
+    def update_frame_display(self, q_image):
         # First frame of this video arrived — switch the busy bar back to determinate.
         if getattr(self, "_awaiting_first_frame", False):
             self._awaiting_first_frame = False
             if getattr(self, "progress_bar", None) is not None:
                 self.progress_bar.setRange(0, 100)
-        height, width, channel = frame.shape
-        bytes_per_line = 3 * width
-        q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        if q_image is None or q_image.isNull():
+            return
         pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(self.frame_display.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled_pixmap = pixmap.scaled(
+            self.frame_display.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
         self.frame_display.setPixmap(scaled_pixmap)
         self.frame_display.show()
 
@@ -6025,12 +6111,12 @@ class FramePlayer(QLabel):
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
     def __init__(self, video_path, model, output_dir):
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
+        self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
-        self.drone_settings = json.loads(self.settings_obj.value("drone_settings"))
+        self.drone_settings = get_drone_settings_dict(self.settings_obj)
     
     progress_update = 0
     processing_complete = {}
@@ -6041,9 +6127,9 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         video_name = os.path.splitext(os.path.basename(video_path))[0]
 
         # Same significance thresholds the tracker uses (static method has no self).
-        settings_obj = QSettings("BOSL", "SharkEye_App")
-        min_frames = int(settings_obj.value("min_frames"))
-        confidence_threshold = float(settings_obj.value("confidence_threshold"))
+        settings_obj = ensure_app_settings()
+        min_frames = int(settings_obj.value("min_frames", "5"))
+        confidence_threshold = float(settings_obj.value("confidence_threshold", "0.40"))
 
         images_saved = 0
 
@@ -6068,7 +6154,11 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
             if is_significant:
                 # Use segmentation model to generate lengths
+                seg_start = time.perf_counter()
                 mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                seg_end = time.perf_counter()
+                seg_duration = seg_end - seg_start
+                track['segmentation_duration'] = seg_duration
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
 
                 track['longest_length'] = pixel_length
@@ -6173,23 +6263,48 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 'Label': 'Shark',
                 'manual_length_px': '',
                 'manual_length_ft': '',
+                'Segmentation Duration': track['segmentation_duration'],
             }
 
             all_track_info.append(track_info)
     
         return all_track_info            
 
-def mass_prediction(video_path, current_output_dir):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
+def mass_prediction(video_paths, current_output_dir):
+    device = select_torch_device()
     logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
     
-    videos_tqdm = tqdm(video_path)
+    videos_tqdm = tqdm(video_paths)
     all_track_results = []
+    processing_logs = {}
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
+        path_start = time.perf_counter()
         processor = HeadlessVideoProcessor(path, model, current_output_dir)
-        all_track_results.extend(processor.run())
+        path_results = processor.run()
+        path_end = time.perf_counter()
+
+        total_processing_duration = path_end - path_start
+        total_tracks = len(path_results)
+        total_segmentation_duration = 0
+        video_length = get_video_length(path)
+
+        for track in path_results:
+            total_segmentation_duration += track['Segmentation Duration']
+
+        processing_logs[str(path.name)] = {
+            'video_length': video_length,
+            'total_tracks': total_tracks,
+            'total_processing_duration': total_processing_duration,
+            'total_segmentation_duration': total_segmentation_duration,    
+        }
+
+        all_track_results.extend(path_results)
+
+    log_path = current_output_dir / "processing_logs.json"
+    with open(log_path, "w") as f:
+        json.dump(processing_logs, f)
     
     return all_track_results
 
@@ -6229,7 +6344,7 @@ if __name__ == '__main__':
 
         # Run prediction
         output_dir.mkdir(parents=True, exist_ok=True)
-        results = mass_prediction(video_path=video_paths, current_output_dir=output_dir)
+        results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir)
 
         # Save results to CSV
         if results:

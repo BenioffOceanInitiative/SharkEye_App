@@ -147,6 +147,10 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# MinGW strip corrupts CUDA PE DLLs on Windows (WinError 998 loading nvrtc-*.dll).
+# Keep strip for macOS dylib size; disable it on Windows.
+_strip = not sys.platform.startswith("win")
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -155,7 +159,7 @@ exe = EXE(
     name="SharkEye",
     debug=False,                      # set True while diagnosing
     bootloader_ignore_signals=False,
-    strip=True,                       # strip symbol tables from bundled dylibs (torch/Qt/scipy)
+    strip=_strip,                     # strip symbol tables from bundled dylibs (torch/Qt/scipy)
     upx=False,                        # <-- DO NOT UPX torch/Qt/scipy dlls
     console=False,                    # release build: no debug terminal window
     icon=icon_file,
@@ -190,7 +194,7 @@ else:
         a.binaries,
         a.zipfiles,
         a.datas,
-        strip=True,
+        strip=_strip,                  # False on Windows — mingw strip corrupts CUDA PE DLLs
         upx=False,                     # keep UPX off here too
         upx_exclude=[],
         name="SharkEye",

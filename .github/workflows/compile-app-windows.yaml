@@ -41,6 +41,9 @@ jobs:
       - name: Run download_models_from_gcs.py
         run: python model_weights/download_models_from_gcs.py
 
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform windows
+
       - name: Build with PyInstaller spec
         run: pyinstaller SharkEye.spec
 
@@ -58,6 +61,16 @@ jobs:
           Write-Host "Created $zipName"
           echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
 
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_Windows$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
       - name: Upload ZIP to Google Drive
         uses: willo32/google-drive-upload-action@v1
         with:
@@ -69,6 +82,4 @@ jobs:
       - name: Upload build to Google Cloud Bucket
         run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
 
-      - name: Update latest_version.json
-        run: python src/manage_version.py --platform windows
 
