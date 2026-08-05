@@ -64,6 +64,7 @@ hidden_imports += collect_submodules("PyQt6.QtSvgWidgets")
 hidden_imports += collect_submodules("ultralytics")
 hidden_imports += collect_submodules("segment_anything")
 hidden_imports += collect_submodules("scipy")
+hidden_imports += collect_submodules("av")           # PyAV: keyframe-scan decode path
 # If you truly use these, uncomment; otherwise leave out to avoid build errors
 # hidden_imports += ["lapx", "dask"]
 
@@ -98,6 +99,11 @@ binaries += collect_dynamic_libs("cv2")              # includes ffmpeg dlls
 binaries += collect_dynamic_libs("numpy")
 binaries += collect_dynamic_libs("scipy")
 binaries += collect_dynamic_libs("torch")
+# PyAV ships its own libav (libavcodec/format/util/...) dylibs. cv2 also bundles a
+# libav build, so BOTH end up in the app — this is the dual-libav coexistence that
+# prints the "AVFFrameReceiver implemented in both" objc warning at startup. It runs,
+# but is the thing to verify in the built bundle before making keyframe sampling default.
+binaries += collect_dynamic_libs("av")
 
 # ---------- icon ----------
 if sys.platform.startswith("win"):

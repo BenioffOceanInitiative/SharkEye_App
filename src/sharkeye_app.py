@@ -77,6 +77,14 @@ MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 # Frame sampling / detection parsing (shared with the headless processors).
 from frame_sampling import (iter_sampled_frames, parse_detections, downscale_for_preview,
                             format_sampling_stats, format_sampling_timeline)
+try:
+    # Keyframe-scan sampling needs PyAV; keep it optional so the app still runs (on
+    # grab-through) if PyAV is unavailable. try_keyframe_sampler itself returns None
+    # unless SHARKEYE_KEYFRAME_SAMPLING=1, so importing it changes no default behavior.
+    from keyframe_sampling import try_keyframe_sampler
+except Exception:  # pragma: no cover - PyAV missing / import failure
+    def try_keyframe_sampler(*_args, **_kwargs):
+        return None
 
 # Theming: colors, icon tints, and reusable style snippets live in theme.py so styling
 # decisions stay in one place and adapt to the OS light/dark palette.
@@ -2025,9 +2033,20 @@ class VideoProcessingWorker(QObject):
         preview_interval = 1.0 / 20.0
         last_preview = 0.0
 
-        # Sequential forward sampling (no per-frame keyframe seeking); the stride adapts
-        # based on whether the previous frame had a detection.
-        sampler = iter_sampled_frames(cap)
+        # Sequential forward sampling. Default: grab-through with an adaptive stride.
+        # When SHARKEYE_KEYFRAME_SAMPLING=1 (and the file decodes cleanly), swap in the
+        # keyframe-scan sampler: decode only keyframes over empty water, go dense around
+        # detections — ~5x faster on long-GOP HEVC (decode-bound) footage with equal
+        # recall. try_keyframe_sampler returns None on any problem, so we transparently
+        # fall back to grab-through and never regress. In keyframe mode cap stays open
+        # for metadata only; timestamps come from the frame index since the capture is
+        # no longer advanced by reads.
+        sampler = try_keyframe_sampler(self.video_path, logger)
+        use_keyframe = sampler is not None
+        if use_keyframe:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        else:
+            sampler = iter_sampled_frames(cap)
         had_detection = None
         sampling_stats = {}
         try:
@@ -2049,7 +2068,7 @@ class VideoProcessingWorker(QObject):
                 had_detection = bool(detections)
 
                 if had_detection:
-                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    timestamp = (frame_num / fps * 1000.0) if use_keyframe else cap.get(cv2.CAP_PROP_POS_MSEC)
                     total_detections += len(detections)
                     custom_tracker.update(detections, frame, timestamp)
 
@@ -5792,9 +5811,15 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "masks"), exist_ok=True)
 
-        # Sequential forward sampling (no per-frame keyframe seeking). No preview is
-        # emitted in the headless path, so no color conversion is done.
-        sampler = iter_sampled_frames(cap)
+        # Sequential forward sampling. Keyframe-scan when enabled + decodable, else
+        # grab-through (see the main worker for the rationale). No preview is emitted
+        # here, so no color conversion is done.
+        sampler = try_keyframe_sampler(self.video_path, logger)
+        use_keyframe = sampler is not None
+        if use_keyframe:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        else:
+            sampler = iter_sampled_frames(cap)
         had_detection = None
         try:
             while True:
@@ -5805,7 +5830,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 had_detection = bool(detections)
 
                 if had_detection:
-                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    timestamp = (frame_num / fps * 1000.0) if use_keyframe else cap.get(cv2.CAP_PROP_POS_MSEC)
                     custom_tracker.update(detections, frame, timestamp)
 
                 self.progress_update = int((frame_num + 1) / total_frames * 100)

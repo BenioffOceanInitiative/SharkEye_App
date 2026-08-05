@@ -19,6 +19,13 @@ from log_config import get_logger
 logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
                             format_sampling_timeline)
+try:
+    # Optional PyAV-backed keyframe sampling; falls back to grab-through when
+    # unavailable or not enabled (SHARKEYE_KEYFRAME_SAMPLING=1). See keyframe_sampling.
+    from keyframe_sampling import try_keyframe_sampler
+except Exception:  # pragma: no cover - PyAV missing / import failure
+    def try_keyframe_sampler(*_args, **_kwargs):
+        return None
 import signal
 import json
 import requests
@@ -302,8 +309,8 @@ class HeadlessVideoProcessor():
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)  # TODO: remove — unused since sampling moved to iter_sampled_frames()
-        
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30  # used for keyframe-mode timestamps
+
         custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
         
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
@@ -313,8 +320,12 @@ class HeadlessVideoProcessor():
 
         detection_threshold = 0.4
 
-        # Sequential forward sampling (no per-frame keyframe seeking); no preview needed.
-        sampler = iter_sampled_frames(cap)
+        # Sequential forward sampling. Keyframe-scan when enabled + decodable, else
+        # grab-through; no preview needed here.
+        sampler = try_keyframe_sampler(self.video_path, logger)
+        use_keyframe = sampler is not None
+        if not use_keyframe:
+            sampler = iter_sampled_frames(cap)
         had_detection = None
         sampling_stats = {}
         infer_start = time.perf_counter()
@@ -327,7 +338,7 @@ class HeadlessVideoProcessor():
                 had_detection = bool(detections)
 
                 if had_detection:
-                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    timestamp = (frame_num / fps * 1000.0) if use_keyframe else cap.get(cv2.CAP_PROP_POS_MSEC)
                     custom_tracker.update(detections, frame, timestamp)
 
                 self.progress_update = int((frame_num + 1) / total_frames * 100)
