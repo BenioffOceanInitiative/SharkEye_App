@@ -1,4 +1,5 @@
 ultralytics
+av
 lapx
 PyQt6
 pyinstaller

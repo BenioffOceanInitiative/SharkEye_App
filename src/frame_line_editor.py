@@ -327,8 +327,11 @@ class ZoomableFrameView(QWidget):
         self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def load_image(self, image_path: str | Path) -> bool:
-        pixmap = QPixmap(str(image_path))
-        if pixmap.isNull():
+        return self.set_pixmap(QPixmap(str(image_path)))
+
+    def set_pixmap(self, pixmap: QPixmap | None) -> bool:
+        """Load an already-decoded frame (e.g. the current playback frame)."""
+        if pixmap is None or pixmap.isNull():
             return False
         self._pixmap = pixmap
         self._points = []
@@ -943,6 +946,35 @@ class FrameLineEditorWidget(QWidget):
             self._populate_initial_drone()
 
         loaded = self._view.load_image(self._image_path)
+        self._reset_after_load()
+        return loaded
+
+    def load_pixmap(
+        self,
+        pixmap: QPixmap,
+        drone_altitude: float | None = None,
+        initial_drone: str | None = None,
+    ) -> bool:
+        """Load an in-memory frame (e.g. the current playback frame) into the editor.
+
+        Same reset behaviour as ``load_image`` but sourced from an already-decoded
+        pixmap, so a frame that only exists in memory (a paused clip frame) can be
+        measured without first writing it to disk.
+        """
+        self._image_path = None
+        self._view.set_line_color(load_annotation_color(self._settings_obj))
+        if drone_altitude is not None:
+            self._altitude_input.setText(str(drone_altitude))
+        if initial_drone is not None:
+            self._initial_drone = initial_drone
+            self._populate_initial_drone()
+
+        loaded = self._view.set_pixmap(pixmap)
+        self._reset_after_load()
+        return loaded
+
+    def _reset_after_load(self) -> None:
+        """Shared post-load reset for load_image / load_pixmap."""
         if self._draw_line_button.isChecked():
             self._draw_line_button.setChecked(False)
         else:
@@ -950,7 +982,6 @@ class FrameLineEditorWidget(QWidget):
         self._length_hud.setVisible(False)
         self._length_hud_arrow.setVisible(False)
         self._position_overlays()
-        return loaded
 
     def _populate_initial_drone(self) -> None:
         preferred_drone = self._initial_drone or self._settings_obj.value("last_drone_type")
