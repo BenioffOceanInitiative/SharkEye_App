@@ -254,14 +254,16 @@ class CustomTracker:
             x, y, w, h = longest_position
 
             if is_significant:
-                # Use segmentation model to generate lengths
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
+                # Use segmentation model to generate lengths (SAM/draw_mask expect RGB;
+                # longest_frame is BGR from the decoder).
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length, original_width=longest_frame.shape[1], original_height=longest_frame.shape[0])
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
 
             feet, inches = divmod(longest_length, 1)

@@ -1752,8 +1752,12 @@ class CustomTracker:
             is_significant = (num_frames >= self.min_frames
                               and avg_confidence > self.confidence_threshold)
             if is_significant:
-                # Use segmentation model to generate lengths
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                # SAM (and draw_mask) expect RGB; longest_frame is BGR from the decoder.
+                # Feeding BGR gave the model channel-swapped pixels and measurably worse
+                # masks (it under-captured the shark's extent — up to ~18% shorter length),
+                # so convert once and use RGB for both segmentation and the overlay.
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length,
                                                                          original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
@@ -1762,7 +1766,7 @@ class CustomTracker:
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
 
             feet, inches = divmod(longest_length, 1)
@@ -6403,9 +6407,10 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             # SAM is the expensive per-track step; run it only on significant tracks.
             is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
             if is_significant:
-                # Use segmentation model to generate lengths
+                # Use segmentation model to generate lengths (SAM/draw_mask expect RGB).
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
                 seg_start = time.perf_counter()
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 seg_end = time.perf_counter()
                 seg_duration = seg_end - seg_start
                 track['segmentation_duration'] = seg_duration
@@ -6414,7 +6419,7 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 track['longest_length'] = pixel_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
 
             length_str = f"{longest_length:.2f}px"
