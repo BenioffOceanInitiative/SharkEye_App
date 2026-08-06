@@ -1885,6 +1885,22 @@ def render_annotation_preview(annotation_color, box_thickness, text_thickness, t
                       interpolation=cv2.INTER_AREA)
 
 
+def _downscale_frame_to_fit(frame, max_w, max_h):
+    """Resize ``frame`` down to fit within ``(max_w, max_h)`` keeping aspect; return it
+    unchanged if already within bounds.
+
+    INTER_LINEAR, not INTER_AREA: on a real 5.3K drone frame the whole "resize + write a
+    1080p JPG" costs ~10ms with LINEAR vs ~34ms with AREA (and ~58ms writing the full-res
+    JPG). These are the training/upload frames feeding a 640-input model, so 1080p LINEAR
+    is far more resolution than needed and the aliasing difference is irrelevant."""
+    h, w = frame.shape[:2]
+    if w <= max_w and h <= max_h:
+        return frame
+    scale = min(max_w / w, max_h / h)
+    return cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
+                      interpolation=cv2.INTER_LINEAR)
+
+
 def encode_track_clips(payload, output_dir, video_name, annotation_color,
                        box_thickness, text_thickness, text_scale, fps=10):
     """Persist per-track review/upload artifacts from a self-contained payload.
@@ -1958,8 +1974,13 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                     clip_frame = cv2.resize(frame, frame_size)
                 writer.write(clip_frame)
 
-                # Full-resolution, un-boxed frame for upload.
-                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), frame)
+                # Un-boxed frame for upload/training, written at the same <=1080p the
+                # uploader produces anyway. Writing full 5.3K here was the dominant cost of
+                # this background stage (~186ms/frame vs ~29ms at 1080p) and tens of MB per
+                # shark on disk; the YOLO .txt labels below are normalized so they stay
+                # correct at any resolution, and the model trains at 640 regardless.
+                jpg_frame = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W, UPLOAD_IMAGE_MAX_H)
+                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), jpg_frame)
 
                 pos = positions[frame_idx] if frame_idx < len(positions) else None
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
@@ -5668,10 +5689,11 @@ class MainWindow(QMainWindow):
         self.resized.emit()
 
 # Experiment uploads go to a Cloud Function whose HTTP request is size-limited, so every
-# image is downscaled to <=1080p before zipping. The per-shark frame set (shark_frames/)
-# at full 5.3K resolution alone is tens of MB per shark and would blow the limit; 1080p
-# JPGs are ~150-300 KB each. On-disk artifacts + the review overlay stay full-res — only
-# the uploaded copy shrinks.
+# image is downscaled to <=1080p before zipping. 1080p JPGs are ~150-300 KB each. The
+# length-measurement artifacts (frames/, bounding_boxes/, masks/) stay full-res on disk;
+# shark_frames/ (the per-shark training set) is now written at <=1080p directly (see
+# encode_track_clips) since that's all the uploader would keep anyway, so the re-encode
+# below is usually a no-op for those.
 UPLOAD_FOLDERS = ['bounding_boxes', 'detection_results', 'false_positives',
                   'frames', 'masks', 'shark_frames']
 UPLOAD_IMAGE_MAX_W = 1920
