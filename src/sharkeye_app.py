@@ -1945,7 +1945,8 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         longest_ts = track.get('longest_timestamp')
 
         writer = None
-        frame_size = None
+        frame_size = None   # the CLIP/JPG/meta size (downscaled to <=1080p)
+        orig_size = None    # the source frame size, for normalizing box coords
         clip_path = os.path.join(clips_dir, f"{video_name}_{key}.mp4")
         track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
         os.makedirs(track_frames_dir, exist_ok=True)
@@ -1959,44 +1960,46 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                     continue
 
                 if writer is None:
-                    h_px, w_px = frame.shape[:2]
-                    frame_size = (w_px, h_px)
+                    oh, ow = frame.shape[:2]
+                    orig_size = (ow, oh)
+                    # The clip + per-frame JPGs are written at <=1080p: the review player
+                    # decodes the whole clip on the UI thread (5.3K was slow to load) and
+                    # the uploader downscales to 1080p anyway. Writing full 5.3K here was
+                    # the dominant cost of this background stage (~58ms JPG + ~38ms MP4 per
+                    # frame vs ~10ms + a few ms at 1080p). meta.json records the CLIP dims,
+                    # so the review overlay maps the normalized boxes onto it correctly.
+                    cw, ch = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W,
+                                                     UPLOAD_IMAGE_MAX_H).shape[1::-1]
+                    frame_size = (cw, ch)
                     writer = cv2.VideoWriter(clip_path, fourcc, fps, frame_size)
                     if not writer.isOpened():
                         logger.error(f"Could not open video writer for {clip_path}; skipping track {key}")
                         writer = None
                         break
 
-                # Guard against a stray frame of a different size for the CLIP only; the
-                # per-frame JPG and box coords stay at the frame's true resolution.
-                clip_frame = frame
-                if (frame.shape[1], frame.shape[0]) != frame_size:
-                    clip_frame = cv2.resize(frame, frame_size)
-                writer.write(clip_frame)
-
-                # Un-boxed frame for upload/training, written at the same <=1080p the
-                # uploader produces anyway. Writing full 5.3K here was the dominant cost of
-                # this background stage (~186ms/frame vs ~29ms at 1080p) and tens of MB per
-                # shark on disk; the YOLO .txt labels below are normalized so they stay
-                # correct at any resolution, and the model trains at 640 regardless.
-                jpg_frame = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W, UPLOAD_IMAGE_MAX_H)
-                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), jpg_frame)
+                # One downscale serves both the clip and the JPG.
+                small = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W, UPLOAD_IMAGE_MAX_H)
+                if (small.shape[1], small.shape[0]) != frame_size:
+                    small = cv2.resize(small, frame_size)   # guard a stray odd-sized frame
+                writer.write(small)
+                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), small)
 
                 pos = positions[frame_idx] if frame_idx < len(positions) else None
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
                 length = lengths[frame_idx] if frame_idx < len(lengths) else None
                 t_ms = timestamps[frame_idx] if frame_idx < len(timestamps) else None
 
-                # YOLO label, parallel to frame_<seq>.jpg. Coords normalized to the frame
-                # size so they survive the <=1080p downscale at upload. Class is 0 (shark)
-                # now; refresh_yolo_labels_from_csv() rewrites it from the reviewer's
-                # corrected label before upload. An empty file = a negative frame (no box).
+                # YOLO label, parallel to frame_<seq>.jpg. Normalized by the ORIGINAL
+                # source dims (pos is in source pixels); normalized coords are scale-free,
+                # so they map correctly onto the downscaled JPG/clip and survive the upload
+                # downscale. Class is 0 (shark) now; refresh_yolo_labels_from_csv() rewrites
+                # it from the reviewer's corrected label. An empty file = a negative frame.
                 label_path = os.path.join(track_frames_dir, f"frame_{seq:04d}.txt")
-                if pos is not None and frame_size:
+                if pos is not None and orig_size:
                     x, y, w, h = pos
-                    fw, fh = frame_size
+                    ow, oh = orig_size
                     with open(label_path, "w") as lf:
-                        lf.write(f"0 {x / fw:.6f} {y / fh:.6f} {w / fw:.6f} {h / fh:.6f}\n")
+                        lf.write(f"0 {x / ow:.6f} {y / oh:.6f} {w / ow:.6f} {h / oh:.6f}\n")
                 else:
                     open(label_path, "w").close()
 
@@ -2017,8 +2020,8 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
 
             meta = {
                 'video': video_name, 'track_id': key, 'fps': fps,
-                # The .txt coords are normalized; these dims map them back to full-source
-                # pixels for the review overlay (the JPGs are full-res on disk).
+                # The .txt coords are normalized; these are the CLIP/JPG dims (<=1080p) the
+                # review overlay multiplies them by to map boxes onto the clip it plays.
                 'frame_width': (frame_size[0] if frame_size else None),
                 'frame_height': (frame_size[1] if frame_size else None),
                 'longest_index': longest_index,
