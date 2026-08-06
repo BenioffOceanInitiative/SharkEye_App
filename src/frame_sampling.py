@@ -244,5 +244,8 @@ def downscale_for_preview(frame, max_dim=960):
     if longest <= max_dim:
         return frame
     scale = max_dim / longest
+    # INTER_LINEAR, not INTER_AREA: this is a throwaway courtesy preview a human glances
+    # at, and on a 5.3K frame INTER_AREA costs ~17ms vs ~0.4ms for INTER_LINEAR (~40x).
+    # Over a video that's seconds of worker time for antialiasing no one will notice.
     return cv2.resize(frame, (int(width * scale), int(height * scale)),
-                      interpolation=cv2.INTER_AREA)
+                      interpolation=cv2.INTER_LINEAR)

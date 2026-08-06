@@ -14,7 +14,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
-from log_config import get_logger
+from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
@@ -455,19 +455,21 @@ def parse_args():
     return parser.parse_args()
 
 def main():
-    args = parse_args()  
+    install_crash_handlers()
+    args = parse_args()
 
     sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    # 2021, 2022 Transect Only
-    video_paths = list(input_dir.rglob("*/Transect/*.mp4")) + list(input_dir.rglob("*/Transect/*.mov")) + list(input_dir.rglob("*/Transect/*.MP4")) + list(input_dir.rglob("*/Transect/*.MOV")) + list(input_dir.rglob("*/transect/*.mp4")) + list(input_dir.rglob("*/transect/*.mov")) + list(input_dir.rglob("*/transect/*.MP4")) + list(input_dir.rglob("*/transect/*.MOV"))
-    
-    # 2023
-    # video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
-    # video_paths = video_paths + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.MP4")) + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.mp4"))
-    # video_paths = [video for video in video_paths if video.stem.split("_")[-1][-3:] in manual_sizes]    
+    # Recursively find every video under input_dir, matching the documented
+    # "--input_dir <dir_of_mp4s>" contract (case-insensitive extension, de-duplicated
+    # and sorted for a stable order). Previously this was hardcoded to a specific
+    # "*/Transect/*" research layout, so pointing the tool at an arbitrary folder of
+    # .mp4s silently found nothing.
+    video_exts = {".mp4", ".mov"}
+    video_paths = sorted({p for p in input_dir.rglob("*") if p.suffix.lower() in video_exts})
+    logger.info(f"Found {len(video_paths)} video(s) under {input_dir}")
 
     # Run prediction
     output_dir.mkdir(parents=True, exist_ok=True)

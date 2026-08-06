@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
                              QSlider, QMenuBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QEventLoop, qInstallMessageHandler, QUrl
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPen, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPen, QPalette, QDesktopServices, QShortcut, QKeySequence  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
@@ -32,7 +32,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir, select_torch_device
-from log_config import get_logger
+from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
@@ -2198,6 +2198,10 @@ class VideoProcessingWorker(QObject):
         except Exception:
             import traceback
             _log("FATAL:\n" + traceback.format_exc())
+            # Also send the full traceback to the durable log so a user can retrieve
+            # it after a crash without digging the temp file out of the OS temp dir.
+            logger.exception("Inference worker crashed on %s",
+                             os.path.basename(self.video_path))
             # Don't re-raise: an uncaught worker exception can abort the frozen
             # Qt process (BEX64 / 0xc0000409). Let the UI tear down cleanly.
             try:
@@ -2252,6 +2256,15 @@ class VideoProcessingWorker(QObject):
         # of attributing the whole wall to "inference".
         decode_time = 0.0   # time inside the sampler (grab/retrieve = H.265 decode)
         model_time = 0.0     # time inside YOLO inference on sampled frames
+        # Split decode further by what the sampler was doing: scanning empty water
+        # (keyframe-only skip, cheap) vs. densely stepping through a shark region (every
+        # frame, expensive). The feedback value `had_detection` fed into send() is the
+        # signal — True means we're in/entering a dense window. Answers "how much time is
+        # spent skipping empty water vs. actually processing sharks."
+        decode_scan_time = 0.0
+        decode_dense_time = 0.0
+        scan_frames = 0
+        dense_frames = 0
 
         # Live preview is a courtesy view, not the output. Cap empty-frame updates at
         # ~20 fps so we don't color-convert, copy across the thread boundary, and
@@ -2279,7 +2292,14 @@ class VideoProcessingWorker(QObject):
             while True:
                 _t_decode = time.perf_counter()
                 frame_num, frame = sampler.send(had_detection)
-                decode_time += time.perf_counter() - _t_decode
+                _dt = time.perf_counter() - _t_decode
+                decode_time += _dt
+                if had_detection:      # last frame had a shark -> this decode is a dense step
+                    decode_dense_time += _dt
+                    dense_frames += 1
+                else:                  # scanning empty water (or the very first frame)
+                    decode_scan_time += _dt
+                    scan_frames += 1
 
                 if QThread.currentThread().isInterruptionRequested():
                     logger.warning("Processing interrupted")
@@ -2362,8 +2382,12 @@ class VideoProcessingWorker(QObject):
             other_time = max(0.0, infer_time - decode_time - model_time)
             decode_pct = (decode_time / infer_time * 100) if infer_time > 0 else 0.0
             ms_per_infer = (model_time / frames_sampled * 1000) if frames_sampled else 0.0
+            scan_ms = (decode_scan_time / scan_frames * 1000) if scan_frames else 0.0
+            dense_ms = (decode_dense_time / dense_frames * 1000) if dense_frames else 0.0
             logger.info(f"[timing] {Path(self.video_path).name}: "
-                  f"loop={infer_time:.1f}s [decode={decode_time:.1f}s ({decode_pct:.0f}%), "
+                  f"loop={infer_time:.1f}s [decode={decode_time:.1f}s ({decode_pct:.0f}%): "
+                  f"scan={decode_scan_time:.1f}s ({scan_frames}f {scan_ms:.0f}ms/f), "
+                  f"dense={decode_dense_time:.1f}s ({dense_frames}f {dense_ms:.0f}ms/f) | "
                   f"yolo={model_time:.1f}s ({frames_sampled} frames, {ms_per_infer:.0f}ms/f), "
                   f"other={other_time:.1f}s] {total_detections} dets | "
                   f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
@@ -3897,16 +3921,24 @@ class MainWindow(QMainWindow):
         # Check if this is the last track in the experiment
         det_dir = exp_dir / "detection_results"
         total_tracks = 0
+        count_reliable = True
         if det_dir.exists():
             for csv_file in det_dir.glob("*.csv"):
                 try:
                     df = pd.read_csv(csv_file)
                     total_tracks += len(df)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # A CSV we can't read (corrupt / locked) means the count is a
+                    # lower bound. Deleting the whole experiment on an undercount
+                    # would wipe other videos' results, so mark the count untrusted
+                    # and fall through to per-track deletion instead.
+                    logger.warning(f"Could not read {csv_file} while counting tracks; "
+                                   f"will not delete whole experiment: {e}")
+                    count_reliable = False
 
-        # If this is the last track, delete the entire experiment directory
-        if total_tracks == 1:
+        # Only wipe the entire experiment when we're certain the track being deleted
+        # is genuinely the last one across every video in it.
+        if count_reliable and total_tracks == 1:
             try:
                 shutil.rmtree(exp_dir)
                 logger.info(f"Deleted experiment directory: {exp_dir}")
@@ -4315,6 +4347,59 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown()
         self.review_dropdown.currentIndexChanged.connect(self.render_historical_experiments)
         self.review_dropdown.currentIndexChanged.connect(self._update_review_dropdown_tooltip)
+        self.setup_review_shortcuts()
+
+    def setup_review_shortcuts(self):
+        """Keyboard shortcuts for the Review screen so a reviewer can work without the mouse.
+
+        All shortcuts are scoped to the review widget (WidgetWithChildrenShortcut), so they
+        never fire on the Home or processing screens. Reviewing hundreds of detections is the
+        app's most repetitive task; play/pause + frame-step + next/prev-detection off the
+        keyboard is the biggest single throughput win.
+
+            Space         play / pause the clip
+            ← / →         step one frame back / forward (pauses first)
+            J / K         previous / next detection in the list
+        """
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+
+        def bind(key, handler):
+            sc = QShortcut(QKeySequence(key), self.review_widget)
+            sc.setContext(ctx)
+            sc.activated.connect(handler)
+            return sc
+
+        bind(Qt.Key.Key_Space, self.toggle_playback)
+        bind(Qt.Key.Key_Left, lambda: self._step_review_frame(-1))
+        bind(Qt.Key.Key_Right, lambda: self._step_review_frame(1))
+        bind(Qt.Key.Key_J, lambda: self._select_adjacent_detection(-1))
+        bind(Qt.Key.Key_K, lambda: self._select_adjacent_detection(1))
+
+    def _step_review_frame(self, delta):
+        """Pause and move the clip by ``delta`` frames (clamped). Only meaningful in
+        frame-sequence (MP4) mode, where the slider is scrubbable."""
+        if getattr(self, "_playback_mode", None) != "frames":
+            return
+        self.frame_player.pause()
+        self._sync_play_pause_button()
+        new_val = min(max(0, self.frame_slider.value() + delta), self.frame_slider.maximum())
+        self.frame_slider.setValue(new_val)  # triggers _on_slider_moved -> player.seek
+
+    def _select_adjacent_detection(self, delta):
+        """Select the previous/next row in the detection list, which loads that clip via
+        the existing itemSelectionChanged wiring."""
+        table = getattr(self, "historical_items", None)
+        if table is None:
+            return
+        count = table.rowCount()
+        if count == 0:
+            return
+        cur = table.currentRow()
+        if cur < 0:
+            cur = 0
+        new = min(max(0, cur + delta), count - 1)
+        if new != cur:
+            table.selectRow(new)
 
     def setup_playback_controls(self, layout):
         """Play/pause, speed and scrub controls for the detection clip.
@@ -4330,7 +4415,9 @@ class MainWindow(QMainWindow):
         row.setSpacing(8)
 
         self.play_pause_button = QPushButton()
-        self.play_pause_button.setToolTip("Play or pause the detection clip (Space)")
+        self.play_pause_button.setToolTip(
+            "Play or pause the detection clip (Space)\n"
+            "←/→ step a frame · J/K previous/next detection")
         self.play_pause_button.clicked.connect(self.toggle_playback)
         row.addWidget(self.play_pause_button)
 
@@ -5322,41 +5409,15 @@ class MainWindow(QMainWindow):
         self.video_queue = [self.video_list.item(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.video_list.rowCount())]
 
     def export_results(self):
-        # if self.reviewing_history:
+        """Persist the reviewer's queued label/deletion changes back to the per-video CSVs.
+
+        NOTE: this is wired to the "Save Changes" button. It intentionally only flushes
+        `historical_label_changes` — the older "export all tracks to a user-chosen CSV
+        file" feature was gated behind a `reviewing_history` flag that no longer exists
+        and its (unreachable) code was removed. If a standalone CSV export is wanted
+        again, reintroduce it as its own action rather than overloading Save Changes.
+        """
         self._save_historical_label_changes()
-        return
-    
-        if not self.sorted_tracks:
-            QMessageBox.warning(self, "No Data", "There are no results to export.")
-            return
-
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Results", "", "CSV Files (*.csv)")
-        
-        if not file_path:
-            return  # User cancelled the dialog
-
-        try:
-            with open(file_path, 'w', newline='') as csvfile:
-                fieldnames = ['video_name', 'track_id', 'label', 'timestamp', 'confidence', 'length_ft']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for _, track in self.sorted_tracks:
-                    timestamp = track['longest_timestamp']
-                    time_str = datetime.fromtimestamp(timestamp / 1000, timezone.utc).strftime('%M:%S')
-                    
-                    writer.writerow({
-                        'video_name': track['video_name'],
-                        'track_id': track['unique_id'],
-                        'label': track['label'],
-                        'timestamp': time_str,
-                        'confidence': track['longest_conf'],
-                        'length_ft': track['longest_length']
-                    })
-            
-            QMessageBox.information(self, "Export Complete", f"Results exported to {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export results: {str(e)}")
 
     def ensure_track_consistency(self):
         if len(self.tracks) != len(self.sorted_tracks):
@@ -6496,6 +6557,7 @@ def _install_qt_message_filter():
 
 
 if __name__ == '__main__':
+    install_crash_handlers()
     _install_qt_message_filter()
     args = parse_args()
     if args.input_dir and args.output_dir:
