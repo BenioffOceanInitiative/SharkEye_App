@@ -13,7 +13,7 @@ parsing lands in one place instead of the three copies that used to exist.
 import cv2
 
 
-def iter_sampled_frames(cap, min_skip=10, max_skip=60, empty_backoff_frames=None,
+def iter_sampled_frames(cap, min_skip=5, max_skip=60, empty_backoff_frames=None,
                         max_skip_seconds=2.0):
     """Yield ``(frame_index, frame)`` sampled forward through an open ``cv2.VideoCapture``.
 
