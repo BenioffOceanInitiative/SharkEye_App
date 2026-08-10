@@ -31,7 +31,16 @@ from scipy.optimize import linear_sum_assignment
 import csv
 from tqdm import tqdm
 import re
-from utility import resource_path, get_results_dir, select_torch_device
+from utility import (
+    resource_path,
+    get_results_dir,
+    select_torch_device,
+    get_writable_docs_dir,
+    resolve_help_guide_path,
+    read_local_doc_version,
+    write_local_doc_version,
+    local_help_docs_present,
+)
 from log_config import get_logger
 
 logger = get_logger("sharkeye.app")
@@ -255,8 +264,9 @@ def add_drone_to_settings(settings_obj, drone_name, width, height, fov_input):
 
 
 # Cloud Function that serves version checks + build downloads (same endpoint the
-# model download uses). `?request=check_version` compares commits; the default
-# request (`?user_os=<os>`) redirects to a signed URL for the latest build.
+# model download uses). `?request=check_version` compares commits; `?request=check_docs`
+# syncs help docs in-app; the default request (`?user_os=<os>`) redirects to a signed
+# URL for the latest build.
 UPDATE_ENDPOINT = "https://us-central1-sharkeye-329715.cloudfunctions.net/sign-up"
 
 
@@ -2730,6 +2740,10 @@ class MainWindow(QMainWindow):
         self.version_check_thread = None
         QTimer.singleShot(0, self.check_for_update)
 
+        # Silently refresh help docs from the cloud when a newer version is available.
+        self.docs_sync_thread = None
+        QTimer.singleShot(0, self.sync_help_docs)
+
     def initialize_settings(self):
         self.settings_obj = ensure_app_settings()
 
@@ -2874,8 +2888,21 @@ class MainWindow(QMainWindow):
         self.setup_home_page()
         self.setup_review_widget()
 
+    def sync_help_docs(self):
+        """Kick off a background help-docs sync against the Cloud Function on startup."""
+        self.docs_sync_thread = DocsSyncThread(UPDATE_ENDPOINT)
+        self.docs_sync_thread.sync_finished.connect(self.on_docs_sync_finished)
+        self.docs_sync_thread.start()
+
+    def on_docs_sync_finished(self, updated, error):
+        if error:
+            logger.error(f"Help docs sync failed: {error}")
+            return
+        if updated:
+            logger.info("Help docs updated from cloud")
+
     def show_help_docs(self):
-        guide_path = resource_path("docs/USER_GUIDE_VISUAL.md")
+        guide_path = resolve_help_guide_path()
         if not os.path.exists(guide_path):
             QMessageBox.warning(
                 self,
@@ -5807,6 +5834,88 @@ class VersionCheckThread(QThread):
             self.check_finished.emit(not up_to_date, self.os_key, "")
         except Exception as e:
             self.check_finished.emit(False, self.os_key, str(e))
+
+
+class DocsSyncThread(QThread):
+    """Compare local help-docs version to the cloud and download updates in-app.
+
+    Never opens a browser. Failures are reported via sync_finished so the UI can
+    log them without blocking launch.
+    """
+    # (updated, error_message)
+    sync_finished = pyqtSignal(bool, str)
+
+    def __init__(self, endpoint):
+        super().__init__()
+        self.endpoint = endpoint
+
+    def run(self):
+        try:
+            docs_dir = get_writable_docs_dir()
+            docs_present = local_help_docs_present(docs_dir)
+            # Missing guide/images must force a download even if a version stamp
+            # already matches the cloud (e.g. files deleted or first install).
+            local_version = read_local_doc_version(docs_dir) if docs_present else 0
+
+            response = requests.get(
+                self.endpoint,
+                params={
+                    "request": "check_docs",
+                    "doc_version": local_version,
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Unexpected check_docs response shape")
+
+            if payload.get("up_to_date", False):
+                # Cloud says current, but files may still be missing if the stamp
+                # somehow matched — treat that as needing a forced re-fetch.
+                if docs_present:
+                    self.sync_finished.emit(False, "")
+                    return
+                response = requests.get(
+                    self.endpoint,
+                    params={"request": "check_docs", "doc_version": 0},
+                    timeout=15,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict) or payload.get("up_to_date", False):
+                    raise ValueError("Help docs missing locally and cloud returned no files")
+
+            files = payload.get("files") or {}
+            latest_version = payload.get("doc_version")
+            if not files or latest_version is None:
+                raise ValueError("check_docs response missing files or doc_version")
+
+            for relative_name, signed_url in files.items():
+                # Reject path traversal from unexpected blob keys.
+                relative_name = relative_name.replace("\\", "/").lstrip("/")
+                if ".." in relative_name.split("/"):
+                    raise ValueError(f"Invalid docs path: {relative_name}")
+
+                dest_path = os.path.join(docs_dir, *relative_name.split("/"))
+                parent = os.path.dirname(dest_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+
+                file_response = requests.get(signed_url, timeout=60)
+                file_response.raise_for_status()
+
+                # Write via temp file then replace so partial downloads don't corrupt.
+                tmp_path = dest_path + ".tmp"
+                with open(tmp_path, "wb") as f:
+                    f.write(file_response.content)
+                os.replace(tmp_path, dest_path)
+
+            # Only bump the stamp after every file lands so a failed sync retries.
+            write_local_doc_version(int(latest_version), docs_dir=docs_dir)
+            self.sync_finished.emit(True, "")
+        except Exception as e:
+            self.sync_finished.emit(False, str(e))
 
 
 def signal_handler(signum, frame):
