@@ -13,7 +13,7 @@ parsing lands in one place instead of the three copies that used to exist.
 import cv2
 
 
-def iter_sampled_frames(cap, min_skip=10, max_skip=60, empty_backoff_frames=None,
+def iter_sampled_frames(cap, min_skip=5, max_skip=60, empty_backoff_frames=None,
                         max_skip_seconds=2.0):
     """Yield ``(frame_index, frame)`` sampled forward through an open ``cv2.VideoCapture``.
 
@@ -244,5 +244,8 @@ def downscale_for_preview(frame, max_dim=960):
     if longest <= max_dim:
         return frame
     scale = max_dim / longest
+    # INTER_LINEAR, not INTER_AREA: this is a throwaway courtesy preview a human glances
+    # at, and on a 5.3K frame INTER_AREA costs ~17ms vs ~0.4ms for INTER_LINEAR (~40x).
+    # Over a video that's seconds of worker time for antialiasing no one will notice.
     return cv2.resize(frame, (int(width * scale), int(height * scale)),
-                      interpolation=cv2.INTER_AREA)
+                      interpolation=cv2.INTER_LINEAR)
