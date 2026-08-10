@@ -44,6 +44,31 @@ jobs:
       - name: Update latest_version.json
         run: python src/manage_version.py --platform windows
 
+      - name: Detect help docs changes
+        id: help_docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          if [ -z "${BEFORE}" ] || [[ "${BEFORE}" =~ ^0+$ ]]; then
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              BEFORE="$(git rev-parse HEAD^)"
+            else
+              BEFORE="$(git hash-object -t tree /dev/null)"
+            fi
+          fi
+          if git diff --name-only "${BEFORE}" "${{ github.sha }}" -- docs/images docs/USER_GUIDE_VISUAL.md | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Help docs changed; will upload to GCS."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No help docs changes."
+          fi
+
+      - name: Upload help docs to GCS
+        if: steps.help_docs.outputs.changed == 'true'
+        run: python -c "import sys; sys.path.insert(0, 'src'); from utility import post_help_docs; post_help_docs()"
+
       - name: Build with PyInstaller spec
         run: pyinstaller SharkEye.spec
 
