@@ -71,6 +71,8 @@ def iter_sampled_frames(cap, min_skip=5, max_skip=60, empty_backoff_frames=None,
         'baseline_skipped_frames': 0,    # frames skipped at the resting min_skip stride
         'accelerated_skipped_frames': 0, # extra frames skipped by the backoff (stride > min_skip)
         'segments': [],                  # contiguous runs of full-rate vs. accelerated sampling
+        'seeks': 0,                      # grab-through never seeks (kept for stats-schema parity)
+        'mode_switches': 0,
     }
 
     while frame_num < total_frames:
@@ -152,10 +154,13 @@ def format_sampling_stats(video_name, infer_wall_seconds, stats):
     # per-phase decode vs. yolo split lives in the app's [timing] line; here we report
     # only the sampling coverage and how much source-video time inference actually
     # visited (the acceleration payoff).
+    seeks = stats.get('seeks', 0)
+    mode_switches = stats.get('mode_switches', 0)
     return (f"[stats] {video_name}: source={duration_s:.1f}s ({total_frames}f @{fps:.0f}fps) | "
             f"processed wall={infer_wall_seconds:.1f}s ({realtime_x:.1f}x realtime) | "
             f"inferred on {sampled}f, inference-skipped {skipped}f | "
-            f"video time inference-skipped total={skipped_s:.1f}s, by acceleration={accel_skipped_s:.1f}s")
+            f"video time inference-skipped total={skipped_s:.1f}s, by acceleration={accel_skipped_s:.1f}s | "
+            f"decode: seeks={seeks} mode_switches={mode_switches}")
 
 
 def _format_clock(seconds):

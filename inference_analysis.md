@@ -40,7 +40,12 @@ Batch wall clock 56 s; model + SAM load/warmup added ~10.7 s before processing (
 
 These are the things the run *uncovered* — some are latent bugs, some are measurement-reliability concerns. Several are only visible because I cross-referenced the CSVs against the logs; the logs alone would not have surfaced them (§3 addresses that gap).
 
-### 2.1 Bbox-derived length is *systematically* ~3× the segmentation length ⚠️ (verified)
+### 2.1 Bbox-derived length is *systematically* ~3× the segmentation length ⚠️ (verified) — ✅ FIXED
+> **Resolved (2026-08-11):** unified the bbox estimator onto SAM's per-video ground pixel-size and
+> switched it to the box diagonal. bbox length 23–32 ft → 11–16 ft; bbox/SAM divergence 2.6–4.5× →
+> 1.3–2.0×. See `before_after_metrics.md`. Open sub-item: the CSV `Longest Length` column is still a
+> raw `max` (recalibrated but outlier-sensitive) — decide percentile-vs-drop.
+
 **Update after checking `shark_frames/*/meta.json`:** this is not a one-frame outlier — the raw bbox length is ~26–31 ft on **every** sampled frame of track 1 (SAM: 9.8 ft), ~28–31 ft across track 3 (SAM: 12 ft), and so on. The two length columns disagree by a **consistent ~3×** for every track. Root cause: `calculate_shark_length` (`sharkeye_app.py:285`) uses **only the bounding-box height** (`height * MODEL_HEIGHT/MODEL_WIDTH * GSD`), whereas SAM measures the mask's actual major axis. A loose or vertically-elongated axis-aligned box (these sharks transit top→bottom, so the box is tall) massively overestimates. The bbox values (26–31 ft) are biologically implausible for these animals; the SAM values (~5–12 ft) are plausible — so the bbox column is the wrong one, and it's the column labeled "Longest Length." **Action item #1 below.**
 
 The per-video CSV writes two length columns from different sources:
@@ -66,7 +71,11 @@ Initially this looked like possible fragmentation (3 IDs born in one dense span)
 
 Tracks **#3 and #4 are active simultaneously for ~3 s** (103.1–106.1 s) in **non-overlapping x-bands** (~502–569 vs ~856–876, ~300 px apart) — two objects present at once ⇒ two real sharks. #2 hands off to #3 at ~99.5 s but from opposite corners (#2 exiting bottom at x≈691, #3 entering top at x≈569). Every track holds a tight x-band while sweeping the full frame height in 3–7 s (consistent drone pan / transit). **Conclusion: the tracker behaved correctly on this clip.** The point still stands that reaching this conclusion required hand-diffing on-disk label files — §3.1's per-track spatial-signature log line would have made it a one-glance read.
 
-### 2.3 For tracks that never exceed conf 0.80, SAM measures the *entry* frame, not the best frame
+### 2.3 For tracks that never exceed conf 0.80, SAM measures the *entry* frame, not the best frame — ✅ FIXED
+> **Resolved (2026-08-11):** `save_best_frames` now segments the highest-confidence frame (`best_*`),
+> not `longest_frame`. 0031 #4 moved idx0→idx10 (mask area 6 214→22 354 px, length 5.5→8.2 ft); 0034 #1
+> moved from a conf-0.65 entry frame to its conf-0.79 peak. See `before_after_metrics.md`.
+
 `longest_frame`/`longest_conf` are only updated when `confidence > 0.8` (`sharkeye_app.py:1708`). **DJI_0034 #1 peaks at 0.79**, so that branch never fires and `longest_frame` stays at its init value — the *first* detection (shark just entering, 01:23). `save_best_frames` then runs SAM on that first frame, so the reported 5.1 ft length and the saved mask come from the weakest, entering-edge detection, while the *highest-confidence* frame (01:25, used for the `frames/` JPG and Review) is a different, better frame. Any track whose whole life sits in 0.40–0.80 confidence has its length measured on a near-worst frame. Nothing logs which frame/conf the length was actually derived from, so this is invisible today.
 
 ### 2.4 Completion popup mislabels tracks as detections
@@ -123,9 +132,12 @@ Correct the popup's "Total detections" → "Sharks detected (tracks)", and add a
 | 1 | `CustomTracker.update()` association counters + per-track spatial signature | `[assoc]`, enriched `[track]` | ✅ done (§3.1) |
 | 2 | `save_best_frames()` length provenance + mask sanity; GSD provenance | `[length]`, `[gsd]` | ✅ done (§3.2) |
 | 3 | Always-on created/significant/filtered census | folded into `[assoc]` | ✅ done (§3.5) |
-| 4 | `keyframe_sampling._keyframe_gen` seek/mode-switch counts into `stats` | — | ⬜ remaining (§3.3) |
-| 5 | decode/YOLO/SAM timer p50/p95 | — | ⬜ remaining (§3.3) |
-| 6 | popup label fix, dylib-collision warning | — | ⬜ remaining (§3.6) |
+| 4 | `keyframe_sampling._keyframe_gen` seek/mode-switch counts into `stats` | `[stats]` seeks/mode_switches | ✅ done (§3.3) |
+| 5 | decode/YOLO timer p50/p95 | `[timing-dist]` | ✅ done (§3.3) |
+| 6 | popup label fix, dylib-collision warning | `[env]` + popup relabel | ✅ done (§3.6) |
+| 7 | **Length calibration fix (Priority 1)** | quiets `[length]` WARN | ✅ done — see `before_after_metrics.md` |
+| 8 | **Segment best-confidence frame (Priority 2)** | `[length] seg_frame` | ✅ done — see `before_after_metrics.md` |
+| 9 | **De-duplicate into shared `tracking.py`; bring all paths to parity** | shared `CustomTracker` + `[length]` | ✅ done (Priority 3) — see `before_after_metrics.md` |
 
 The ✅ items change **no pipeline behavior** — they only make the run legible, and #1–#2 turn §2's "I had to diff the CSV against the log to notice this" into single readable log lines. All edits are in `src/sharkeye_app.py`.
 
