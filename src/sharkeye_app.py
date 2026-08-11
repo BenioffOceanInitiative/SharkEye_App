@@ -2278,7 +2278,14 @@ class VideoProcessingWorker(QObject):
     def save_detections_csv(self, tracks, output_dir, tracker=None):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp',
+            # 'Length (ft)' is the canonical length every downstream consumer should read:
+            # it resolves the precedence manual > SAM at write time (SAM here; the review
+            # editor overwrites it with the manual value when a human draws a line). The other
+            # length columns are provenance/diagnostics: 'Highest Confidence Length' is the SAM
+            # mask measurement; 'Longest Length' is now the bbox estimate at the best-confidence
+            # frame (a coarse cross-check), not the old outlier-prone max over every frame.
+            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Length (ft)',
+                        'Highest Conf Timestamp',
                         'Longest Length Timestamp', 'Highest Confidence', 'Average Confidence',
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
                         'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label',
@@ -2293,13 +2300,14 @@ class VideoProcessingWorker(QObject):
                     'video_name': self.video_path,
                     'Flight Location': self.flight_location,
                     'Track Id': track_id,
+                    'Length (ft)': track['longest_length'],   # canonical: SAM now, manual overrides in review
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                     'Longest Length Timestamp': CustomTracker._format_timestamp(track['longest_timestamp']),
                     'Highest Confidence': max(track['confidences']),
                     'Average Confidence': np.mean(track['confidences']),
                     'Lowest Confidence': min(track['confidences']),
-                    'Longest Length': max(track['lengths']),  
-                    'Highest Confidence Length': track['longest_length'], # 
+                    'Longest Length': track['best_length'],   # bbox at best-conf frame (diagnostic, not max)
+                    'Highest Confidence Length': track['longest_length'], # SAM mask measurement
                     'Number of Detections': len(track['confidences']),
                     'Meets Thresholds': meets_thresholds,
                     'Confidence of Longest Length': track['longest_conf'],
@@ -4617,7 +4625,7 @@ class MainWindow(QMainWindow):
                 raise FileNotFoundError(f"CSV not found: {csv_path}")
 
             df = pd.read_csv(csv_path)
-            for col in ("manual_length_px", "manual_length_ft"):
+            for col in ("manual_length_px", "manual_length_ft", "Length (ft)"):
                 if col not in df.columns:
                     df[col] = ""
 
@@ -4627,6 +4635,12 @@ class MainWindow(QMainWindow):
 
             df.loc[mask, "manual_length_px"] = length_px
             df.loc[mask, "manual_length_ft"] = length_ft if length_ft is not None else ""
+            # Re-resolve the canonical 'Length (ft)' with precedence manual > SAM, so every
+            # CSV consumer gets the human's correction without reimplementing the fallback.
+            if length_ft is not None:
+                df.loc[mask, "Length (ft)"] = length_ft
+            elif "Highest Confidence Length" in df.columns:
+                df.loc[mask, "Length (ft)"] = df.loc[mask, "Highest Confidence Length"]
             df.to_csv(csv_path, index=False)
 
             if length_ft is not None:
@@ -4883,8 +4897,14 @@ class MainWindow(QMainWindow):
                         time_str = str(length_ts)
                         conf_longest = float(row.get('Confidence of Longest Length', 0.0))
                         len_high_conf = float(row.get('Highest Confidence Length', 0.0))
+                        # Prefer the canonical 'Length (ft)' column (already resolves
+                        # manual > SAM). Fall back to the manual/SAM precedence for legacy
+                        # CSVs written before the column existed.
+                        canonical_len = row.get('Length (ft)', '')
                         manual_ft = row.get('manual_length_ft', '')
-                        if not _csv_value_is_empty(manual_ft):
+                        if not _csv_value_is_empty(canonical_len):
+                            display_length = float(canonical_len)
+                        elif not _csv_value_is_empty(manual_ft):
                             display_length = float(manual_ft)
                         else:
                             display_length = len_high_conf
@@ -6264,9 +6284,8 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         cap.release()
         significant_tracks = custom_tracker.get_significant_tracks()
         # Shared implementation (Priority 2: segments the best-confidence frame; converts
-        # SAM pixels -> feet, which this path previously failed to do). NOTE: this path has
-        # no drone selection, so the tracker keeps the DEFAULT fov; per-video FOV would
-        # require threading drone/altitude through mass_prediction (future work).
+        # SAM pixels -> feet, which this path previously failed to do). FOV was resolved
+        # per-video above from --drone/--altitude.
         custom_tracker.save_best_frames(self.output_dir, self.video_path)
 
         all_track_info = []
@@ -6277,12 +6296,13 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             track_info = {
                 'video_name': self.video_path,
                 'Track Id': track_id,
+                'Length (ft)': track['longest_length'],   # canonical: SAM (manual overrides in review)
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                 'Highest Confidence': max(track['confidences']),
                 'Average Confidence': np.mean(track['confidences']),
                 'Lowest Confidence': min(track['confidences']),
-                'Longest Length': max(track['lengths']),  
-                'Highest Confidence Length': track['longest_length'], # 
+                'Longest Length': track['best_length'],   # bbox at best-conf frame (diagnostic, not max)
+                'Highest Confidence Length': track['longest_length'], # SAM mask measurement
                 'Number of Detections': len(track['confidences']),
                 'Meets Thresholds': meets_thresholds,
                 'Confidence of Longest Length': track['longest_conf'],

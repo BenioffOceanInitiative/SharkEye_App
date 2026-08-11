@@ -64,9 +64,9 @@ Priority 3.
 | DJI_0031 #4 | 23.0 | **12.7** |
 | DJI_0034 #1 | 18.7 | **8.7**  |
 
-> Was biologically implausible (23–32 ft); now single-digit-to-teens ft. This column is still a raw
-> `max` (outlier-sensitive) — deciding whether to switch it to a percentile or drop it is the
-> remaining open item under Priority-1 step 4 in `inference_analysis.md`.
+> These are the P1 recalibration values (still `max()` at that point). **Superseded by the
+> follow-up below**, which replaces `Longest Length` with the bbox-at-best-frame diagnostic and adds
+> the canonical `Length (ft)` column.
 
 ---
 
@@ -187,3 +187,20 @@ they resolve the per-video FOV from the shared drone map, matching A to the deci
   `load_drone_settings`, `resolve_fov_radians`, and the corrected `save_best_frames`.
 - `src/sharkeye_app.py`, `src/headless_prediction.py`: local copies deleted, now import from `tracking`;
   both CLIs gained `--drone/--altitude`; the mass_prediction glob is fixed.
+
+---
+
+## Follow-up — canonical `Length (ft)` column + `Longest Length` demoted
+
+- **New `Length (ft)` column** in all three CSVs — the single length every consumer should read.
+  It resolves the precedence **manual > SAM** at write time (SAM initially; the review editor's
+  `_on_frame_editor_result` overwrites it with the human-drawn line's value, since manual overrides
+  SAM). Previously that precedence lived only in the review-list display, so any other CSV consumer
+  silently missed a human's correction.
+- **`Longest Length` demoted** from `max(track['lengths'])` (outlier-prone; grew with frame count)
+  to `track['best_length']` — the bbox length at the **best-confidence frame** (same frame SAM
+  measures), i.e. a coarse cross-check, not the headline number. Verified: DJI_0031 now reads
+  bbox@best 13.0/11.6/15.2/11.4 ft (was max 30.7/26.0/31.7/23.0), while `Length (ft)` = SAM
+  9.8/5.8/11.6/8.2. The manual line, SAM, and bbox all share one calibration
+  (`calculate_shark_length_from_pixel`), and the review list now reads `Length (ft)` (falling back
+  to manual>SAM for legacy CSVs).

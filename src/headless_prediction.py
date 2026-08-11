@@ -131,9 +131,10 @@ class HeadlessVideoProcessor():
             meets_thresholds = (len(track['confidences']) >= 10 and 
                                 np.mean(track['confidences']) > 0.4)
             
-            track_info = {   
-                'Video name': self.video_path, 
+            track_info = {
+                'Video name': self.video_path,
                 'Track Id': track_id,
+                'Length (ft)': track['longest_length'],   # canonical length (SAM, or bbox if sub-threshold)
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['longest_timestamp']),
                 'Highest Confidence': max(track['confidences']),
                 'Average Confidence': np.mean(track['confidences']),

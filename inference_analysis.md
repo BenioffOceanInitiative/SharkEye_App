@@ -43,8 +43,10 @@ These are the things the run *uncovered* — some are latent bugs, some are meas
 ### 2.1 Bbox-derived length is *systematically* ~3× the segmentation length ⚠️ (verified) — ✅ FIXED
 > **Resolved (2026-08-11):** unified the bbox estimator onto SAM's per-video ground pixel-size and
 > switched it to the box diagonal. bbox length 23–32 ft → 11–16 ft; bbox/SAM divergence 2.6–4.5× →
-> 1.3–2.0×. See `before_after_metrics.md`. Open sub-item: the CSV `Longest Length` column is still a
-> raw `max` (recalibrated but outlier-sensitive) — decide percentile-vs-drop.
+> 1.3–2.0×. See `before_after_metrics.md`. **Resolved (follow-up):** added a canonical **`Length (ft)`**
+> CSV column (precedence manual > SAM, updated when a human draws a measurement line), and demoted
+> `Longest Length` from the outlier-prone `max(lengths)` to the bbox length at the best-confidence
+> frame (`best_length`) — a diagnostic, not the headline number. Every consumer should read `Length (ft)`.
 
 **Update after checking `shark_frames/*/meta.json`:** this is not a one-frame outlier — the raw bbox length is ~26–31 ft on **every** sampled frame of track 1 (SAM: 9.8 ft), ~28–31 ft across track 3 (SAM: 12 ft), and so on. The two length columns disagree by a **consistent ~3×** for every track. Root cause: `calculate_shark_length` (`sharkeye_app.py:285`) uses **only the bounding-box height** (`height * MODEL_HEIGHT/MODEL_WIDTH * GSD`), whereas SAM measures the mask's actual major axis. A loose or vertically-elongated axis-aligned box (these sharks transit top→bottom, so the box is tall) massively overestimates. The bbox values (26–31 ft) are biologically implausible for these animals; the SAM values (~5–12 ft) are plausible — so the bbox column is the wrong one, and it's the column labeled "Longest Length." **Action item #1 below.**
 
