@@ -1598,15 +1598,32 @@ class CustomTracker:
         self.last_reported_sharks = 0
         self.fov_radians = 1.274090354
         self.drone_altitude = DRONE_ALTITUDE_M
+        # Per-video association telemetry. update() makes the fragmentation-critical
+        # decisions (re-link vs. new id, gate rejection, unassigned detection) silently;
+        # these counters let the app emit an [assoc] summary so id-churn is legible from
+        # the log instead of only reconstructable by diffing on-disk labels. Reset() clears
+        # them; the worker constructs a fresh tracker per video so they're per-video anyway.
+        self.assoc_stats = {
+            'frames_with_dets': 0,   # update() calls (only fires on frames with a detection)
+            'detections': 0,         # raw detections handed to the tracker
+            'matched': 0,            # detections re-linked to an existing track (cost < gate)
+            'new_first_frame': 0,    # ids opened by the very first detected frame
+            'new_from_gate': 0,      # ids opened because the best match exceeded the gate
+            'new_unassigned': 0,     # ids opened for detections the Hungarian step left unpaired
+        }
 
     def update(self, detections, frame, timestamp):
         active_tracks = set()
         new_unique_shark = False
 
+        self.assoc_stats['frames_with_dets'] += 1
+        self.assoc_stats['detections'] += len(detections)
+
         if not self.tracks:
             for detection in detections:
                 self._create_new_track(detection, frame, timestamp)
                 active_tracks.add(self.next_id - 1)
+            self.assoc_stats['new_first_frame'] += len(detections)
             new_unique_shark = True
             self.unique_sharks = 1
         else:
@@ -1628,14 +1645,17 @@ class CustomTracker:
                 if cost_matrix[track_idx, detection_idx] < self._match_threshold(elapsed_ms):
                     self._update_track(track_id, detections[detection_idx], frame, timestamp)
                     active_tracks.add(track_id)
+                    self.assoc_stats['matched'] += 1
                 else:
                     self._create_new_track(detections[detection_idx], frame, timestamp)
                     active_tracks.add(self.next_id - 1)
+                    self.assoc_stats['new_from_gate'] += 1
 
             unassigned_detections = set(range(len(detections))) - set(detection_indices)
             for i in unassigned_detections:
                 self._create_new_track(detections[i], frame, timestamp)
                 active_tracks.add(self.next_id - 1)
+            self.assoc_stats['new_unassigned'] += len(unassigned_detections)
 
         current_unique_sharks = self._count_significant_tracks()
         if current_unique_sharks > self.unique_sharks:
@@ -1776,6 +1796,33 @@ class CustomTracker:
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
+                # Length provenance + sanity. Two length estimators disagree in the CSV:
+                # the SAM mask major-axis (this value) and the raw bbox-height GSD estimate
+                # (calculate_shark_length). Log both, the pixel/mask evidence, and WHICH
+                # frame SAM actually measured (a track that never crosses conf 0.8 keeps its
+                # entry frame as longest_frame, so SAM may run on a weak entering-edge box).
+                # WARN on a degenerate mask (near-empty -> unreliable length) or a large
+                # bbox/SAM divergence (loose box or a GSD/altitude mismatch between the two
+                # formulas — a systematic ~3x gap was observed on real footage).
+                try:
+                    bbox_length = calculate_shark_length((x, y, w, h))
+                    mask_area = int(np.count_nonzero(mask))
+                    frame_idx = track['confidences'].index(longest_confidence)
+                    ratio = (bbox_length / segmentation_length) if segmentation_length > 0 else float('inf')
+                    logger.info(
+                        f"[length] {Path(video_path).name}_{track_id}: sam={segmentation_length:.1f}ft "
+                        f"bbox={bbox_length:.1f}ft (bbox/sam={ratio:.1f}x) | pixel_len={pixel_length:.0f}px "
+                        f"mask_area={mask_area}px | seg_frame idx={frame_idx} conf={longest_confidence:.2f} "
+                        f"t={CustomTracker._format_timestamp(track['longest_timestamp'])}")
+                    if segmentation_length <= 0 or mask_area < 50:
+                        logger.warning(f"[length] {Path(video_path).name}_{track_id}: degenerate SAM mask "
+                                       f"(area={mask_area}px, len={segmentation_length:.1f}ft); length unreliable")
+                    elif ratio >= 2.0 or ratio <= 0.5:
+                        logger.warning(f"[length] {Path(video_path).name}_{track_id}: bbox {bbox_length:.1f}ft vs "
+                                       f"SAM {segmentation_length:.1f}ft diverge {ratio:.1f}x — check box tightness / GSD")
+                except Exception as e:  # logging must never break the pipeline
+                    logger.warning(f"[length] provenance log failed for track {track_id}: {e}")
+
                 mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
 
@@ -1801,6 +1848,8 @@ class CustomTracker:
         self.tracks = {}
         self.next_id = 1
         self.unique_sharks = 0
+        for k in self.assoc_stats:
+            self.assoc_stats[k] = 0
 
     def _predict_new_position(self, track, timestamp):
         """Predict where the track's object should be at `timestamp`.
@@ -2272,6 +2321,13 @@ class VideoProcessingWorker(QObject):
         custom_tracker.fov_radians = self.drone_settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
 
+        # Calibration provenance: every length number derives from these inputs, but they
+        # were never echoed, so a wrong altitude/FOV (or the module-level GSD the bbox
+        # estimator uses) was invisible in the log. Print once per video.
+        logger.info(f"[gsd] {Path(self.video_path).name}: drone={self.drone_type!r} "
+                    f"altitude={custom_tracker.drone_altitude}m fov={custom_tracker.fov_radians:.4f}rad "
+                    f"resolution={video_width}x{video_height} | module_GSD={GSD:.5f}m/px (bbox estimator)")
+
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
@@ -2425,14 +2481,46 @@ class VideoProcessingWorker(QObject):
                   f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
                   f"tracks={track_count} (export+clip deferred to background)")
 
+            # Association census: how the tracker spent its detections and, critically, why
+            # new ids were opened (unassigned by the Hungarian step vs. rejected by the
+            # re-association gate). A run where new_ids spikes inside a single shark window
+            # is fragmentation; this line surfaces it without diffing on-disk labels. Also
+            # reports created/significant/filtered ALWAYS (the "Filtered out N" line above
+            # only fires when N>0), so "no sub-threshold tracks existed" is distinguishable
+            # from "the line didn't print".
+            a = custom_tracker.assoc_stats
+            logger.info(f"[assoc] {Path(self.video_path).name}: "
+                  f"frames_with_dets={a['frames_with_dets']} detections={a['detections']} "
+                  f"matched={a['matched']} | new_ids: first_frame={a['new_first_frame']} "
+                  f"unassigned={a['new_unassigned']} gate_rejected={a['new_from_gate']} | "
+                  f"tracks_created={len(custom_tracker.tracks)} significant={track_count} "
+                  f"filtered={filtered_count}")
+
             # Per-track discovery line: one row per significant track so a run's actual
             # findings (when, how confident, how long, how many detections) are legible
-            # from the log instead of only a bare count.
+            # from the log instead of only a bare count. The spatial signature (time span,
+            # box-center start->end, and x/y travel) is what tells two co-swimming sharks
+            # apart from one fragmented track: two tracks alive at once in disjoint x-bands
+            # are two animals; abutting spans that share a location are one animal split.
+            # Positions/timestamps are the retained tail (deque maxlen=100), so on a >100-
+            # sample track the span covers the last ~100 samples, not the whole life.
             for tid, tr in significant_tracks.items():
                 confs = tr.get('confidences') or [0.0]
+                positions = list(tr.get('positions') or [])
+                timestamps = list(tr.get('timestamps') or [])
+                spatial = ""
+                if positions and timestamps:
+                    xs = [p[0] for p in positions]
+                    ys = [p[1] for p in positions]
+                    t0, t1 = timestamps[0], timestamps[-1]
+                    spatial = (
+                        f" | t={CustomTracker._format_timestamp(t0)}"
+                        f"-{CustomTracker._format_timestamp(t1)} ({(t1 - t0) / 1000:.1f}s) "
+                        f"center=({xs[0]:.0f},{ys[0]:.0f})->({xs[-1]:.0f},{ys[-1]:.0f}) "
+                        f"x_span={max(xs) - min(xs):.0f}px y_span={max(ys) - min(ys):.0f}px")
                 logger.info(f"[track {tid}] t={CustomTracker._format_timestamp(tr.get('best_timestamp', 0))} "
                       f"peak_conf={max(confs):.2f} avg_conf={np.mean(confs):.2f} "
-                      f"dets={len(confs)} length={tr.get('longest_length', 0):.1f}ft")
+                      f"dets={len(confs)} length={tr.get('longest_length', 0):.1f}ft{spatial}")
 
             # Adaptive frame-sampling analytics: how much source-video time the
             # acceleration skipped vs. the wall time spent on inference, then a timeline of

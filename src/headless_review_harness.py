@@ -59,7 +59,9 @@ def _install_dialog_stubs(log):
 
 def main():
     ap = argparse.ArgumentParser(description="Headless GUI driver for SharkEye")
-    ap.add_argument("--video", required=True, help="Path to a video file to process")
+    ap.add_argument("--video", required=True, action="append",
+                    help="Path to a video file to process. Repeat the flag to queue "
+                         "multiple videos into a single processing session.")
     ap.add_argument("--drone", default="Air 2S",
                     help="Drone model to select (must list the video's resolution)")
     ap.add_argument("--altitude", default="40")
@@ -76,10 +78,11 @@ def main():
                     help="Override the saved min_frames (track significance) for this run only")
     args = ap.parse_args()
 
-    video = os.path.abspath(os.path.expanduser(args.video))
-    if not os.path.exists(video):
-        print(f"ERROR: video not found: {video}", file=sys.stderr)
-        return 2
+    videos = [os.path.abspath(os.path.expanduser(v)) for v in args.video]
+    for v in videos:
+        if not os.path.exists(v):
+            print(f"ERROR: video not found: {v}", file=sys.stderr)
+            return 2
 
     shots_dir = os.path.abspath(args.shots)
     os.makedirs(shots_dir, exist_ok=True)
@@ -156,8 +159,9 @@ def main():
             window.drone_select.setCurrentIndex(idx)
         window.altitude_input.setText(str(args.altitude))
         window.flight_location_input.setText(str(args.location))
-        window.add_video_paths([video])
-        log(f"queued video: {os.path.basename(video)} | drone={window.drone_select.currentText()} "
+        window.add_video_paths(videos)
+        log(f"queued {len(videos)} video(s): {', '.join(os.path.basename(v) for v in videos)} "
+            f"| drone={window.drone_select.currentText()} "
             f"| rows={window.video_list.rowCount()}")
         snap("home_ready")
 
