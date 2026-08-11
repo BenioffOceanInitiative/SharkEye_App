@@ -4639,13 +4639,25 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 initial_altitude = None
 
+        # Capture (native) resolution = the full-res still frame's size. FOV must be resolved
+        # against this, not the on-screen frame, because the review clip is downscaled to
+        # <=1080p — a resolution the drone map doesn't list. frames/*.jpg is always native res.
+        capture_res = None
+        still_path = self._current_frame_image_path()
+        if still_path:
+            from PyQt6.QtGui import QImageReader
+            sz = QImageReader(still_path).size()
+            if sz.isValid():
+                capture_res = (sz.width(), sz.height())
+
         if getattr(self, "mask_active", False):
             frame_path = self._current_frame_image_path()
             if not frame_path:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
             loaded = self.frame_editor.load_image(frame_path, drone_altitude=initial_altitude,
-                                                  initial_drone=initial_drone)
+                                                  initial_drone=initial_drone,
+                                                  capture_resolution=capture_res)
         else:
             # Playback frame — only reachable while paused (button is disabled otherwise).
             pixmap = self.frame_player.current_frame_pixmap()
@@ -4653,7 +4665,8 @@ class MainWindow(QMainWindow):
                 self._frame_editor_error("Error: No frame available to edit")
                 return
             loaded = self.frame_editor.load_pixmap(pixmap, drone_altitude=initial_altitude,
-                                                   initial_drone=initial_drone)
+                                                   initial_drone=initial_drone,
+                                                   capture_resolution=capture_res)
 
         if not loaded:
             self._frame_editor_error("Error: Failed to load frame for editing")
