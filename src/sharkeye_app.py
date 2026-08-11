@@ -4623,18 +4623,28 @@ class MainWindow(QMainWindow):
         edits the frame currently paused in the player (captured full-res from memory).
         """
         self.frame_editor._update_drone_settings()
-        # Prefer the drone/altitude this experiment was processed with (persisted in the CSV),
-        # so feet resolve without the user re-picking the drone; fall back to the global
-        # last_drone_type for legacy experiments written before the columns existed.
-        exp_drone, exp_alt = self._current_experiment_drone_altitude()
-        initial_drone = exp_drone or (self.settings_obj.value("last_drone_type") or None)
+        # Seed the editor's drone + altitude so feet resolve without the user re-picking.
+        # Current run just processed: use exactly what was selected on the home page (the
+        # drone that processed this footage). Historical review: use the drone/altitude that
+        # experiment was processed with (persisted in its CSV), falling back to last_drone_type
+        # for legacy CSVs.
+        if getattr(self, "reviewing_history", False):
+            exp_drone, initial_altitude = self._current_experiment_drone_altitude()
+            initial_drone = exp_drone or (self.settings_obj.value("last_drone_type") or None)
+        else:
+            initial_drone = (self.drone_select.currentText()
+                             or self.settings_obj.value("last_drone_type") or None)
+            try:
+                initial_altitude = float(self.altitude_input.text())
+            except (TypeError, ValueError):
+                initial_altitude = None
 
         if getattr(self, "mask_active", False):
             frame_path = self._current_frame_image_path()
             if not frame_path:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_image(frame_path, drone_altitude=exp_alt,
+            loaded = self.frame_editor.load_image(frame_path, drone_altitude=initial_altitude,
                                                   initial_drone=initial_drone)
         else:
             # Playback frame — only reachable while paused (button is disabled otherwise).
@@ -4642,7 +4652,7 @@ class MainWindow(QMainWindow):
             if pixmap is None:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_pixmap(pixmap, drone_altitude=exp_alt,
+            loaded = self.frame_editor.load_pixmap(pixmap, drone_altitude=initial_altitude,
                                                    initial_drone=initial_drone)
 
         if not loaded:
