@@ -133,6 +133,8 @@ class HeadlessVideoProcessor():
             
             track_info = {
                 'Video name': self.video_path,
+                'Drone': self.drone_type,
+                'Altitude': self.altitude,
                 'Track Id': track_id,
                 'Length (ft)': track['longest_length'],   # canonical length (SAM, or bbox if sub-threshold)
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['longest_timestamp']),

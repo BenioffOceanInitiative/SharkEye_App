@@ -2284,7 +2284,7 @@ class VideoProcessingWorker(QObject):
             # length columns are provenance/diagnostics: 'Highest Confidence Length' is the SAM
             # mask measurement; 'Longest Length' is now the bbox estimate at the best-confidence
             # frame (a coarse cross-check), not the old outlier-prone max over every frame.
-            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Length (ft)',
+            fieldnames = ['video_name', 'Flight Location', 'Drone', 'Altitude', 'Track Id', 'Length (ft)',
                         'Highest Conf Timestamp',
                         'Longest Length Timestamp', 'Highest Confidence', 'Average Confidence',
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
@@ -2299,6 +2299,8 @@ class VideoProcessingWorker(QObject):
                 csv_writer.writerow({
                     'video_name': self.video_path,
                     'Flight Location': self.flight_location,
+                    'Drone': self.drone_type,        # persisted so the review editor auto-resolves FOV
+                    'Altitude': self.altitude,
                     'Track Id': track_id,
                     'Length (ft)': track['longest_length'],   # canonical: SAM now, manual overrides in review
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
@@ -4554,6 +4556,39 @@ class MainWindow(QMainWindow):
         )
         return str(frame_path) if frame_path.exists() else None
 
+    def _current_experiment_drone_altitude(self):
+        """Read the Drone + Altitude the current experiment was processed with, from its CSV,
+        so the editor auto-selects the drone whose FOV profile matches the footage (and fills
+        altitude). Returns (drone_or_None, altitude_or_None); legacy CSVs without the columns,
+        or a non-historical context, return (None, None) so the caller falls back."""
+        try:
+            row = self.historical_items.currentRow()
+            if row < 0:
+                return (None, None)
+            item = self.historical_items.item(row, 0)
+            meta = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if not meta:
+                return (None, None)
+            experiment, _video_name, csv_name, track_id = meta
+            csv_path = Path(get_results_dir()) / experiment / "detection_results" / csv_name
+            if not csv_path.exists():
+                return (None, None)
+            df = pd.read_csv(csv_path)
+            m = df["Track Id"].astype(int) == int(track_id)
+            if not m.any():
+                return (None, None)
+            rowdata = df[m].iloc[0]
+            drone = rowdata["Drone"] if "Drone" in df.columns else None
+            alt = rowdata["Altitude"] if "Altitude" in df.columns else None
+            drone = str(drone) if not _csv_value_is_empty(drone) else None
+            try:
+                alt = float(alt) if not _csv_value_is_empty(alt) else None
+            except (TypeError, ValueError):
+                alt = None
+            return (drone, alt)
+        except Exception:
+            return (None, None)
+
     def open_frame_editor(self):
         """Replace the active frame view with the in-place line editor.
 
@@ -4561,21 +4596,27 @@ class MainWindow(QMainWindow):
         edits the frame currently paused in the player (captured full-res from memory).
         """
         self.frame_editor._update_drone_settings()
-        initial_drone = self.settings_obj.value("last_drone_type") or None
+        # Prefer the drone/altitude this experiment was processed with (persisted in the CSV),
+        # so feet resolve without the user re-picking the drone; fall back to the global
+        # last_drone_type for legacy experiments written before the columns existed.
+        exp_drone, exp_alt = self._current_experiment_drone_altitude()
+        initial_drone = exp_drone or (self.settings_obj.value("last_drone_type") or None)
 
         if getattr(self, "mask_active", False):
             frame_path = self._current_frame_image_path()
             if not frame_path:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_image(frame_path, initial_drone=initial_drone)
+            loaded = self.frame_editor.load_image(frame_path, drone_altitude=exp_alt,
+                                                  initial_drone=initial_drone)
         else:
             # Playback frame — only reachable while paused (button is disabled otherwise).
             pixmap = self.frame_player.current_frame_pixmap()
             if pixmap is None:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_pixmap(pixmap, initial_drone=initial_drone)
+            loaded = self.frame_editor.load_pixmap(pixmap, drone_altitude=exp_alt,
+                                                   initial_drone=initial_drone)
 
         if not loaded:
             self._frame_editor_error("Error: Failed to load frame for editing")
@@ -6307,6 +6348,8 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     
             track_info = {
                 'video_name': self.video_path,
+                'Drone': self.drone_type,
+                'Altitude': self.altitude,
                 'Track Id': track_id,
                 'Length (ft)': track['longest_length'],   # canonical: SAM (manual overrides in review)
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
