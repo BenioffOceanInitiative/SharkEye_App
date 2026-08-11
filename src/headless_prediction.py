@@ -39,7 +39,7 @@ from segmentation.segmentation_model import run_prediction, calculate_shark_leng
 # CustomTracker + length calibration now come from the shared `tracking` module (previously
 # a diverged copy lived here with the old ~3x-inflated bbox length calc and no best-frame
 # segmentation). One source of truth across the GUI, mass_prediction, and this CLI.
-from tracking import CustomTracker
+from tracking import CustomTracker, resolve_fov_radians, load_drone_settings
 from segment_anything import sam_model_registry, SamPredictor 
 
 
@@ -55,20 +55,34 @@ class HeadlessVideoProcessor():
     progress_update = 0
     processing_complete = {}
     
-    def __init__(self, video_path, model, output_dir, sam_model_path):
+    def __init__(self, video_path, model, output_dir, sam_model_path,
+                 drone_type="Air 2S", altitude=40.0, drone_settings=None):
         super().__init__()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.sam_model_path = sam_model_path
+        self.drone_type = drone_type
+        self.altitude = float(altitude)
+        self.drone_settings = drone_settings if drone_settings is not None else load_drone_settings()
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30  # used for keyframe-mode timestamps
+        video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
-        
+        custom_tracker = CustomTracker(sam_model_path=self.sam_model_path)
+        # Per-video FOV so length math matches the GUI (previously defaulted).
+        fov = resolve_fov_radians(self.drone_type, video_width, video_height, self.drone_settings)
+        if fov is not None:
+            custom_tracker.fov_radians = fov
+            custom_tracker.drone_altitude = self.altitude
+        else:
+            logger.warning(f"[gsd] {Path(self.video_path).name}: no FOV for drone={self.drone_type!r} "
+                           f"@ {video_width}x{video_height}; using default {custom_tracker.fov_radians:.4f}rad")
+
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'masks'), exist_ok=True)
@@ -148,25 +162,29 @@ class HeadlessVideoProcessor():
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
         return frame_with_boxes
     
-def mass_prediction(video_paths, current_output_dir, sam_model_path):
+def mass_prediction(video_paths, current_output_dir, sam_model_path, drone_type="Air 2S", altitude=40.0):
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
-    
+    drone_settings = load_drone_settings()
+
     videos_tqdm = tqdm(video_paths)
     all_track_results = []
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
-        processor = HeadlessVideoProcessor(path, model, current_output_dir, sam_model_path=sam_model_path)
+        processor = HeadlessVideoProcessor(path, model, current_output_dir, sam_model_path=sam_model_path,
+                                           drone_type=drone_type, altitude=altitude, drone_settings=drone_settings)
         all_track_results.extend(processor.run())
-    
+
     return all_track_results
 
-def parse_args(): 
+def parse_args():
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
     parser.add_argument('--sam_model_path', type=str, required=True, help="Path to segment anything model")
-    parser.add_argument('--input_dir', type=str, required=True, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--input_dir', type=str, required=True, help='Directory containing videos to process (.mp4/.mov, case-insensitive)')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
+    parser.add_argument('--drone', type=str, default='Air 2S', help='Drone model, for per-video FOV / length calibration')
+    parser.add_argument('--altitude', type=float, default=40.0, help='Flight altitude in meters, for length calibration')
     return parser.parse_args()
 
 def main():
@@ -188,7 +206,8 @@ def main():
 
     # Run prediction
     output_dir.mkdir(parents=True, exist_ok=True)
-    results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir, sam_model_path=sam_model_path)
+    results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir, sam_model_path=sam_model_path,
+                              drone_type=args.drone, altitude=args.altitude)
 
     # Save results to CSV
     if results:

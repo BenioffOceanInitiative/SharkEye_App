@@ -87,6 +87,7 @@ from tracking import (
     CustomTracker, calculate_gsd, GSD, calculate_shark_length, calculate_bbox_area,
     calculate_adjusted_shark_length, DRONE_ALTITUDE_M, SENSOR_WIDTH_MM, FOCAL_LENGTH_MM,
     MODEL_WIDTH, MODEL_HEIGHT, ORIGINAL_WIDTH, ORIGINAL_HEIGHT, ASPECT_RATIO,
+    DEFAULT_DRONE_SETTINGS, resolve_fov_radians,
 )
 
 # Use a constant for the model path
@@ -144,19 +145,8 @@ def label_to_yolo_class(label):
         return 1
     return 2
 
-DEFAULT_DRONE_SETTINGS = {
-    "Mavic 2 Pro": {
-        "Resolution": {
-            "(2688, 1512)": math.radians(73)
-        }
-    },
-    "Air 2S": {
-        "Resolution": {
-            "(2688, 1512)": math.radians(63.5),
-            "(5472, 3078)": math.radians(82.9)
-        }
-    }
-}
+# DEFAULT_DRONE_SETTINGS now lives in `tracking` (imported above) so the GUI and the
+# headless CLIs resolve the same per-video FOV.
 
 
 def ensure_app_settings(settings_obj=None):
@@ -6207,14 +6197,16 @@ class FramePlayer(QLabel):
         return QRect(x, y, scaled.width(), scaled.height())
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
-    def __init__(self, video_path, model, output_dir):
+    def __init__(self, video_path, model, output_dir, drone_type="Air 2S", altitude=40.0):
         self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.drone_settings = get_drone_settings_dict(self.settings_obj)
-    
+        self.drone_type = drone_type
+        self.altitude = float(altitude)
+
     progress_update = 0
     processing_complete = {}
 
@@ -6225,6 +6217,17 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Per-video FOV so length math matches the GUI (previously this path silently used
+        # the default FOV). Falls back to the default + a warning when the drone/resolution
+        # isn't in the map.
+        fov = resolve_fov_radians(self.drone_type, video_width, video_height, self.drone_settings)
+        if fov is not None:
+            custom_tracker.fov_radians = fov
+            custom_tracker.drone_altitude = self.altitude
+        else:
+            logger.warning(f"[gsd] {Path(self.video_path).name}: no FOV for drone={self.drone_type!r} "
+                           f"@ {video_width}x{video_height}; using default {custom_tracker.fov_radians:.4f}rad")
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
@@ -6293,18 +6296,19 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     
         return all_track_info            
 
-def mass_prediction(video_paths, current_output_dir):
+def mass_prediction(video_paths, current_output_dir, drone_type="Air 2S", altitude=40.0):
     device = select_torch_device()
     logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
-    
+
     videos_tqdm = tqdm(video_paths)
     all_track_results = []
     processing_logs = {}
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
         path_start = time.perf_counter()
-        processor = HeadlessVideoProcessor(path, model, current_output_dir)
+        processor = HeadlessVideoProcessor(path, model, current_output_dir,
+                                           drone_type=drone_type, altitude=altitude)
         path_results = processor.run()
         path_end = time.perf_counter()
 
@@ -6334,8 +6338,10 @@ def mass_prediction(video_paths, current_output_dir):
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
     parser.add_argument('--testing', action='store_true', help='Enables testing for app in headless environment')
-    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing videos to process (.mp4/.mov, case-insensitive)')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
+    parser.add_argument('--drone', type=str, default='Air 2S', help='Drone model, for per-video FOV / length calibration')
+    parser.add_argument('--altitude', type=float, default=40.0, help='Flight altitude in meters, for length calibration')
     return parser.parse_args()
 
 def _install_qt_message_filter():
@@ -6361,14 +6367,18 @@ if __name__ == '__main__':
     if args.input_dir and args.output_dir:
         input_dir = Path(args.input_dir)
         output_dir = Path(args.output_dir)
-        video_paths = input_dir.rglob("*.mp4")
+        # Case-insensitive, de-duped, sorted list (not a generator) so real ".MP4" drone
+        # files match and the `if not video_paths` guard actually works.
+        video_exts = {".mp4", ".mov"}
+        video_paths = sorted({p for p in input_dir.rglob("*") if p.suffix.lower() in video_exts})
         if not video_paths:
-            logger.warning(f"No .mp4 videos found in {input_dir}")
+            logger.warning(f"No videos found under {input_dir}")
             exit(1)
 
         # Run prediction
         output_dir.mkdir(parents=True, exist_ok=True)
-        results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir)
+        results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir,
+                                  drone_type=args.drone, altitude=args.altitude)
 
         # Save results to CSV
         if results:

@@ -142,45 +142,48 @@ window remains 4 spatially-distinct sharks (§2.2 of `inference_analysis.md`).
 
 `CustomTracker` and the length calibration were duplicated (and had drifted) across
 `sharkeye_app.py` and `headless_prediction.py`. They now live once in **`src/tracking.py`**;
-all three prediction paths import it. The Priority 1/2 fixes therefore apply everywhere, and
-two **pre-existing** bugs in the non-GUI paths are fixed as a side effect.
+all three prediction paths import it. The Priority 1/2 fixes therefore apply everywhere, three
+**pre-existing** bugs in the non-GUI paths are fixed, and — after threading `--drone/--altitude`
+through both CLIs — all three paths produce **identical** lengths.
 
-### Shark length parity across all three paths (same two videos)
+### Shark length parity across all three paths (same two videos, `--drone "Air 2S" --altitude 40`)
 
-`Highest Confidence Length` (SAM), feet:
+`Highest Confidence Length` (SAM), feet — **all three identical** (per-video FOV 1.4469 everywhere):
 
-| Track | A: GUI/harness (per-video FOV 1.4469) | B: mass_prediction (default FOV 1.274) | C: headless CLI (default FOV 1.274) |
-|-------|--------------------------------------:|---------------------------------------:|------------------------------------:|
-| 0031 #1 | 9.8 | 8.2 | 8.2 |
-| 0031 #2 | 5.8 | 4.9 | 4.9 |
-| 0031 #3 | 11.6 | 9.7 | 9.7 |
-| 0031 #4 | 8.2 | 6.9 | 6.9 |
-| 0034 #1 | 5.0 | 4.2 | 4.2 |
+| Track | A: GUI/harness | B: mass_prediction | C: headless CLI |
+|-------|---------------:|-------------------:|----------------:|
+| 0031 #1 | 9.8 | 9.8 | 9.8 |
+| 0031 #2 | 5.8 | 5.8 | 5.8 |
+| 0031 #3 | 11.6 | 11.6 | 11.6 |
+| 0031 #4 | 8.2 | 8.2 | 8.2 |
+| 0034 #1 | 5.0 | 5.0 | 5.0 |
 
-B and C agree to the decimal; they read ~16% lower than A **only** because they have no drone
-selection and fall back to the default FOV (1.274 rad) where A uses the per-video 1.4469 rad.
-The bbox/SAM ratios, segmented frame index, `pixel_len`, and `mask_area` are identical across
-all three — i.e. the calc fix + best-frame selection are shared, only the FOV input differs.
+bbox/SAM ratios, segmented frame index, `pixel_len`, and `mask_area` are identical across all
+three. (Before FOV threading, B and C read ~16% lower because they defaulted to FOV 1.274; now
+they resolve the per-video FOV from the shared drone map, matching A to the decimal.)
 
-### What the de-dup fixed in each path
+### What the de-dup + FOV threading fixed in each path
 
 | Path | Before | After |
 |------|--------|-------|
-| **A. GUI/harness** | already fixed (P1/P2) | **identical** — full regression pass (every `[length]`/`[assoc]`/`[track]`/`[batch]` number unchanged) |
-| **B. mass_prediction** | `Highest Confidence Length` written in **raw pixels**; `longest_frame`; ~3× bbox | **feet** (8.2/4.9/9.7/6.9/4.2), best-frame, `Segmentation Duration` intact; bbox/SAM 1.3–2.0× |
-| **C. headless CLI** | own ~3×-inflated `calculate_shark_length`; `longest_frame`; SAM w/ default FOV | shared calc (bbox/SAM 1.3–2.0×), best-frame; `output.csv` in plausible feet |
+| **A. GUI/harness** | already fixed (P1/P2) | **identical** — full regression pass (every `[length]`/`[assoc]`/`[track]` value unchanged) |
+| **B. mass_prediction** | `Highest Confidence Length` in **raw pixels**; `longest_frame`; ~3× bbox; default FOV; case-sensitive glob missed `.MP4` | **feet**, best-frame, per-video FOV → **matches A exactly**; `Segmentation Duration` intact; glob now case-insensitive |
+| **C. headless CLI** | own ~3×-inflated `calculate_shark_length`; `longest_frame`; default FOV | shared calc, best-frame, per-video FOV → **matches A exactly** |
 
-### Known limitation (pre-existing, not introduced here)
-- **B and C have no drone/altitude selection**, so both use the default FOV (1.274 rad) rather
-  than the per-video value. Correcting this means threading drone/altitude/resolution through the
-  `mass_prediction` and `headless_prediction` CLIs — a separate enhancement.
-- **Path B launcher bug (found while testing):** the embedded entry uses
-  `input_dir.rglob("*.mp4")` — **case-sensitive**, so real `.MP4` drone files match nothing, and
-  the `if not video_paths:` guard is dead (rglob returns a generator, never falsy). Independent of
-  the de-dup; worth a one-line fix (`{".mp4",".mov"}` case-insensitive, like `headless_prediction`).
-- Output filenames for B/C changed to the shared `{video}.mp4_{id}.jpg` convention (C previously
-  encoded length/conf in the filename). The data is unchanged; only artifact names differ.
+### Fixes shipped for the non-GUI paths
+- **Per-video FOV (both CLIs):** added `--drone` (default "Air 2S") and `--altitude` (default 40)
+  to `sharkeye_app --input_dir` and `headless_prediction`; both resolve FOV per video from the
+  shared drone map (`tracking.resolve_fov_radians` / `load_drone_settings`, reading the GUI-seeded
+  QSettings map or built-in defaults). Falls back to the default FOV + a `[gsd]` WARNING when the
+  drone/resolution isn't in the map.
+- **Path B launcher glob:** `input_dir.rglob("*.mp4")` (case-sensitive, and a dead `if not
+  video_paths` guard on a generator) → `sorted({… suffix.lower() in {".mp4",".mov"}})`, matching
+  what `headless_prediction` already did. Real `.MP4` drone files now match.
+- Output filenames for B/C now use the shared `{video}.mp4_{id}.jpg` convention (C previously
+  encoded length/conf in the filename). Data unchanged; only artifact names differ.
 
 ### Files
-- **New:** `src/tracking.py` (shared `CustomTracker` + length calibration + `segment_and_measure`-style save).
-- `src/sharkeye_app.py`, `src/headless_prediction.py`: local copies deleted, now import from `tracking`.
+- **New:** `src/tracking.py` — shared `CustomTracker`, length calibration, `DEFAULT_DRONE_SETTINGS`,
+  `load_drone_settings`, `resolve_fov_radians`, and the corrected `save_best_frames`.
+- `src/sharkeye_app.py`, `src/headless_prediction.py`: local copies deleted, now import from `tracking`;
+  both CLIs gained `--drone/--altitude`; the mass_prediction glob is fixed.

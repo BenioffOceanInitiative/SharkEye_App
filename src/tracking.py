@@ -13,6 +13,7 @@ the headless CLI can use it without a hard Qt dependency.
 """
 
 import os
+import json
 import time
 import math
 from collections import deque
@@ -30,9 +31,53 @@ from segmentation.segmentation_model import (
 
 logger = get_logger("sharkeye.tracking")
 
-# Default drone field of view (radians); overwritten per-video by callers that know the
-# drone/resolution (the GUI worker). ~73 degrees; matches segmentation's FOV_RADIANS.
+# Default drone field of view (radians); used only when a drone/resolution can't be
+# resolved. ~73 degrees; matches segmentation's FOV_RADIANS.
 DEFAULT_FOV_RADIANS = 1.274090354
+
+# Drone -> resolution -> horizontal FOV (radians). Moved here from sharkeye_app so the GUI,
+# mass_prediction, and the headless CLI resolve the SAME per-video FOV (which the length
+# math depends on) instead of the CLIs silently defaulting. Keep in sync with the GUI's
+# editable drone map (seeded into QSettings); load_drone_settings prefers that map.
+DEFAULT_DRONE_SETTINGS = {
+    "Mavic 2 Pro": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(73)
+        }
+    },
+    "Air 2S": {
+        "Resolution": {
+            "(2688, 1512)": math.radians(63.5),
+            "(5472, 3078)": math.radians(82.9)
+        }
+    }
+}
+
+
+def load_drone_settings():
+    """Return the drone->resolution->FOV map: the GUI-seeded QSettings map if present,
+    else the built-in defaults. PyQt is imported lazily so the headless CLI needs no Qt."""
+    try:
+        from PyQt6.QtCore import QSettings
+        raw = QSettings("BOSL", "SharkEye_App").value("drone_settings")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return DEFAULT_DRONE_SETTINGS
+
+
+def resolve_fov_radians(drone, width, height, drone_settings=None):
+    """Per-video horizontal FOV (radians) for a drone + resolution, or None if not found.
+
+    Mirrors the GUI's lookup: drone_settings[drone]["Resolution"]["(w, h)"]. Callers set the
+    tracker's fov_radians from this so length math matches the GUI; None means the caller
+    should keep the default FOV (and probably warn)."""
+    settings = drone_settings if drone_settings is not None else load_drone_settings()
+    try:
+        return float(settings[drone]["Resolution"][f"({width}, {height})"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 # --- Length-calibration constants (moved verbatim from sharkeye_app) ---
 DRONE_ALTITUDE_M = 40
