@@ -4625,9 +4625,13 @@ class MainWindow(QMainWindow):
                 raise FileNotFoundError(f"CSV not found: {csv_path}")
 
             df = pd.read_csv(csv_path)
+            # An all-blank column reads back as float64 (all-NaN), and pandas then rejects a
+            # "" write into it ("Invalid value '' for dtype 'float64'"). Coerce the columns we
+            # touch to object dtype so both blanks and floats are accepted.
             for col in ("manual_length_px", "manual_length_ft", "Length (ft)"):
                 if col not in df.columns:
                     df[col] = ""
+                df[col] = df[col].astype(object)
 
             mask = df["Track Id"].astype(int) == int(track_id)
             if not mask.any():
@@ -4647,12 +4651,20 @@ class MainWindow(QMainWindow):
                 length_item = self.historical_items.item(row, 5)
                 if length_item is not None:
                     length_item.setText(f"{float(length_ft):.1f}ft")
-
-            QMessageBox.information(
-                self,
-                "Length Saved",
-                "Length correction saved to detection results.",
-            )
+                QMessageBox.information(
+                    self,
+                    "Length Saved",
+                    f"Length correction saved: {float(length_ft):.1f} ft.",
+                )
+            else:
+                # Pixels were saved but feet couldn't be computed — the editor's drone
+                # doesn't have a FOV profile for this frame's resolution, or altitude is blank.
+                QMessageBox.warning(
+                    self,
+                    "Pixel Length Saved (no feet)",
+                    "Saved the pixel length, but couldn't convert to feet: pick the drone that "
+                    "matches this footage and enter an altitude in the editor, then draw again.",
+                )
         except Exception as e:
             QMessageBox.warning(
                 self,
