@@ -36,6 +36,9 @@ from PyQt6.QtWidgets import (
 from segmentation.segmentation_model import calculate_shark_length_from_pixel
 from theme import colored_svg_icon, is_dark_mode
 from utility import resource_path
+from log_config import get_logger
+
+logger = get_logger("sharkeye.editor")
 
 # Inset used by `_position_overlays` between content_rect and chrome panels.
 # Obstacle / HUD math must use this same value so margin strips match layout.
@@ -935,9 +938,11 @@ class FrameLineEditorWidget(QWidget):
         image_path: str | Path,
         drone_altitude: float | None = None,
         initial_drone: str | None = None,
+        capture_resolution: tuple[int, int] | None = None,
     ) -> bool:
         """Load a frame into the editor and reset drawing state."""
         self._image_path = Path(image_path)
+        self._capture_resolution = capture_resolution
         self._view.set_line_color(load_annotation_color(self._settings_obj))
         if drone_altitude is not None:
             self._altitude_input.setText(str(drone_altitude))
@@ -954,6 +959,7 @@ class FrameLineEditorWidget(QWidget):
         pixmap: QPixmap,
         drone_altitude: float | None = None,
         initial_drone: str | None = None,
+        capture_resolution: tuple[int, int] | None = None,
     ) -> bool:
         """Load an in-memory frame (e.g. the current playback frame) into the editor.
 
@@ -962,6 +968,7 @@ class FrameLineEditorWidget(QWidget):
         measured without first writing it to disk.
         """
         self._image_path = None
+        self._capture_resolution = capture_resolution
         self._view.set_line_color(load_annotation_color(self._settings_obj))
         if drone_altitude is not None:
             self._altitude_input.setText(str(drone_altitude))
@@ -1000,11 +1007,17 @@ class FrameLineEditorWidget(QWidget):
         if not drone_name or drone_name not in self._drone_settings:
             return None
 
-        image_size = self._get_image_size()
-        if image_size is None:
+        # FOV is a property of the CAPTURE, not the displayed frame. The review clip is
+        # downscaled (<=1080p), so keying off the on-screen frame size would miss the drone
+        # map (which lists native capture resolutions). Prefer the capture resolution passed
+        # in by the caller; fall back to the displayed size (correct when editing the full-res
+        # still). The length math still measures pixels in the displayed frame — that's
+        # self-consistent as long as the downscale preserves aspect ratio.
+        resolution = getattr(self, "_capture_resolution", None) or self._get_image_size()
+        if resolution is None:
             return None
 
-        resolution_key = f"({image_size[0]}, {image_size[1]})"
+        resolution_key = f"({resolution[0]}, {resolution[1]})"
         resolutions = self._drone_settings[drone_name].get("Resolution", {})
         return resolutions.get(resolution_key)
 
@@ -1827,6 +1840,17 @@ class FrameLineEditorWidget(QWidget):
                     original_height=image_size[1],
                     drone_altitude=altitude_m,
                     fov_radians=fov_radians,
+                )
+            else:
+                # Pinpoint which input is missing so "couldn't convert to feet" is diagnosable.
+                drone = self._drone_select.currentText()
+                res_key = f"({image_size[0]}, {image_size[1]})" if image_size else None
+                logger.warning(
+                    "[measure] feet unresolved: drone=%r frame_res=%s fov=%r altitude=%r "
+                    "length_px=%.1f | drones=%s res_keys_for_drone=%s",
+                    drone, res_key, fov_radians, altitude_m, length_px,
+                    list(self._drone_settings.keys()),
+                    list(self._drone_settings.get(drone, {}).get("Resolution", {}).keys()),
                 )
 
         return {

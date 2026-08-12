@@ -154,6 +154,7 @@ def _keyframe_gen(container, stream, dense_stride, dense_hold_seconds):
     def seek_to(frame_index):
         # backward=True lands on the keyframe at/before the target; we then skip
         # forward to the frame we actually want.
+        stats['seeks'] += 1  # late-bound: stats is defined below, seek_to is only called after
         target_ticks = int(frame_index / fps / time_base)
         container.seek(max(0, target_ticks), stream=stream, backward=True, any_frame=False)
 
@@ -166,6 +167,8 @@ def _keyframe_gen(container, stream, dense_stride, dense_hold_seconds):
         'baseline_skipped_frames': 0,
         'accelerated_skipped_frames': 0,
         'segments': [],
+        'seeks': 0,           # container.seek() calls — each flushes+re-primes the decoder
+        'mode_switches': 0,   # scan<->dense transitions (each triggers a seek)
     }
 
     def record(kind, start_idx, end_idx, had_det):
@@ -206,6 +209,7 @@ def _keyframe_gen(container, stream, dense_stride, dense_hold_seconds):
                     if had_detection:
                         dense_start = idx
                         mode = 'dense'
+                        stats['mode_switches'] += 1
                         switched = True
                         break
                 if not switched:
@@ -230,6 +234,7 @@ def _keyframe_gen(container, stream, dense_stride, dense_hold_seconds):
                         break
                     want = idx + dense_stride
                 mode = 'scan'
+                stats['mode_switches'] += 1
                 next_scan_index = last_idx + 1
     finally:
         container.close()
