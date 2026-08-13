@@ -122,11 +122,26 @@ class CustomTracker:
     # rejects inf/NaN.
     _UNMATCHABLE_COST = 1e9
 
-    # The match gate (distance_threshold) grows by this many pixels per second of dropout:
-    # position uncertainty and extrapolation error both increase with the gap, so a longer
-    # dropout should tolerate a larger jump before the detection is ruled a different
-    # object. See _match_threshold.
+    # The match gate (distance_threshold) grows by this many pixels per second of dropout
+    # FOR AN ESTABLISHED TRACK: its velocity-extrapolated prediction already follows the
+    # animal, so the gate only has to cover the residual *extrapolation error*, which grows
+    # slowly with the gap. See _match_threshold.
     _GATE_GROWTH_PX_PER_S = 60
+
+    # A cold-start track (a single observation) has velocity [0, 0], so _predict_new_position
+    # returns its stale last position — the gate must then cover the animal's ENTIRE possible
+    # travel during the gap, not just extrapolation error. Growing that gate at the slow
+    # extrapolation-error rate above fragments a shark that dropped out right after its first
+    # detection and resurfaced having swum a distance. Instead grow it at the max plausible
+    # shark ground speed, converted to this video's pixel scale (so it is resolution- and
+    # altitude-correct rather than a fixed pixel constant that means different things on 2.7K
+    # vs 5.3K footage). See _match_threshold.
+    _COLDSTART_MAX_SPEED_MPS = 3.0
+
+    # EMA weight for the newest instantaneous velocity sample when updating a track's
+    # velocity. < 1 so a single jittery YOLO box can't swing the extrapolated prediction;
+    # the first real sample still seeds velocity directly (see _update_track).
+    _VELOCITY_EMA_ALPHA = 0.5
 
     def __init__(self, distance_threshold=250, min_frames=None, confidence_threshold=None,
                  fov_radians=None, drone_altitude=None, sam_model_path=None):
@@ -160,8 +175,12 @@ class CustomTracker:
         # was actually missing. Sized to cover real shark dropouts (glint, a side-on turn,
         # a brief submersion), which routinely run past 2s — the keyframe sampler already
         # keeps looking densely for ~2.5s (see keyframe_sampling._DENSE_HOLD_SECONDS), so a
-        # shorter grace here re-splits a shark the sampler was still tracking.
-        self.reassociation_grace_ms = 4000
+        # shorter grace here re-splits a shark the sampler was still tracking. Observed on
+        # real footage (DJI_0032): a shark dives and resurfaces ~5s later — a 4000ms grace
+        # missed it by ~4ms and fragmented one animal into sub-threshold pieces (reported as
+        # 0 sharks). 6000ms covers a real dive while the velocity-extrapolated prediction
+        # (see _predict_new_position) still lands on the resurfacing detection.
+        self.reassociation_grace_ms = 6000
         self.min_frames = int(min_frames) if min_frames is not None else 5
         self.confidence_threshold = float(confidence_threshold) if confidence_threshold is not None else 0.4
         self.unique_sharks = 0
@@ -182,6 +201,7 @@ class CustomTracker:
             'matched': 0,            # detections re-linked to an existing track (cost < gate)
             'new_first_frame': 0,    # ids opened by the very first detected frame
             'new_from_gate': 0,      # ids opened because the best match exceeded the gate
+            'new_from_gate_coldstart': 0,  # subset of new_from_gate where the track had no velocity yet (1 obs)
             'new_unassigned': 0,     # ids opened for detections the Hungarian step left unpaired
         }
 
@@ -243,8 +263,18 @@ class CustomTracker:
             track_ids = list(self.tracks.keys())
             for track_idx, detection_idx in zip(track_indices, detection_indices):
                 track_id = track_ids[track_idx]
-                elapsed_ms = timestamp - self.tracks[track_id]['timestamps'][-1]
-                if cost_matrix[track_idx, detection_idx] < self._match_threshold(elapsed_ms):
+                trk = self.tracks[track_id]
+                elapsed_ms = timestamp - trk['timestamps'][-1]
+                # "Has velocity" must mean the motion model is actually usable — i.e. a
+                # nonzero velocity was computed — NOT merely that >=2 positions exist. A
+                # track can accumulate several detections at the SAME timestamp (dt=0, e.g.
+                # duplicate-timestamp samples) and never compute a velocity, leaving it
+                # [0,0]; treating that as "has velocity" applies the narrow established gate
+                # against a stale (stationary) prediction and fragments a moving shark.
+                has_velocity = bool(np.any(trk['velocity']))
+                gate = self._match_threshold(elapsed_ms, has_velocity,
+                                             frame.shape[1], frame.shape[0])
+                if cost_matrix[track_idx, detection_idx] < gate:
                     self._update_track(track_id, detections[detection_idx], frame, timestamp)
                     active_tracks.add(track_id)
                     self.assoc_stats['matched'] += 1
@@ -252,6 +282,8 @@ class CustomTracker:
                     self._create_new_track(detections[detection_idx], frame, timestamp)
                     active_tracks.add(self.next_id - 1)
                     self.assoc_stats['new_from_gate'] += 1
+                    if not has_velocity:
+                        self.assoc_stats['new_from_gate_coldstart'] += 1
 
             unassigned_detections = set(range(len(detections))) - set(detection_indices)
             for i in unassigned_detections:
@@ -345,7 +377,19 @@ class CustomTracker:
             # rather than dividing by zero.
             dt_ms = track['timestamps'][-1] - track['timestamps'][-2]
             if dt_ms > 0:
-                track['velocity'] = (curr_pos - prev_pos) / dt_ms
+                inst_velocity = (curr_pos - prev_pos) / dt_ms
+                # The first USABLE velocity seeds the estimate directly; after that, smooth
+                # with an EMA so one jittery YOLO box can't swing the extrapolated prediction
+                # — which matters most across the long dropout gaps this tracker re-associates
+                # over. Key the seed off "velocity still [0,0]", NOT position count: duplicate
+                # dt=0 samples can push the position count past 2 before any real velocity is
+                # computed, and EMA-blending the first real sample against the [0,0] seed
+                # halves it, under-shooting the next prediction and fragmenting the track.
+                if not np.any(track['velocity']):
+                    track['velocity'] = inst_velocity
+                else:
+                    a = self._VELOCITY_EMA_ALPHA
+                    track['velocity'] = a * inst_velocity + (1 - a) * track['velocity']
 
     @staticmethod
     def _format_timestamp(milliseconds):
@@ -487,14 +531,30 @@ class CustomTracker:
         elapsed_ms = timestamp - track['timestamps'][-1]
         return last_pos + track['velocity'] * elapsed_ms
 
-    def _match_threshold(self, elapsed_ms):
+    def _match_threshold(self, elapsed_ms, has_velocity, frame_width, frame_height):
         """Distance gate for re-linking a detection to a track, widening with the dropout.
 
-        Near-continuous detections use the base distance_threshold; as the gap grows, both
-        the animal's possible travel and the extrapolation error grow, so the gate expands
-        linearly with elapsed video time. Kept well below _UNMATCHABLE_COST so a
-        past-grace track (see _calculate_cost) is still rejected."""
-        return self.distance_threshold + self._GATE_GROWTH_PX_PER_S * (elapsed_ms / 1000.0)
+        Near-continuous detections use the base distance_threshold; as the gap grows the gate
+        expands linearly with elapsed video time. The growth RATE depends on whether the
+        track has an established velocity:
+
+        - has_velocity (a nonzero velocity has been computed): the prediction already
+          extrapolates along the animal's motion, so the gate only needs to cover residual
+          extrapolation error — the slow _GATE_GROWTH_PX_PER_S rate.
+        - cold start (no usable velocity yet, i.e. velocity still [0, 0]): the prediction is
+          stationary and the gate must cover the animal's whole plausible travel. Grow at the max shark
+          ground speed converted to this video's pixel scale, which on high-res footage is
+          far larger than the extrapolation-error rate — this is what lets a shark that
+          dropped out right after its first detection re-link instead of fragmenting.
+
+        Kept well below _UNMATCHABLE_COST so a past-grace track (see _calculate_cost) is
+        still rejected."""
+        if has_velocity:
+            growth = self._GATE_GROWTH_PX_PER_S
+        else:
+            px_per_m = 1.0 / self._pixel_size_m(frame_width, frame_height)
+            growth = max(self._GATE_GROWTH_PX_PER_S, self._COLDSTART_MAX_SPEED_MPS * px_per_m)
+        return self.distance_threshold + growth * (elapsed_ms / 1000.0)
 
     def _calculate_cost(self, track, detection, predicted_position, timestamp):
         """Cost for the Hungarian assignment.
