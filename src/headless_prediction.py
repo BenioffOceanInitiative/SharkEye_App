@@ -14,7 +14,7 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir
-from log_config import get_logger
+from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
@@ -74,6 +74,12 @@ class CustomTracker:
     # rejects inf/NaN.
     _UNMATCHABLE_COST = 1e9
 
+    # The match gate (distance_threshold) grows by this many pixels per second of dropout:
+    # position uncertainty and extrapolation error both increase with the gap, so a longer
+    # dropout should tolerate a larger jump before the detection is ruled a different
+    # object. See _match_threshold.
+    _GATE_GROWTH_PX_PER_S = 60
+
     def __init__(self, sam_model_path, distance_threshold=250, min_frames=5, confidence_threshold=0.4):
         self.tracks = {}
         self.next_id = 1
@@ -87,8 +93,11 @@ class CustomTracker:
         # gone and a new id is started (see _calculate_cost). Measured in video time, not
         # frame count, because a dropout advances no frame counter — update() only runs on
         # frames that had a detection — so only the timestamp reflects how long the object
-        # was actually missing.
-        self.reassociation_grace_ms = 2000
+        # was actually missing. Sized to cover real shark dropouts (glint, a side-on turn,
+        # a brief submersion), which routinely run past 2s — the keyframe sampler already
+        # keeps looking densely for ~2.5s (see keyframe_sampling._DENSE_HOLD_SECONDS), so a
+        # shorter grace here re-splits a shark the sampler was still tracking.
+        self.reassociation_grace_ms = 4000
         self.min_frames = min_frames
         self.confidence_threshold = confidence_threshold
         self.unique_sharks = 0
@@ -115,9 +124,11 @@ class CustomTracker:
             
             track_indices, detection_indices = linear_sum_assignment(cost_matrix)
 
+            track_ids = list(self.tracks.keys())
             for track_idx, detection_idx in zip(track_indices, detection_indices):
-                if cost_matrix[track_idx, detection_idx] < self.distance_threshold:
-                    track_id = list(self.tracks.keys())[track_idx]
+                track_id = track_ids[track_idx]
+                elapsed_ms = timestamp - self.tracks[track_id]['timestamps'][-1]
+                if cost_matrix[track_idx, detection_idx] < self._match_threshold(elapsed_ms):
                     self._update_track(track_id, detections[detection_idx], frame, timestamp)
                     active_tracks.add(track_id)
                 else:
@@ -254,14 +265,16 @@ class CustomTracker:
             x, y, w, h = longest_position
 
             if is_significant:
-                # Use segmentation model to generate lengths
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
+                # Use segmentation model to generate lengths (SAM/draw_mask expect RGB;
+                # longest_frame is BGR from the decoder).
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)), checkpoint_path=self.sam_model_path)
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length, original_width=longest_frame.shape[1], original_height=longest_frame.shape[0])
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
 
             feet, inches = divmod(longest_length, 1)
@@ -272,22 +285,13 @@ class CustomTracker:
 
             filename = f"{video_name}_shark{track_id}_time{timestamp_str}_det{num_frames}_avgConf{avg_conf_int}_bestConf{longest_conf_int}_len{length_str}.jpg"
 
-            # Save original frame + bounding-box frame for every track.
+            # Save the raw best-confidence frame. The annotated "bounding_boxes/" copy is no
+            # longer written: a box reconstructable from the label/CSV, never read back.
             cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
 
             # Mask only exists for segmented (significant) tracks.
             if is_significant:
                 cv2.imwrite(os.path.join(output_dir, 'masks', filename), mask_overlay)
-
-            boxed_frame = longest_frame.copy()
-            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-            cv2.imwrite(bounding_box_path, boxed_frame)
-
-            # Update the track with the path to the bounding box image
-            track['image_path'] = bounding_box_path
 
             images_saved += 1
 
@@ -315,6 +319,15 @@ class CustomTracker:
         last_pos = np.array(track['positions'][-1][:2])
         elapsed_ms = timestamp - track['timestamps'][-1]
         return last_pos + track['velocity'] * elapsed_ms
+
+    def _match_threshold(self, elapsed_ms):
+        """Distance gate for re-linking a detection to a track, widening with the dropout.
+
+        Near-continuous detections use the base distance_threshold; as the gap grows, both
+        the animal's possible travel and the extrapolation error grow, so the gate expands
+        linearly with elapsed video time. Kept well below _UNMATCHABLE_COST so a
+        past-grace track (see _calculate_cost) is still rejected."""
+        return self.distance_threshold + self._GATE_GROWTH_PX_PER_S * (elapsed_ms / 1000.0)
 
     def _calculate_cost(self, track, detection, predicted_position, timestamp):
         """Cost for the Hungarian assignment.
@@ -354,7 +367,6 @@ class HeadlessVideoProcessor():
         custom_tracker = CustomTracker(sam_model_path = self.sam_model_path)
         
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'masks'), exist_ok=True)
 
@@ -455,19 +467,21 @@ def parse_args():
     return parser.parse_args()
 
 def main():
-    args = parse_args()  
+    install_crash_handlers()
+    args = parse_args()
 
     sam_model_path = Path(args.sam_model_path)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    # 2021, 2022 Transect Only
-    video_paths = list(input_dir.rglob("*/Transect/*.mp4")) + list(input_dir.rglob("*/Transect/*.mov")) + list(input_dir.rglob("*/Transect/*.MP4")) + list(input_dir.rglob("*/Transect/*.MOV")) + list(input_dir.rglob("*/transect/*.mp4")) + list(input_dir.rglob("*/transect/*.mov")) + list(input_dir.rglob("*/transect/*.MP4")) + list(input_dir.rglob("*/transect/*.MOV"))
-    
-    # 2023
-    # video_paths = list(input_dir.rglob("*.mp4")) + list(input_dir.rglob("*.mov")) + list(input_dir.rglob("*.MP4")) + list(input_dir.rglob("*.MOV"))
-    # video_paths = video_paths + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.MP4")) + list(Path('/home/lucasjoseph/sharkeye/videos/').rglob("*.mp4"))
-    # video_paths = [video for video in video_paths if video.stem.split("_")[-1][-3:] in manual_sizes]    
+    # Recursively find every video under input_dir, matching the documented
+    # "--input_dir <dir_of_mp4s>" contract (case-insensitive extension, de-duplicated
+    # and sorted for a stable order). Previously this was hardcoded to a specific
+    # "*/Transect/*" research layout, so pointing the tool at an arbitrary folder of
+    # .mp4s silently found nothing.
+    video_exts = {".mp4", ".mov"}
+    video_paths = sorted({p for p in input_dir.rglob("*") if p.suffix.lower() in video_exts})
+    logger.info(f"Found {len(video_paths)} video(s) under {input_dir}")
 
     # Run prediction
     output_dir.mkdir(parents=True, exist_ok=True)

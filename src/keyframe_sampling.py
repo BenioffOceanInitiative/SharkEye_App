@@ -35,6 +35,17 @@ import av
 # falls back to grab-through on any problem, so this can never regress a run.
 _DEFAULT_ENABLED = "1"
 
+# Keep dense (every-`dense_stride`) sampling alive through a detection dropout for at
+# least this long before giving up and returning to keyframe scan. This MUST stay >= the
+# tracker's re-association grace (CustomTracker.reassociation_grace_ms = 2000 ms): the
+# tracker re-links a shark that blinks out for up to that long, so if the sampler
+# accelerated any sooner its slow keyframe-only re-acquisition would stretch the real
+# detection-to-detection gap past the grace window and split one shark into multiple
+# track ids. The extra 0.5 s of margin covers re-acquisition latency after the hold
+# expires. Expressed in seconds (not a frame count) so it holds across fps and any
+# change to dense_stride — a fixed count silently shrinks the hold when either changes.
+_DENSE_HOLD_SECONDS = 2.5
+
 
 def keyframe_sampling_requested():
     """True when keyframe sampling is enabled (env flag, defaulting to _DEFAULT_ENABLED)."""
@@ -87,8 +98,13 @@ def try_keyframe_sampler(path, logger=None):
         return None
 
 
-def iter_keyframe_sampled_frames(path, dense_stride=10, dense_empty_limit=3):
+def iter_keyframe_sampled_frames(path, dense_stride=5, dense_hold_seconds=_DENSE_HOLD_SECONDS):
     """Open ``path`` and return the keyframe-scan sampling generator (see module docstring).
+
+    ``dense_hold_seconds`` is how long dense sampling persists through a detection dropout
+    before giving up and returning to keyframe scan; it is converted to a consecutive-empty
+    sample count from the clip's fps and ``dense_stride`` inside the generator. See
+    ``_DENSE_HOLD_SECONDS`` for why it must stay >= the tracker's re-association grace.
 
     The container is opened and a single keyframe decoded *eagerly* (before the
     generator is returned) so decode problems raise here, where ``try_keyframe_sampler``
@@ -103,18 +119,19 @@ def iter_keyframe_sampled_frames(path, dense_stride=10, dense_empty_limit=3):
     except Exception:
         container.close()
         raise
-    return _keyframe_gen(container, stream, dense_stride, dense_empty_limit)
+    return _keyframe_gen(container, stream, dense_stride, dense_hold_seconds)
 
 
-def _keyframe_gen(container, stream, dense_stride, dense_empty_limit):
+def _keyframe_gen(container, stream, dense_stride, dense_hold_seconds):
     """The actual sampling generator. See ``iter_keyframe_sampled_frames``.
 
     Two modes, driven by the ``had_detection`` value the consumer ``send()``s back:
 
     * **scan** (empty water): decode keyframes only. One decoded frame per GOP.
     * **dense** (a shark is visible): from the triggering keyframe, decode forward and
-      sample every ``dense_stride`` frames until ``dense_empty_limit`` consecutive
-      sampled frames come back empty, then return to scanning past the window.
+      sample every ``dense_stride`` frames until dense sampling has seen no detection for
+      ``dense_hold_seconds`` (a consecutive-empty count derived from fps below), then
+      return to scanning past the window.
 
     Switching modes re-``seek()``s (changing ``skip_frame`` needs a clean decoder
     state); decode resumes from a keyframe at/*before* the target and frames before
@@ -123,6 +140,12 @@ def _keyframe_gen(container, stream, dense_stride, dense_empty_limit):
     time_base = stream.time_base
     fps = float(stream.average_rate)
     total_frames = stream.frames or 0
+
+    # Convert the wall-clock dense-hold into a consecutive-empty sample budget. Each dense
+    # sample is dense_stride frames apart, so covering dense_hold_seconds of dropout takes
+    # dense_hold_seconds * fps / dense_stride empty samples. Floored at 3 (the historical
+    # value) so a pathologically low fps can never make dense mode bail after 1-2 misses.
+    dense_empty_limit = max(3, int(round(dense_hold_seconds * fps / dense_stride)))
 
     def index_of(frame):
         # CFR footage: pts * time_base = seconds; * fps = exact frame index.

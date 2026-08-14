@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QTreeWidgetItem, QFormLayout, QHeaderView, QCheckBox, QStackedLayout, QColorDialog,
                              QSlider, QMenuBar)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime, QObject, QSettings, QSize, QRect, QPoint, QRunnable, QThreadPool, QEventLoop, qInstallMessageHandler, QUrl
-from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPen, QPalette, QDesktopServices  # TODO: remove QPalette — unused (moved to theme.py)
+from PyQt6.QtGui import QImage, QPixmap, QColor, QIcon, QDoubleValidator, QIntValidator, QMovie, QPainter, QPen, QPalette, QDesktopServices, QShortcut, QKeySequence  # TODO: remove QPalette — unused (moved to theme.py)
 from PyQt6.QtSvg import QSvgRenderer  # TODO: remove — unused (moved to theme.py colored_svg_icon)
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6_SwitchControl import SwitchControl
@@ -41,7 +41,7 @@ from utility import (
     write_local_doc_version,
     local_help_docs_present,
 )
-from log_config import get_logger
+from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
@@ -1576,6 +1576,12 @@ class CustomTracker:
     # rejects inf/NaN.
     _UNMATCHABLE_COST = 1e9
 
+    # The match gate (distance_threshold) grows by this many pixels per second of dropout:
+    # position uncertainty and extrapolation error both increase with the gap, so a longer
+    # dropout should tolerate a larger jump before the detection is ruled a different
+    # object. See _match_threshold.
+    _GATE_GROWTH_PX_PER_S = 60
+
     def __init__(self, distance_threshold=250):
         self.settings_obj = QSettings("BOSL", "SharkEye_App")
 
@@ -1591,8 +1597,11 @@ class CustomTracker:
         # gone and a new id is started (see _calculate_cost). Measured in video time, not
         # frame count, because a dropout advances no frame counter — update() only runs on
         # frames that had a detection — so only the timestamp reflects how long the object
-        # was actually missing.
-        self.reassociation_grace_ms = 2000
+        # was actually missing. Sized to cover real shark dropouts (glint, a side-on turn,
+        # a brief submersion), which routinely run past 2s — the keyframe sampler already
+        # keeps looking densely for ~2.5s (see keyframe_sampling._DENSE_HOLD_SECONDS), so a
+        # shorter grace here re-splits a shark the sampler was still tracking.
+        self.reassociation_grace_ms = 4000
         self.min_frames = int(self.settings_obj.value("min_frames", "5"))
         self.confidence_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.unique_sharks = 0
@@ -1624,8 +1633,9 @@ class CustomTracker:
             # rebuilt list(self.tracks.keys()) for every matched pair — O(n^2) per frame.)
             track_ids = list(self.tracks.keys())
             for track_idx, detection_idx in zip(track_indices, detection_indices):
-                if cost_matrix[track_idx, detection_idx] < self.distance_threshold:
-                    track_id = track_ids[track_idx]
+                track_id = track_ids[track_idx]
+                elapsed_ms = timestamp - self.tracks[track_id]['timestamps'][-1]
+                if cost_matrix[track_idx, detection_idx] < self._match_threshold(elapsed_ms):
                     self._update_track(track_id, detections[detection_idx], frame, timestamp)
                     active_tracks.add(track_id)
                 else:
@@ -1762,8 +1772,12 @@ class CustomTracker:
             is_significant = (num_frames >= self.min_frames
                               and avg_confidence > self.confidence_threshold)
             if is_significant:
-                # Use segmentation model to generate lengths
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                # SAM (and draw_mask) expect RGB; longest_frame is BGR from the decoder.
+                # Feeding BGR gave the model channel-swapped pixels and measurably worse
+                # masks (it under-captured the shark's extent — up to ~18% shorter length),
+                # so convert once and use RGB for both segmentation and the overlay.
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
                 segmentation_length = calculate_shark_length_from_pixel(pixel_length,
                                                                          original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
@@ -1772,35 +1786,21 @@ class CustomTracker:
                 track['longest_length'] = segmentation_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
-
-            feet, inches = divmod(longest_length, 1)
-            length_str = f"{int(feet)}ft{int(inches * 12)}in"
 
             filename = f"{Path(video_path).name}_{track_id}.jpg"
 
-            # Save original frame + bounding-box frame for every track (cheap, keeps the
-            # review display populated regardless of segmentation).
+            # Save the raw best-confidence frame (feeds the Review frame view and the
+            # training-frame export). The annotated "bounding_boxes/" copy is no longer
+            # written: it duplicated this frame with a box fully reconstructable from the
+            # YOLO label + CSV, was never read back by the app, and was dropped from upload.
             cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-
-            boxed_frame = longest_frame.copy()
-            annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
-            annotation_color_bgr = (annotation_color[2], annotation_color[1], annotation_color[0])
-
-            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), annotation_color_bgr, box_thickness)
-            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, text_scale, annotation_color_bgr, text_thickness)
-            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-            cv2.imwrite(bounding_box_path, boxed_frame)
 
             # Mask image only exists for segmented (significant) tracks.
             if is_significant:
                 mask_path = os.path.join(output_dir, 'masks', filename)
                 cv2.imwrite(mask_path, mask_overlay)
-
-            # Update the track with the path to the bounding box image
-            track['image_path'] = bounding_box_path
 
             images_saved += 1
 
@@ -1828,6 +1828,15 @@ class CustomTracker:
         last_pos = np.array(track['positions'][-1][:2])
         elapsed_ms = timestamp - track['timestamps'][-1]
         return last_pos + track['velocity'] * elapsed_ms
+
+    def _match_threshold(self, elapsed_ms):
+        """Distance gate for re-linking a detection to a track, widening with the dropout.
+
+        Near-continuous detections use the base distance_threshold; as the gap grows, both
+        the animal's possible travel and the extrapolation error grow, so the gate expands
+        linearly with elapsed video time. Kept well below _UNMATCHABLE_COST so a
+        past-grace track (see _calculate_cost) is still rejected."""
+        return self.distance_threshold + self._GATE_GROWTH_PX_PER_S * (elapsed_ms / 1000.0)
 
     def _calculate_cost(self, track, detection, predicted_position, timestamp):
         """Cost for the Hungarian assignment.
@@ -1895,6 +1904,22 @@ def render_annotation_preview(annotation_color, box_thickness, text_thickness, t
                       interpolation=cv2.INTER_AREA)
 
 
+def _downscale_frame_to_fit(frame, max_w, max_h):
+    """Resize ``frame`` down to fit within ``(max_w, max_h)`` keeping aspect; return it
+    unchanged if already within bounds.
+
+    INTER_LINEAR, not INTER_AREA: on a real 5.3K drone frame the whole "resize + write a
+    1080p JPG" costs ~10ms with LINEAR vs ~34ms with AREA (and ~58ms writing the full-res
+    JPG). These are the training/upload frames feeding a 640-input model, so 1080p LINEAR
+    is far more resolution than needed and the aliasing difference is irrelevant."""
+    h, w = frame.shape[:2]
+    if w <= max_w and h <= max_h:
+        return frame
+    scale = min(max_w / w, max_h / h)
+    return cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
+                      interpolation=cv2.INTER_LINEAR)
+
+
 def encode_track_clips(payload, output_dir, video_name, annotation_color,
                        box_thickness, text_thickness, text_scale, fps=10):
     """Persist per-track review/upload artifacts from a self-contained payload.
@@ -1939,7 +1964,8 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         longest_ts = track.get('longest_timestamp')
 
         writer = None
-        frame_size = None
+        frame_size = None   # the CLIP/JPG/meta size (downscaled to <=1080p)
+        orig_size = None    # the source frame size, for normalizing box coords
         clip_path = os.path.join(clips_dir, f"{video_name}_{key}.mp4")
         track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
         os.makedirs(track_frames_dir, exist_ok=True)
@@ -1953,39 +1979,46 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                     continue
 
                 if writer is None:
-                    h_px, w_px = frame.shape[:2]
-                    frame_size = (w_px, h_px)
+                    oh, ow = frame.shape[:2]
+                    orig_size = (ow, oh)
+                    # The clip + per-frame JPGs are written at <=1080p: the review player
+                    # decodes the whole clip on the UI thread (5.3K was slow to load) and
+                    # the uploader downscales to 1080p anyway. Writing full 5.3K here was
+                    # the dominant cost of this background stage (~58ms JPG + ~38ms MP4 per
+                    # frame vs ~10ms + a few ms at 1080p). meta.json records the CLIP dims,
+                    # so the review overlay maps the normalized boxes onto it correctly.
+                    cw, ch = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W,
+                                                     UPLOAD_IMAGE_MAX_H).shape[1::-1]
+                    frame_size = (cw, ch)
                     writer = cv2.VideoWriter(clip_path, fourcc, fps, frame_size)
                     if not writer.isOpened():
                         logger.error(f"Could not open video writer for {clip_path}; skipping track {key}")
                         writer = None
                         break
 
-                # Guard against a stray frame of a different size for the CLIP only; the
-                # per-frame JPG and box coords stay at the frame's true resolution.
-                clip_frame = frame
-                if (frame.shape[1], frame.shape[0]) != frame_size:
-                    clip_frame = cv2.resize(frame, frame_size)
-                writer.write(clip_frame)
-
-                # Full-resolution, un-boxed frame for upload.
-                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), frame)
+                # One downscale serves both the clip and the JPG.
+                small = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W, UPLOAD_IMAGE_MAX_H)
+                if (small.shape[1], small.shape[0]) != frame_size:
+                    small = cv2.resize(small, frame_size)   # guard a stray odd-sized frame
+                writer.write(small)
+                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), small)
 
                 pos = positions[frame_idx] if frame_idx < len(positions) else None
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
                 length = lengths[frame_idx] if frame_idx < len(lengths) else None
                 t_ms = timestamps[frame_idx] if frame_idx < len(timestamps) else None
 
-                # YOLO label, parallel to frame_<seq>.jpg. Coords normalized to the frame
-                # size so they survive the <=1080p downscale at upload. Class is 0 (shark)
-                # now; refresh_yolo_labels_from_csv() rewrites it from the reviewer's
-                # corrected label before upload. An empty file = a negative frame (no box).
+                # YOLO label, parallel to frame_<seq>.jpg. Normalized by the ORIGINAL
+                # source dims (pos is in source pixels); normalized coords are scale-free,
+                # so they map correctly onto the downscaled JPG/clip and survive the upload
+                # downscale. Class is 0 (shark) now; refresh_yolo_labels_from_csv() rewrites
+                # it from the reviewer's corrected label. An empty file = a negative frame.
                 label_path = os.path.join(track_frames_dir, f"frame_{seq:04d}.txt")
-                if pos is not None and frame_size:
+                if pos is not None and orig_size:
                     x, y, w, h = pos
-                    fw, fh = frame_size
+                    ow, oh = orig_size
                     with open(label_path, "w") as lf:
-                        lf.write(f"0 {x / fw:.6f} {y / fh:.6f} {w / fw:.6f} {h / fh:.6f}\n")
+                        lf.write(f"0 {x / ow:.6f} {y / oh:.6f} {w / ow:.6f} {h / oh:.6f}\n")
                 else:
                     open(label_path, "w").close()
 
@@ -2006,8 +2039,8 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
 
             meta = {
                 'video': video_name, 'track_id': key, 'fps': fps,
-                # The .txt coords are normalized; these dims map them back to full-source
-                # pixels for the review overlay (the JPGs are full-res on disk).
+                # The .txt coords are normalized; these are the CLIP/JPG dims (<=1080p) the
+                # review overlay multiplies them by to map boxes onto the clip it plays.
                 'frame_width': (frame_size[0] if frame_size else None),
                 'frame_height': (frame_size[1] if frame_size else None),
                 'longest_index': longest_index,
@@ -2208,6 +2241,10 @@ class VideoProcessingWorker(QObject):
         except Exception:
             import traceback
             _log("FATAL:\n" + traceback.format_exc())
+            # Also send the full traceback to the durable log so a user can retrieve
+            # it after a crash without digging the temp file out of the OS temp dir.
+            logger.exception("Inference worker crashed on %s",
+                             os.path.basename(self.video_path))
             # Don't re-raise: an uncaught worker exception can abort the frozen
             # Qt process (BEX64 / 0xc0000409). Let the UI tear down cleanly.
             try:
@@ -2246,7 +2283,6 @@ class VideoProcessingWorker(QObject):
         custom_tracker.drone_altitude = self.altitude
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
@@ -2262,6 +2298,15 @@ class VideoProcessingWorker(QObject):
         # of attributing the whole wall to "inference".
         decode_time = 0.0   # time inside the sampler (grab/retrieve = H.265 decode)
         model_time = 0.0     # time inside YOLO inference on sampled frames
+        # Split decode further by what the sampler was doing: scanning empty water
+        # (keyframe-only skip, cheap) vs. densely stepping through a shark region (every
+        # frame, expensive). The feedback value `had_detection` fed into send() is the
+        # signal — True means we're in/entering a dense window. Answers "how much time is
+        # spent skipping empty water vs. actually processing sharks."
+        decode_scan_time = 0.0
+        decode_dense_time = 0.0
+        scan_frames = 0
+        dense_frames = 0
 
         # Live preview is a courtesy view, not the output. Cap empty-frame updates at
         # ~20 fps so we don't color-convert, copy across the thread boundary, and
@@ -2289,7 +2334,14 @@ class VideoProcessingWorker(QObject):
             while True:
                 _t_decode = time.perf_counter()
                 frame_num, frame = sampler.send(had_detection)
-                decode_time += time.perf_counter() - _t_decode
+                _dt = time.perf_counter() - _t_decode
+                decode_time += _dt
+                if had_detection:      # last frame had a shark -> this decode is a dense step
+                    decode_dense_time += _dt
+                    dense_frames += 1
+                else:                  # scanning empty water (or the very first frame)
+                    decode_scan_time += _dt
+                    scan_frames += 1
 
                 if QThread.currentThread().isInterruptionRequested():
                     logger.warning("Processing interrupted")
@@ -2372,8 +2424,12 @@ class VideoProcessingWorker(QObject):
             other_time = max(0.0, infer_time - decode_time - model_time)
             decode_pct = (decode_time / infer_time * 100) if infer_time > 0 else 0.0
             ms_per_infer = (model_time / frames_sampled * 1000) if frames_sampled else 0.0
+            scan_ms = (decode_scan_time / scan_frames * 1000) if scan_frames else 0.0
+            dense_ms = (decode_dense_time / dense_frames * 1000) if dense_frames else 0.0
             logger.info(f"[timing] {Path(self.video_path).name}: "
-                  f"loop={infer_time:.1f}s [decode={decode_time:.1f}s ({decode_pct:.0f}%), "
+                  f"loop={infer_time:.1f}s [decode={decode_time:.1f}s ({decode_pct:.0f}%): "
+                  f"scan={decode_scan_time:.1f}s ({scan_frames}f {scan_ms:.0f}ms/f), "
+                  f"dense={decode_dense_time:.1f}s ({dense_frames}f {dense_ms:.0f}ms/f) | "
                   f"yolo={model_time:.1f}s ({frames_sampled} frames, {ms_per_infer:.0f}ms/f), "
                   f"other={other_time:.1f}s] {total_detections} dets | "
                   f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
@@ -3486,11 +3542,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "progress_bar", None) is not None:
             self.progress_bar.setRange(0, 0)
 
-        self.bounding_boxes_dir = os.path.join(self.current_output_dir, 'bounding_boxes')
         self.false_positives_dir = os.path.join(self.current_output_dir, 'false_positives')
-        
+
         os.makedirs(os.path.join(self.current_output_dir, 'frames'), exist_ok=True)
-        os.makedirs(self.bounding_boxes_dir, exist_ok=True)
         os.makedirs(self.false_positives_dir, exist_ok=True)
 
     def cleanup_previous_processing(self):
@@ -3814,7 +3868,7 @@ class MainWindow(QMainWindow):
 
     def update_detection_list(self):
         # Use a table format for the detection list, matching the historical items table
-        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
         self.detection_list.setRowCount(0)
         self.detection_list.clearContents()
         self.detection_list.setHorizontalHeaderLabels(labels)
@@ -3859,6 +3913,7 @@ class MainWindow(QMainWindow):
                         self.detection_list.setCellWidget(row_position, col, combo)
                     else:
                         cell = QTableWidgetItem(value)
+                        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         if col == 4 and conf_longest < 0.65:
                             cell.setForeground(QColor('red'))
                         self.detection_list.setItem(row_position, col, cell)
@@ -3924,16 +3979,24 @@ class MainWindow(QMainWindow):
         # Check if this is the last track in the experiment
         det_dir = exp_dir / "detection_results"
         total_tracks = 0
+        count_reliable = True
         if det_dir.exists():
             for csv_file in det_dir.glob("*.csv"):
                 try:
                     df = pd.read_csv(csv_file)
                     total_tracks += len(df)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # A CSV we can't read (corrupt / locked) means the count is a
+                    # lower bound. Deleting the whole experiment on an undercount
+                    # would wipe other videos' results, so mark the count untrusted
+                    # and fall through to per-track deletion instead.
+                    logger.warning(f"Could not read {csv_file} while counting tracks; "
+                                   f"will not delete whole experiment: {e}")
+                    count_reliable = False
 
-        # If this is the last track, delete the entire experiment directory
-        if total_tracks == 1:
+        # Only wipe the entire experiment when we're certain the track being deleted
+        # is genuinely the last one across every video in it.
+        if count_reliable and total_tracks == 1:
             try:
                 shutil.rmtree(exp_dir)
                 logger.info(f"Deleted experiment directory: {exp_dir}")
@@ -4303,7 +4366,7 @@ class MainWindow(QMainWindow):
         self.frame_player.resized.connect(self.update_frame_elements)
         self.update_frame_elements()
 
-        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
 
         self.detection_list = QTableWidget()
         self.detection_list.setColumnCount(len(labels))
@@ -4342,6 +4405,59 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown()
         self.review_dropdown.currentIndexChanged.connect(self.render_historical_experiments)
         self.review_dropdown.currentIndexChanged.connect(self._update_review_dropdown_tooltip)
+        self.setup_review_shortcuts()
+
+    def setup_review_shortcuts(self):
+        """Keyboard shortcuts for the Review screen so a reviewer can work without the mouse.
+
+        All shortcuts are scoped to the review widget (WidgetWithChildrenShortcut), so they
+        never fire on the Home or processing screens. Reviewing hundreds of detections is the
+        app's most repetitive task; play/pause + frame-step + next/prev-detection off the
+        keyboard is the biggest single throughput win.
+
+            Space         play / pause the clip
+            ← / →         step one frame back / forward (pauses first)
+            J / K         previous / next detection in the list
+        """
+        ctx = Qt.ShortcutContext.WidgetWithChildrenShortcut
+
+        def bind(key, handler):
+            sc = QShortcut(QKeySequence(key), self.review_widget)
+            sc.setContext(ctx)
+            sc.activated.connect(handler)
+            return sc
+
+        bind(Qt.Key.Key_Space, self.toggle_playback)
+        bind(Qt.Key.Key_Left, lambda: self._step_review_frame(-1))
+        bind(Qt.Key.Key_Right, lambda: self._step_review_frame(1))
+        bind(Qt.Key.Key_J, lambda: self._select_adjacent_detection(-1))
+        bind(Qt.Key.Key_K, lambda: self._select_adjacent_detection(1))
+
+    def _step_review_frame(self, delta):
+        """Pause and move the clip by ``delta`` frames (clamped). Only meaningful in
+        frame-sequence (MP4) mode, where the slider is scrubbable."""
+        if getattr(self, "_playback_mode", None) != "frames":
+            return
+        self.frame_player.pause()
+        self._sync_play_pause_button()
+        new_val = min(max(0, self.frame_slider.value() + delta), self.frame_slider.maximum())
+        self.frame_slider.setValue(new_val)  # triggers _on_slider_moved -> player.seek
+
+    def _select_adjacent_detection(self, delta):
+        """Select the previous/next row in the detection list, which loads that clip via
+        the existing itemSelectionChanged wiring."""
+        table = getattr(self, "historical_items", None)
+        if table is None:
+            return
+        count = table.rowCount()
+        if count == 0:
+            return
+        cur = table.currentRow()
+        if cur < 0:
+            cur = 0
+        new = min(max(0, cur + delta), count - 1)
+        if new != cur:
+            table.selectRow(new)
 
     def setup_playback_controls(self, layout):
         """Play/pause, speed and scrub controls for the detection clip.
@@ -4357,7 +4473,9 @@ class MainWindow(QMainWindow):
         row.setSpacing(8)
 
         self.play_pause_button = QPushButton()
-        self.play_pause_button.setToolTip("Play or pause the detection clip (Space)")
+        self.play_pause_button.setToolTip(
+            "Play or pause the detection clip (Space)\n"
+            "←/→ step a frame · J/K previous/next detection")
         self.play_pause_button.clicked.connect(self.toggle_playback)
         row.addWidget(self.play_pause_button)
 
@@ -4370,31 +4488,13 @@ class MainWindow(QMainWindow):
         self.speed_cycle_button.clicked.connect(self.cycle_playback_speed)
         row.addWidget(self.speed_cycle_button)
 
-        # Bounding-box overlay controls. The box (and its confidence label) is drawn live
+        # Bounding-box overlay prefs. The box (and its confidence label) is drawn live
         # over the raw clip (see FramePlayer), so it can be hidden or recolored without
-        # re-encoding anything. Visibility choices persist across sessions.
+        # re-encoding anything. Visibility choices persist across sessions. All three
+        # (show boxes, show confidence, box color) live behind the gear button added at
+        # the right end of this row (see _open_overlay_settings).
         self.show_boxes = self.settings_obj.value("review_show_boxes", "1") == "1"
         self.show_confidence = self.settings_obj.value("review_show_confidence", "1") == "1"
-
-        self.show_boxes_checkbox = QCheckBox("Boxes")
-        self.show_boxes_checkbox.setChecked(self.show_boxes)
-        self.show_boxes_checkbox.setToolTip("Show or hide the detection bounding box")
-        self.show_boxes_checkbox.toggled.connect(self._on_show_boxes_toggled)
-        row.addWidget(self.show_boxes_checkbox)
-
-        self.show_confidence_checkbox = QCheckBox("Conf")
-        self.show_confidence_checkbox.setChecked(self.show_confidence)
-        self.show_confidence_checkbox.setToolTip("Show or hide the confidence value on the box")
-        self.show_confidence_checkbox.toggled.connect(self._on_show_confidence_toggled)
-        row.addWidget(self.show_confidence_checkbox)
-
-        self.box_color_button = QPushButton()
-        self.box_color_button.setFixedSize(28, 20)
-        self.box_color_button.setToolTip("Change the bounding box color")
-        self.box_color_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.box_color_button.clicked.connect(self._pick_box_color)
-        row.addWidget(self.box_color_button)
-        self._update_box_color_button()
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
@@ -4408,8 +4508,22 @@ class MainWindow(QMainWindow):
 
         self.frame_counter_label = QLabel("0 / 0")
         self.frame_counter_label.setMinimumWidth(64)
-        self.frame_counter_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        # Left-align so the count sits right against the scrubber's end rather than
+        # drifting toward the gear button at the row's right edge.
+        self.frame_counter_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.frame_counter_label)
+
+        # Overlay display settings live behind this gear button at the right end of the
+        # row: show/hide boxes, show/hide confidence, and box color (see
+        # _open_overlay_settings). Keeps the playback row uncluttered.
+        self.overlay_settings_button = QPushButton()
+        self.overlay_settings_button.setIcon(
+            colored_svg_icon(resource_path("assets/images/gear-fill.svg"), theme_icon_color()))
+        self.overlay_settings_button.setToolTip(
+            "Overlay display settings — show boxes, confidence value, and box color")
+        self.overlay_settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.overlay_settings_button.clicked.connect(self._open_overlay_settings)
+        row.addWidget(self.overlay_settings_button)
 
         layout.addWidget(self.playback_controls)
 
@@ -4467,10 +4581,44 @@ class MainWindow(QMainWindow):
         annotation_color, *_ = get_annotation_settings(self.settings_obj)
         return QColor(annotation_color[0], annotation_color[1], annotation_color[2])
 
-    def _update_box_color_button(self):
+    def _style_color_swatch(self, button):
+        """Paint `button` as a color chip showing the current review box color."""
         c = self._review_box_color()
-        self.box_color_button.setStyleSheet(
+        button.setStyleSheet(
             f"background-color: rgb({c.red()},{c.green()},{c.blue()}); border: 1px solid #888;")
+
+    def _open_overlay_settings(self):
+        """Modal dialog for the box-overlay display prefs (confidence + color).
+
+        Both prefs persist immediately through their existing handlers, so the dialog
+        needs no OK/Cancel bookkeeping — Close just dismisses it."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Overlay Settings")
+        form = QFormLayout(dlg)
+
+        boxes_checkbox = QCheckBox("Show bounding boxes")
+        boxes_checkbox.setChecked(self.show_boxes)
+        boxes_checkbox.toggled.connect(self._on_show_boxes_toggled)
+        form.addRow(boxes_checkbox)
+
+        conf_checkbox = QCheckBox("Show confidence value on the box")
+        conf_checkbox.setChecked(self.show_confidence)
+        conf_checkbox.toggled.connect(self._on_show_confidence_toggled)
+        form.addRow(conf_checkbox)
+
+        color_button = QPushButton()
+        color_button.setFixedSize(80, 24)
+        color_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_color_swatch(color_button)
+        color_button.clicked.connect(lambda: self._pick_box_color(color_button))
+        form.addRow("Bounding box color:", color_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+        form.addRow(buttons)
+
+        dlg.exec()
 
     def _on_show_boxes_toggled(self, checked):
         self.show_boxes = bool(checked)
@@ -4482,11 +4630,12 @@ class MainWindow(QMainWindow):
         self.settings_obj.setValue("review_show_confidence", "1" if checked else "0")
         self.frame_player.set_confidence_visible(self.show_confidence)
 
-    def _pick_box_color(self):
+    def _pick_box_color(self, swatch=None):
         color = QColorDialog.getColor(self._review_box_color(), self, "Bounding Box Color")
         if color.isValid():
             self.settings_obj.setValue("review_box_color", f"{color.red()},{color.green()},{color.blue()}")
-            self._update_box_color_button()
+            if swatch is not None:
+                self._style_color_swatch(swatch)
             self.frame_player.set_box_color(color)
 
     def toggle_playback(self):
@@ -4526,11 +4675,9 @@ class MainWindow(QMainWindow):
         self.playback_controls.setVisible(mode in ("frames", "movie"))
         # The box overlay is only drawn in frame-sequence (MP4) mode and only when the
         # player actually has box data, so gate its controls on both.
-        if hasattr(self, "show_boxes_checkbox"):
+        if hasattr(self, "overlay_settings_button"):
             overlay_ok = mode == "frames" and self.frame_player.has_boxes()
-            self.show_boxes_checkbox.setEnabled(overlay_ok)
-            self.show_confidence_checkbox.setEnabled(overlay_ok)
-            self.box_color_button.setEnabled(overlay_ok)
+            self.overlay_settings_button.setEnabled(overlay_ok)
         scrubbable = mode == "frames"
         self.frame_slider.setEnabled(scrubbable)
         self.frame_counter_label.setVisible(scrubbable)
@@ -4937,10 +5084,8 @@ class MainWindow(QMainWindow):
         self.frame_player.set_box_color(self._review_box_color())
         self.frame_player.set_boxes_visible(self.show_boxes if has else False)
         self.frame_player.set_confidence_visible(self.show_confidence if has else False)
-        if hasattr(self, "show_boxes_checkbox"):
-            self.show_boxes_checkbox.setEnabled(has)
-            self.box_color_button.setEnabled(has)
-            self.show_confidence_checkbox.setEnabled(has)
+        if hasattr(self, "overlay_settings_button"):
+            self.overlay_settings_button.setEnabled(has)
 
     def render_historical_experiments(self):
         # Render Historical Experiments and add to List
@@ -4956,7 +5101,7 @@ class MainWindow(QMainWindow):
         exp_date = format_experiment_date(self.current_experiment, to_human=True)
 
         experiments_root = get_results_dir()
-        labels = ['Experiment', 'Video', 'ID', 'Length Time', 'Confidence', 'Length', 'Label', '']
+        labels = ['Experiment', 'Video', 'ID', 'Time', 'Confidence', 'Length', 'Label', '']
 
         try:
             # newest-first
@@ -5027,6 +5172,7 @@ class MainWindow(QMainWindow):
                                 self.historical_items.setCellWidget(row_position, col, combo)
                             else:
                                 cell = QTableWidgetItem(value)
+                                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                                 # Make cell selectable but not editable (prevents editing on double-click)
                                 cell.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
                                 if col == 4 and conf_longest < 0.65:
@@ -5349,41 +5495,15 @@ class MainWindow(QMainWindow):
         self.video_queue = [self.video_list.item(i, 0).data(Qt.ItemDataRole.UserRole) for i in range(self.video_list.rowCount())]
 
     def export_results(self):
-        # if self.reviewing_history:
+        """Persist the reviewer's queued label/deletion changes back to the per-video CSVs.
+
+        NOTE: this is wired to the "Save Changes" button. It intentionally only flushes
+        `historical_label_changes` — the older "export all tracks to a user-chosen CSV
+        file" feature was gated behind a `reviewing_history` flag that no longer exists
+        and its (unreachable) code was removed. If a standalone CSV export is wanted
+        again, reintroduce it as its own action rather than overloading Save Changes.
+        """
         self._save_historical_label_changes()
-        return
-    
-        if not self.sorted_tracks:
-            QMessageBox.warning(self, "No Data", "There are no results to export.")
-            return
-
-        file_path, _ = QFileDialog.getSaveFileName(self, "Export Results", "", "CSV Files (*.csv)")
-        
-        if not file_path:
-            return  # User cancelled the dialog
-
-        try:
-            with open(file_path, 'w', newline='') as csvfile:
-                fieldnames = ['video_name', 'track_id', 'label', 'timestamp', 'confidence', 'length_ft']
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for _, track in self.sorted_tracks:
-                    timestamp = track['longest_timestamp']
-                    time_str = datetime.fromtimestamp(timestamp / 1000, timezone.utc).strftime('%M:%S')
-                    
-                    writer.writerow({
-                        'video_name': track['video_name'],
-                        'track_id': track['unique_id'],
-                        'label': track['label'],
-                        'timestamp': time_str,
-                        'confidence': track['longest_conf'],
-                        'length_ft': track['longest_length']
-                    })
-            
-            QMessageBox.information(self, "Export Complete", f"Results exported to {file_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export results: {str(e)}")
 
     def ensure_track_consistency(self):
         if len(self.tracks) != len(self.sorted_tracks):
@@ -5634,11 +5754,13 @@ class MainWindow(QMainWindow):
         self.resized.emit()
 
 # Experiment uploads go to a Cloud Function whose HTTP request is size-limited, so every
-# image is downscaled to <=1080p before zipping. The per-shark frame set (shark_frames/)
-# at full 5.3K resolution alone is tens of MB per shark and would blow the limit; 1080p
-# JPGs are ~150-300 KB each. On-disk artifacts + the review overlay stay full-res — only
-# the uploaded copy shrinks.
-UPLOAD_FOLDERS = ['bounding_boxes', 'detection_results', 'false_positives',
+# image is downscaled to <=1080p before zipping. 1080p JPGs are ~150-300 KB each. The
+# length-measurement artifacts (frames/, masks/) stay full-res on disk; shark_frames/ (the
+# per-shark training set) is now written at <=1080p directly (see encode_track_clips) since
+# that's all the uploader would keep anyway, so the re-encode below is usually a no-op for
+# those. bounding_boxes/ is intentionally excluded: it was a burned-in duplicate of frames/
+# reconstructable from the YOLO label + CSV, and is no longer generated.
+UPLOAD_FOLDERS = ['detection_results', 'false_positives',
                   'frames', 'masks', 'shark_frames']
 UPLOAD_IMAGE_MAX_W = 1920
 UPLOAD_IMAGE_MAX_H = 1080
@@ -5946,6 +6068,13 @@ class FramePlayer(QLabel):
         self._show_confidence = True
         self._box_color = QColor(255, 96, 31)
         self._longest_index = None  # index of the frame the length was measured on
+        # A clip shorter than playback_min_frames is shown as a single static center frame
+        # (see set_video). self._static_box is that frame's box so the overlay still draws
+        # on the still; self._static_frame_index is which clip frame is on screen, used to
+        # pick the matching box once set_overlay_boxes supplies them (which happens *after*
+        # set_video has already rendered the static image).
+        self._static_box = None
+        self._static_frame_index = None
 
         # Segmentation mask overlay. The mask corresponds to one existing clip frame (the
         # length-source frame), so it's painted in place on that frame rather than
@@ -6006,6 +6135,11 @@ class FramePlayer(QLabel):
         frame with no box. Pass [] to clear the overlay."""
         self._boxes = list(boxes) if boxes else []
         self._longest_index = longest_index
+        # If a short clip is being shown as a static still (set_video ran before these
+        # boxes arrived), grab the box for the on-screen frame so paintEvent can draw it.
+        if self._static_pixmap is not None and self._static_frame_index is not None:
+            idx = self._static_frame_index
+            self._static_box = self._boxes[idx] if 0 <= idx < len(self._boxes) else None
         self.update()
 
     def has_boxes(self):
@@ -6049,15 +6183,17 @@ class FramePlayer(QLabel):
             self.seek(self._mask_index)
         self.update()
 
-    def _paint_box_overlay(self, painter, dx, dy, dw, dh, frame_w, frame_h):
-        """Draw the current frame's box (and optionally its confidence), mapping native
-        pixel coords into the displayed (KeepAspectRatio-scaled, centered) rect. Matches
-        content_rect()'s geometry."""
-        if not self._show_boxes or not self._boxes or frame_w <= 0 or frame_h <= 0:
+    def _paint_box_overlay(self, painter, dx, dy, dw, dh, frame_w, frame_h, box=None):
+        """Draw a box (and optionally its confidence), mapping native pixel coords into the
+        displayed (KeepAspectRatio-scaled, centered) rect. Matches content_rect()'s
+        geometry. With box=None, draws the current frame's box from self._boxes (frame-
+        sequence mode); pass an explicit box to draw over a static still."""
+        if not self._show_boxes or frame_w <= 0 or frame_h <= 0:
             return
-        if not (0 <= self.current_frame < len(self._boxes)):
-            return
-        box = self._boxes[self.current_frame]
+        if box is None:
+            if not self._boxes or not (0 <= self.current_frame < len(self._boxes)):
+                return
+            box = self._boxes[self.current_frame]
         if box is None:
             return
         cx, cy, bw, bh = box[0], box[1], box[2], box[3]
@@ -6179,6 +6315,11 @@ class FramePlayer(QLabel):
         self.timer.stop()
         self.frames = []
         self._boxes = []
+        # Reset the static-frame box; set_video re-arms _static_frame_index for a short
+        # clip so set_overlay_boxes can populate _static_box afterwards. Other callers
+        # (legacy gif, mask) leave it None, so they draw no static box.
+        self._static_box = None
+        self._static_frame_index = None
         self._mask_frame = None
         self._mask_index = None
         self._show_mask = False
@@ -6225,11 +6366,15 @@ class FramePlayer(QLabel):
         # (mirrors set_gif's playback_min_frames behavior).
         playback_min_frames = int(self.settings_obj.value("playback_min_frames"))
         if 0 < len(frames) < playback_min_frames:
-            mid = frames[len(frames) // 2]
+            mid_index = len(frames) // 2
+            mid = frames[mid_index]
             frame_rgb = cv2.cvtColor(mid, cv2.COLOR_BGR2RGB)
             h, w, _ = frame_rgb.shape
             q_image = QImage(frame_rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             self.set_static_pixmap(QPixmap.fromImage(q_image))
+            # Remember which clip frame is on screen so set_overlay_boxes (called next by
+            # the review flow, after this returns) can pick the matching box to draw.
+            self._static_frame_index = mid_index
             return
 
         self.set_frames(frames)
@@ -6283,6 +6428,11 @@ class FramePlayer(QLabel):
             x = (widget_size.width() - scaled.width()) // 2
             y = (widget_size.height() - scaled.height()) // 2
             painter.drawPixmap(QRect(x, y, scaled.width(), scaled.height()), frame)
+            # Short-clip stills still get their detection box drawn (a 1–few-frame track
+            # would otherwise show no box at all, hiding what was detected from review).
+            if self._static_box is not None:
+                self._paint_box_overlay(painter, x, y, scaled.width(), scaled.height(),
+                                        frame.width(), frame.height(), box=self._static_box)
             return
 
         # 2) Movie Mode
@@ -6413,9 +6563,10 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
             # SAM is the expensive per-track step; run it only on significant tracks.
             is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
             if is_significant:
-                # Use segmentation model to generate lengths
+                # Use segmentation model to generate lengths (SAM/draw_mask expect RGB).
+                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
                 seg_start = time.perf_counter()
-                mask = run_prediction(longest_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
+                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
                 seg_end = time.perf_counter()
                 seg_duration = seg_end - seg_start
                 track['segmentation_duration'] = seg_duration
@@ -6424,30 +6575,19 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
                 track['longest_length'] = pixel_length
                 longest_length = track['longest_length']
 
-                mask_overlay = draw_mask(mask, longest_frame)
+                mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
-
-            length_str = f"{longest_length:.2f}px"
 
             filename = f"{Path(video_path).name}_{track_id}.jpg"
 
-            # Save original frame + bounding-box frame for every track.
+            # Save the raw best-confidence frame. The annotated "bounding_boxes/" copy is no
+            # longer written (see the segmentation path in VideoProcessingWorker).
             cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-
-            boxed_frame = longest_frame.copy()
-            cv2.rectangle(boxed_frame, (int(x - w/2), int(y - h/2)), (int(x + w/2), int(y + h/2)), (0, 255, 0), 2)
-            label = f"ID: {track_id}, Conf: {longest_confidence:.2f}, Length: {length_str}"
-            cv2.putText(boxed_frame, label, (int(x - w/2), int(y - h/2) - 10), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 2)
-            bounding_box_path = os.path.join(output_dir, 'bounding_boxes', filename)
-            cv2.imwrite(bounding_box_path, boxed_frame)
 
             # Mask only exists for segmented (significant) tracks.
             if is_significant:
                 mask_path = os.path.join(output_dir, 'masks', filename)
                 cv2.imwrite(mask_path, mask_overlay)
-
-            # Update the track with the path to the bounding box image
-            track['image_path'] = bounding_box_path
 
             images_saved += 1
 
@@ -6462,7 +6602,6 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
-        os.makedirs(os.path.join(self.output_dir, 'bounding_boxes'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, "tracking_gifs"), exist_ok=True)
@@ -6592,6 +6731,7 @@ def _install_qt_message_filter():
 
 
 if __name__ == '__main__':
+    install_crash_handlers()
     _install_qt_message_filter()
     args = parse_args()
     if args.input_dir and args.output_dir:
