@@ -1,5 +1,4 @@
-Testing Post from Github actions
-# Running Analysis![][image1]
+# Running Analysis
 
 ## How to Process Footage
 

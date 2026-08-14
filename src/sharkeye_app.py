@@ -5844,38 +5844,25 @@ class DocsSyncThread(QThread):
         try:
             docs_dir = get_writable_docs_dir()
             docs_present = local_help_docs_present(docs_dir)
-            # Missing guide/images must force a download even if a version stamp
-            # already matches the cloud (e.g. files deleted or first install).
-            local_version = read_local_doc_version(docs_dir) if docs_present else 0
 
-            response = requests.get(
-                self.endpoint,
-                params={
+            if docs_present:
+                params = {
                     "request": "check_docs",
-                    "doc_version": local_version,
-                },
-                timeout=15,
-            )
+                    "doc_version": read_local_doc_version(docs_dir),
+                }
+            else:
+                # Missing guide/images: fetch latest without a version compare.
+                params = {"request": "request_latest"}
+
+            response = requests.get(self.endpoint, params=params, timeout=15)
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("Unexpected check_docs response shape")
 
             if payload.get("up_to_date", False):
-                # Cloud says current, but files may still be missing if the stamp
-                # somehow matched — treat that as needing a forced re-fetch.
-                if docs_present:
-                    self.sync_finished.emit(False, "")
-                    return
-                response = requests.get(
-                    self.endpoint,
-                    params={"request": "check_docs", "doc_version": 0},
-                    timeout=15,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict) or payload.get("up_to_date", False):
-                    raise ValueError("Help docs missing locally and cloud returned no files")
+                self.sync_finished.emit(False, "")
+                return
 
             files = payload.get("files") or {}
             latest_version = payload.get("doc_version")
