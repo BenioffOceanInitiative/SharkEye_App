@@ -88,12 +88,16 @@ def _ensure_stdio():
 _ensure_stdio()
 
 # Add these constants for length calculation
-DRONE_ALTITUDE_M = 40
-SENSOR_WIDTH_MM = 13.2
-FOCAL_LENGTH_MM = 28
-MODEL_WIDTH = MODEL_HEIGHT = 640
-ORIGINAL_WIDTH, ORIGINAL_HEIGHT = 2688, 1512
-ASPECT_RATIO = ORIGINAL_WIDTH / ORIGINAL_HEIGHT
+# Length calibration + CustomTracker now live in the shared `tracking` module so the GUI,
+# the mass_prediction batch, and the headless_prediction CLI share ONE implementation
+# (previously duplicated and drifted). Re-exported into this namespace so existing
+# references (CustomTracker, GSD, ORIGINAL_WIDTH, ...) keep working unchanged.
+from tracking import (
+    CustomTracker, calculate_gsd, GSD, calculate_shark_length, calculate_bbox_area,
+    calculate_adjusted_shark_length, DRONE_ALTITUDE_M, SENSOR_WIDTH_MM, FOCAL_LENGTH_MM,
+    MODEL_WIDTH, MODEL_HEIGHT, ORIGINAL_WIDTH, ORIGINAL_HEIGHT, ASPECT_RATIO,
+    DEFAULT_DRONE_SETTINGS, resolve_fov_radians,
+)
 
 # Use a constant for the model path
 MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
@@ -150,19 +154,8 @@ def label_to_yolo_class(label):
         return 1
     return 2
 
-DEFAULT_DRONE_SETTINGS = {
-    "Mavic 2 Pro": {
-        "Resolution": {
-            "(2688, 1512)": math.radians(73)
-        }
-    },
-    "Air 2S": {
-        "Resolution": {
-            "(2688, 1512)": math.radians(63.5),
-            "(5472, 3078)": math.radians(82.9)
-        }
-    }
-}
+# DEFAULT_DRONE_SETTINGS now lives in `tracking` (imported above) so the GUI and the
+# headless CLIs resolve the same per-video FOV.
 
 
 def ensure_app_settings(settings_obj=None):
@@ -286,31 +279,9 @@ def get_build_info():
     return None
 
 
-def calculate_gsd(altitude, sensor_width, focal_length, image_width):
-    """Calculate Ground Sample Distance (GSD)"""
-    return (altitude * sensor_width) / (focal_length * image_width)
-
-GSD = calculate_gsd(DRONE_ALTITUDE_M, SENSOR_WIDTH_MM, FOCAL_LENGTH_MM, MODEL_WIDTH)
-
-def calculate_shark_length(bbox):
-    """Calculate shark length in feet based on bounding box"""
-    _, _, _, height = bbox
-    adjusted_height = height * (MODEL_HEIGHT / MODEL_WIDTH)
-    length_m = adjusted_height * GSD
-    # depth_correction_factor = (1 + DRONE_ALTITUDE_M) / DRONE_ALTITUDE_M
-    return length_m * 3.28084 # * depth_correction_factor  # Convert meters to feet
-
-def calculate_bbox_area(bbox):
-    """Calculate area of bbox detection"""
-    _, _, width, height = bbox
-    return width * height
-
-def calculate_adjusted_shark_length(length_raw):
-    """Calculate adjusted shark length in feet using correction factors"""
-    asl_correction_factor = 1
-    depth_correction_factor = (1 + DRONE_ALTITUDE_M)/DRONE_ALTITUDE_M
-    length_adj = length_raw * asl_correction_factor * depth_correction_factor
-    return length_adj
+# calculate_gsd / GSD / calculate_shark_length / calculate_bbox_area /
+# calculate_adjusted_shark_length now live in `tracking` (imported near the top of this
+# file) so the GUI, mass_prediction, and headless CLI share one length calibration.
 
 def get_video_length(video_path):
     video = cv2.VideoCapture(video_path)
@@ -323,6 +294,37 @@ def get_video_length(video_path):
     duration = frame_count / fps
     video.release()
     return duration
+
+
+_libav_check_done = False
+
+
+def warn_on_libav_collision():
+    """Best-effort: warn once if OpenCV and PyAV bundle mismatched libav builds.
+
+    cv2 and PyAV each ship their own ``libav*`` dylibs; when their major versions differ,
+    duplicate native symbols can cause crashes — the ``objc[...] implemented in both`` lines
+    at startup are exactly this condition. Benign in dev, a real hazard in the frozen build
+    (a native abort leaves nothing but a crash code). This records the mismatch in the log
+    instead of leaving it buried in objc noise. Idempotent; never raises.
+    """
+    global _libav_check_done
+    if _libav_check_done:
+        return
+    _libav_check_done = True
+    try:
+        import re
+        import av
+        av_ver = av.library_versions.get('libavcodec')
+        av_major = av_ver[0] if isinstance(av_ver, (tuple, list)) else None
+        m = re.search(r'avcodec[^0-9]*([0-9]+)\.', cv2.getBuildInformation())
+        cv_major = int(m.group(1)) if m else None
+        if av_major and cv_major and av_major != cv_major:
+            logger.warning("[env] OpenCV (libavcodec %s) and PyAV (libavcodec %s) bundle different "
+                           "libav builds; duplicate native symbols can crash the frozen build. "
+                           "Consider excluding one libav copy in SharkEye.spec.", cv_major, av_major)
+    except Exception:
+        pass  # a diagnostic check must never break startup
 
 class SwitchControl(SwitchControl):
     """
@@ -1569,301 +1571,6 @@ class CloudUploadPage(HistoricalExperimentsPage):
         # Checkbox is positive ("check on startup"); the stored flag is the inverse.
         self.settings_obj.setValue("ignore_update", "false" if checked else "true")
 
-class CustomTracker:
-    # Cost returned for a track whose last sighting is older than the grace period:
-    # large enough to always exceed distance_threshold (so the Hungarian pairing is
-    # rejected and the detection starts a new id), but finite — linear_sum_assignment
-    # rejects inf/NaN.
-    _UNMATCHABLE_COST = 1e9
-
-    # The match gate (distance_threshold) grows by this many pixels per second of dropout:
-    # position uncertainty and extrapolation error both increase with the gap, so a longer
-    # dropout should tolerate a larger jump before the detection is ruled a different
-    # object. See _match_threshold.
-    _GATE_GROWTH_PX_PER_S = 60
-
-    def __init__(self, distance_threshold=250):
-        self.settings_obj = QSettings("BOSL", "SharkEye_App")
-
-        self.tracks = {}
-        self.next_id = 1
-        self.distance_threshold = distance_threshold
-        # Re-association grace period, in video time (ms). A shark's detection often
-        # blinks out for a moment and resurfaces after moving a short distance; without a
-        # grace window the tracker spawns a fresh id each time and fragments one animal
-        # into several. If a detection reappears within this window of a track's last
-        # sighting we re-link it to that track — matching against a velocity-extrapolated
-        # prediction (see _predict_new_position); past the window the track is treated as
-        # gone and a new id is started (see _calculate_cost). Measured in video time, not
-        # frame count, because a dropout advances no frame counter — update() only runs on
-        # frames that had a detection — so only the timestamp reflects how long the object
-        # was actually missing. Sized to cover real shark dropouts (glint, a side-on turn,
-        # a brief submersion), which routinely run past 2s — the keyframe sampler already
-        # keeps looking densely for ~2.5s (see keyframe_sampling._DENSE_HOLD_SECONDS), so a
-        # shorter grace here re-splits a shark the sampler was still tracking.
-        self.reassociation_grace_ms = 4000
-        self.min_frames = int(self.settings_obj.value("min_frames", "5"))
-        self.confidence_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
-        self.unique_sharks = 0
-        self.last_reported_sharks = 0
-        self.fov_radians = 1.274090354
-        self.drone_altitude = DRONE_ALTITUDE_M
-
-    def update(self, detections, frame, timestamp):
-        active_tracks = set()
-        new_unique_shark = False
-
-        if not self.tracks:
-            for detection in detections:
-                self._create_new_track(detection, frame, timestamp)
-                active_tracks.add(self.next_id - 1)
-            new_unique_shark = True
-            self.unique_sharks = 1
-        else:
-            predicted_positions = {track_id: self._predict_new_position(track, timestamp)
-                                   for track_id, track in self.tracks.items()}
-
-            cost_matrix = np.array([[self._calculate_cost(track, det, predicted_positions[track_id], timestamp)
-                                     for det in detections]
-                                    for track_id, track in self.tracks.items()])
-            
-            track_indices, detection_indices = linear_sum_assignment(cost_matrix)
-
-            # Snapshot the key order once; cost-matrix row indices map to it. (Previously
-            # rebuilt list(self.tracks.keys()) for every matched pair — O(n^2) per frame.)
-            track_ids = list(self.tracks.keys())
-            for track_idx, detection_idx in zip(track_indices, detection_indices):
-                track_id = track_ids[track_idx]
-                elapsed_ms = timestamp - self.tracks[track_id]['timestamps'][-1]
-                if cost_matrix[track_idx, detection_idx] < self._match_threshold(elapsed_ms):
-                    self._update_track(track_id, detections[detection_idx], frame, timestamp)
-                    active_tracks.add(track_id)
-                else:
-                    self._create_new_track(detections[detection_idx], frame, timestamp)
-                    active_tracks.add(self.next_id - 1)
-
-            unassigned_detections = set(range(len(detections))) - set(detection_indices)
-            for i in unassigned_detections:
-                self._create_new_track(detections[i], frame, timestamp)
-                active_tracks.add(self.next_id - 1)
-
-        current_unique_sharks = self._count_significant_tracks()
-        if current_unique_sharks > self.unique_sharks:
-            new_unique_shark = True
-            self.unique_sharks = current_unique_sharks
-
-        for track_id in self.tracks:
-            self.tracks[track_id]['frames_since_last_detection'] = 0 if track_id in active_tracks else self.tracks[track_id]['frames_since_last_detection'] + 1
-
-        if self.unique_sharks != self.last_reported_sharks:
-            logger.info("Shark detected — unique shark count: %d", self.unique_sharks)
-            self.last_reported_sharks = self.unique_sharks
-
-        return active_tracks
-
-    def _create_new_track(self, detection, frame, timestamp):
-        x, y, w, h, confidence = detection
-        length = (calculate_shark_length((x, y, w, h)))
-        self.tracks[self.next_id] = {
-            'id': self.next_id,
-            'unique_id': self.next_id,
-            'positions': deque([(x, y, w, h)], maxlen=100),
-            'confidences': deque([confidence], maxlen=100),
-            # Each cap.retrieve() returns a fresh buffer that is never mutated in place
-            # (all consumers copy before drawing), so store references rather than paying
-            # for a full-frame copy per detection.
-            'frames': deque([frame], maxlen=100),
-            'timestamps': deque([timestamp], maxlen=100),
-            'lengths': deque([length], maxlen=100),
-            'best_frame': frame,
-            'best_conf': confidence,
-            'best_timestamp': timestamp,
-            'best_length': length,
-            'longest_frame': frame,
-            'longest_conf': confidence, 
-            'longest_timestamp': timestamp,
-            'longest_length': length,            
-            'frames_since_last_detection': 0,
-            'velocity': np.array([0, 0]),
-            'label': 'Shark',
-            'track_frames': []
-        }
-        self.next_id += 1
-
-    def _update_track(self, track_id, detection, frame, timestamp):
-        x, y, w, h, confidence = detection
-        length = (calculate_shark_length((x, y, w, h)))
-        track = self.tracks[track_id]
-        
-        # Store frame with bounding box
-        # frame_with_box = frame.copy()
-        # cv2.rectangle(frame_with_box, 
-        #              (int(x - w/2), int(y - h/2)), 
-        #              (int(x + w/2), int(y + h/2)), 
-        #              (0, 255, 0), 2)
-        # track['track_frames'].append(frame_with_box)
-        
-        track['positions'].append((x, y, w, h))
-        track['confidences'].append(confidence)
-        track['frames'].append(frame)
-        track['timestamps'].append(timestamp)
-        track['lengths'].append(length)
-
-        if confidence > track['best_conf']:
-            track['best_conf'] = confidence
-            track['best_frame'] = frame  # fresh un-mutated buffer; no copy needed
-            track['best_timestamp'] = timestamp
-            track['best_length'] = length
-
-        if confidence > .8 and length > track['longest_length']:
-            track['longest_conf'] = confidence
-            track['longest_frame'] = frame  # fresh un-mutated buffer; no copy needed
-            track['longest_timestamp'] = timestamp
-            track['longest_length'] = length
-
-        if len(track['positions']) > 1:
-            prev_pos = np.array(track['positions'][-2][:2])
-            curr_pos = np.array([x, y])
-            # Velocity in pixels-per-ms so _predict_new_position can extrapolate over the
-            # real elapsed time of a dropout (frame counts don't advance while a shark is
-            # undetected). Guard duplicate / zero-dt samples: keep the prior velocity
-            # rather than dividing by zero.
-            dt_ms = track['timestamps'][-1] - track['timestamps'][-2]
-            if dt_ms > 0:
-                track['velocity'] = (curr_pos - prev_pos) / dt_ms
-
-    @staticmethod
-    def _format_timestamp(milliseconds):
-        """Format timestamp in MM:SS format for CSV"""
-        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M:%S")
-
-    @staticmethod
-    def _format_timestamp_filename(milliseconds):
-        """Format timestamp in MMSS format for filename"""
-        return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M%S")
-
-    def save_best_frames(self, output_dir, video_path):
-        """Save best frames for each significant track"""
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-        
-        images_saved = 0
-        
-        for track_id, track in self.tracks.items():
-            if not self.is_significant_track(track):
-                continue
-
-            num_frames = len(track['positions'])
-            avg_confidence = np.mean(track['confidences'])
-
-            longest_frame = track['longest_frame']
-            longest_confidence = track['longest_conf']
-            longest_length = track['longest_length']
-
-            if longest_frame is None:
-                continue
-
-            x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
-
-            # SAM is the expensive post-processing step and it runs once per track. Only
-            # run it on significant tracks (same criteria as _count_significant_tracks);
-            # sub-threshold tracks are almost always false positives, keep their
-            # bbox-estimated length, and get no mask. Significant tracks are segmented
-            # exactly as before, so their reported lengths are unchanged.
-            is_significant = (num_frames >= self.min_frames
-                              and avg_confidence > self.confidence_threshold)
-            if is_significant:
-                # SAM (and draw_mask) expect RGB; longest_frame is BGR from the decoder.
-                # Feeding BGR gave the model channel-swapped pixels and measurably worse
-                # masks (it under-captured the shark's extent — up to ~18% shorter length),
-                # so convert once and use RGB for both segmentation and the overlay.
-                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
-                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
-                pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
-                segmentation_length = calculate_shark_length_from_pixel(pixel_length,
-                                                                         original_width=longest_frame.shape[1], original_height=longest_frame.shape[0],
-                                                                         drone_altitude=self.drone_altitude,
-                                                                         fov_radians=self.fov_radians)
-                track['longest_length'] = segmentation_length
-                longest_length = track['longest_length']
-
-                mask_overlay = draw_mask(mask, rgb_frame)
-                track['mask_overlay'] = mask_overlay
-
-            filename = f"{Path(video_path).name}_{track_id}.jpg"
-
-            # Save the raw best-confidence frame (feeds the Review frame view and the
-            # training-frame export). The annotated "bounding_boxes/" copy is no longer
-            # written: it duplicated this frame with a box fully reconstructable from the
-            # YOLO label + CSV, was never read back by the app, and was dropped from upload.
-            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-
-            # Mask image only exists for segmented (significant) tracks.
-            if is_significant:
-                mask_path = os.path.join(output_dir, 'masks', filename)
-                cv2.imwrite(mask_path, mask_overlay)
-
-            images_saved += 1
-
-        logger.info(f"[segmentation] saved {images_saved} track image(s)")
-
-    def reset(self):
-        """Reset tracker state"""
-        self.tracks = {}
-        self.next_id = 1
-        self.unique_sharks = 0
-
-    def _predict_new_position(self, track, timestamp):
-        """Predict where the track's object should be at `timestamp`.
-
-        Velocity is stored in pixels-per-ms (see _update_track), so we extrapolate the
-        last known position by the *elapsed video time* since the last detection. That is
-        what lets a shark which dropped out for a moment and kept swimming re-link to its
-        existing track: over a ~1s gap the prediction moves with the animal instead of
-        sitting at its stale last position. Time-based (not frame count) because the
-        tracker only sees frames that had a detection — a dropout advances no frame
-        counter, so only the timestamp reflects how long the object was missing.
-        """
-        if not track['positions']:
-            return np.array([0, 0])  # Default prediction if no positions available
-        last_pos = np.array(track['positions'][-1][:2])
-        elapsed_ms = timestamp - track['timestamps'][-1]
-        return last_pos + track['velocity'] * elapsed_ms
-
-    def _match_threshold(self, elapsed_ms):
-        """Distance gate for re-linking a detection to a track, widening with the dropout.
-
-        Near-continuous detections use the base distance_threshold; as the gap grows, both
-        the animal's possible travel and the extrapolation error grow, so the gate expands
-        linearly with elapsed video time. Kept well below _UNMATCHABLE_COST so a
-        past-grace track (see _calculate_cost) is still rejected."""
-        return self.distance_threshold + self._GATE_GROWTH_PX_PER_S * (elapsed_ms / 1000.0)
-
-    def _calculate_cost(self, track, detection, predicted_position, timestamp):
-        """Cost for the Hungarian assignment.
-
-        Within the re-association grace period the cost is just the distance from the
-        (time-extrapolated) predicted position to the detection, so a shark that briefly
-        dropped out re-links to its existing id. Past the grace period the track is
-        considered gone and made effectively unmatchable, so the detection starts a fresh
-        id rather than resurrecting a stale track."""
-        elapsed_ms = timestamp - track['timestamps'][-1]
-        if elapsed_ms > self.reassociation_grace_ms:
-            return self._UNMATCHABLE_COST
-        return np.linalg.norm(predicted_position - np.array(detection[:2]))
-
-    def is_significant_track(self, track):
-        """Return True if a track meets the confidence and minimum-frame settings."""
-        return (len(track['positions']) >= self.min_frames
-                and np.mean(track['confidences']) > self.confidence_threshold)
-
-    def get_significant_tracks(self):
-        """Return only tracks that meet the confidence and minimum-frame settings."""
-        return {track_id: track for track_id, track in self.tracks.items()
-                if self.is_significant_track(track)}
-
-    def _count_significant_tracks(self):
-        """Count tracks that meet the criteria for being a significant detection"""
-        return sum(1 for track in self.tracks.values() if self.is_significant_track(track))
 
 def get_annotation_settings(settings_obj):
     """Get annotation color, thickness, and scale from settings"""
@@ -2282,6 +1989,13 @@ class VideoProcessingWorker(QObject):
         custom_tracker.fov_radians = self.drone_settings[self.drone_type]["Resolution"][f"({video_width}, {video_height})"]
         custom_tracker.drone_altitude = self.altitude
 
+        # Calibration provenance: every length number derives from these inputs, but they
+        # were never echoed, so a wrong altitude/FOV (or the module-level GSD the bbox
+        # estimator uses) was invisible in the log. Print once per video.
+        logger.info(f"[gsd] {Path(self.video_path).name}: drone={self.drone_type!r} "
+                    f"altitude={custom_tracker.drone_altitude}m fov={custom_tracker.fov_radians:.4f}rad "
+                    f"resolution={video_width}x{video_height} | module_GSD={GSD:.5f}m/px (bbox estimator)")
+
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'detection_results'), exist_ok=True)
@@ -2307,6 +2021,11 @@ class VideoProcessingWorker(QObject):
         decode_dense_time = 0.0
         scan_frames = 0
         dense_frames = 0
+        # Per-frame samples (ms) for p50/p95 — a mean hides tail stalls (e.g. the decoder
+        # flush after a keyframe seek). Bounded: a few hundred floats per video.
+        scan_decode_ms = []
+        dense_decode_ms = []
+        yolo_ms = []
 
         # Live preview is a courtesy view, not the output. Cap empty-frame updates at
         # ~20 fps so we don't color-convert, copy across the thread boundary, and
@@ -2339,9 +2058,11 @@ class VideoProcessingWorker(QObject):
                 if had_detection:      # last frame had a shark -> this decode is a dense step
                     decode_dense_time += _dt
                     dense_frames += 1
+                    dense_decode_ms.append(_dt * 1000)
                 else:                  # scanning empty water (or the very first frame)
                     decode_scan_time += _dt
                     scan_frames += 1
+                    scan_decode_ms.append(_dt * 1000)
 
                 if QThread.currentThread().isInterruptionRequested():
                     logger.warning("Processing interrupted")
@@ -2349,7 +2070,9 @@ class VideoProcessingWorker(QObject):
 
                 _t_model = time.perf_counter()
                 results = self.model(frame, classes=[0], verbose=False)
-                model_time += time.perf_counter() - _t_model
+                _mt = time.perf_counter() - _t_model
+                model_time += _mt
+                yolo_ms.append(_mt * 1000)
                 frames_sampled += 1
                 if frames_sampled == 1:
                     _log(f"first infer ok frame={frame_num} shape={getattr(frame, 'shape', None)}")
@@ -2435,14 +2158,61 @@ class VideoProcessingWorker(QObject):
                   f"segmentation={seg_time:.1f}s csv={csv_time:.2f}s "
                   f"tracks={track_count} (export+clip deferred to background)")
 
+            # Per-frame timing distribution. The [timing] line reports means; a p95 >> p50
+            # exposes tail stalls a mean hides — most usefully the decoder flush after each
+            # keyframe seek (correlate with the [stats] seeks/mode_switches count).
+            def _p(samples):
+                if not samples:
+                    return (0.0, 0.0)
+                return (float(np.percentile(samples, 50)), float(np.percentile(samples, 95)))
+            scan_p50, scan_p95 = _p(scan_decode_ms)
+            dense_p50, dense_p95 = _p(dense_decode_ms)
+            yolo_p50, yolo_p95 = _p(yolo_ms)
+            logger.info(f"[timing-dist] {Path(self.video_path).name} ms/frame p50/p95: "
+                  f"scan-decode={scan_p50:.0f}/{scan_p95:.0f} "
+                  f"dense-decode={dense_p50:.0f}/{dense_p95:.0f} "
+                  f"yolo={yolo_p50:.0f}/{yolo_p95:.0f}")
+
+            # Association census: how the tracker spent its detections and, critically, why
+            # new ids were opened (unassigned by the Hungarian step vs. rejected by the
+            # re-association gate). A run where new_ids spikes inside a single shark window
+            # is fragmentation; this line surfaces it without diffing on-disk labels. Also
+            # reports created/significant/filtered ALWAYS (the "Filtered out N" line above
+            # only fires when N>0), so "no sub-threshold tracks existed" is distinguishable
+            # from "the line didn't print".
+            a = custom_tracker.assoc_stats
+            logger.info(f"[assoc] {Path(self.video_path).name}: "
+                  f"frames_with_dets={a['frames_with_dets']} detections={a['detections']} "
+                  f"matched={a['matched']} | new_ids: first_frame={a['new_first_frame']} "
+                  f"unassigned={a['new_unassigned']} gate_rejected={a['new_from_gate']} | "
+                  f"tracks_created={len(custom_tracker.tracks)} significant={track_count} "
+                  f"filtered={filtered_count}")
+
             # Per-track discovery line: one row per significant track so a run's actual
             # findings (when, how confident, how long, how many detections) are legible
-            # from the log instead of only a bare count.
+            # from the log instead of only a bare count. The spatial signature (time span,
+            # box-center start->end, and x/y travel) is what tells two co-swimming sharks
+            # apart from one fragmented track: two tracks alive at once in disjoint x-bands
+            # are two animals; abutting spans that share a location are one animal split.
+            # Positions/timestamps are the retained tail (deque maxlen=100), so on a >100-
+            # sample track the span covers the last ~100 samples, not the whole life.
             for tid, tr in significant_tracks.items():
                 confs = tr.get('confidences') or [0.0]
+                positions = list(tr.get('positions') or [])
+                timestamps = list(tr.get('timestamps') or [])
+                spatial = ""
+                if positions and timestamps:
+                    xs = [p[0] for p in positions]
+                    ys = [p[1] for p in positions]
+                    t0, t1 = timestamps[0], timestamps[-1]
+                    spatial = (
+                        f" | t={CustomTracker._format_timestamp(t0)}"
+                        f"-{CustomTracker._format_timestamp(t1)} ({(t1 - t0) / 1000:.1f}s) "
+                        f"center=({xs[0]:.0f},{ys[0]:.0f})->({xs[-1]:.0f},{ys[-1]:.0f}) "
+                        f"x_span={max(xs) - min(xs):.0f}px y_span={max(ys) - min(ys):.0f}px")
                 logger.info(f"[track {tid}] t={CustomTracker._format_timestamp(tr.get('best_timestamp', 0))} "
                       f"peak_conf={max(confs):.2f} avg_conf={np.mean(confs):.2f} "
-                      f"dets={len(confs)} length={tr.get('longest_length', 0):.1f}ft")
+                      f"dets={len(confs)} length={tr.get('longest_length', 0):.1f}ft{spatial}")
 
             # Adaptive frame-sampling analytics: how much source-video time the
             # acceleration skipped vs. the wall time spent on inference, then a timeline of
@@ -2518,7 +2288,14 @@ class VideoProcessingWorker(QObject):
     def save_detections_csv(self, tracks, output_dir, tracker=None):
         csv_path = os.path.join(output_dir, f'{Path(self.video_path).name}.csv')
         with open(csv_path, 'w', newline='') as csvfile:
-            fieldnames = ['video_name', 'Flight Location', 'Track Id', 'Highest Conf Timestamp',
+            # 'Length (ft)' is the canonical length every downstream consumer should read:
+            # it resolves the precedence manual > SAM at write time (SAM here; the review
+            # editor overwrites it with the manual value when a human draws a line). The other
+            # length columns are provenance/diagnostics: 'Highest Confidence Length' is the SAM
+            # mask measurement; 'Longest Length' is now the bbox estimate at the best-confidence
+            # frame (a coarse cross-check), not the old outlier-prone max over every frame.
+            fieldnames = ['video_name', 'Flight Location', 'Drone', 'Altitude', 'Track Id', 'Length (ft)',
+                        'Highest Conf Timestamp',
                         'Longest Length Timestamp', 'Highest Confidence', 'Average Confidence',
                         'Lowest Confidence', 'Longest Length', 'Highest Confidence Length',
                         'Number of Detections', 'Meets Thresholds', 'Confidence of Longest Length', 'Label',
@@ -2532,14 +2309,17 @@ class VideoProcessingWorker(QObject):
                 csv_writer.writerow({
                     'video_name': self.video_path,
                     'Flight Location': self.flight_location,
+                    'Drone': self.drone_type,        # persisted so the review editor auto-resolves FOV
+                    'Altitude': self.altitude,
                     'Track Id': track_id,
+                    'Length (ft)': track['longest_length'],   # canonical: SAM now, manual overrides in review
                     'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                     'Longest Length Timestamp': CustomTracker._format_timestamp(track['longest_timestamp']),
                     'Highest Confidence': max(track['confidences']),
                     'Average Confidence': np.mean(track['confidences']),
                     'Lowest Confidence': min(track['confidences']),
-                    'Longest Length': max(track['lengths']),  
-                    'Highest Confidence Length': track['longest_length'], # 
+                    'Longest Length': track['best_length'],   # bbox at best-conf frame (diagnostic, not max)
+                    'Highest Confidence Length': track['longest_length'], # SAM mask measurement
                     'Number of Detections': len(track['confidences']),
                     'Meets Thresholds': meets_thresholds,
                     'Confidence of Longest Length': track['longest_conf'],
@@ -2778,6 +2558,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("SharkEye")
         self.setGeometry(100, 100, 1000, 800)
 
+        warn_on_libav_collision()
         self.initialize_settings()
         self.init_ui()
         self.init_attributes()
@@ -3826,7 +3607,9 @@ class MainWindow(QMainWindow):
         self.progress_display_dialog.close()
         msg = QMessageBox()
         msg.setWindowTitle("Processing Complete")
-        msg.setText(f"Processing completed!\n\nTotal detections: {total_detections}\nTime taken: {time_str}")
+        # total_detections is the number of tracks (one per shark), not raw detections —
+        # label it as such. The [batch] log line reports both track and detection counts.
+        msg.setText(f"Processing completed!\n\nSharks detected: {total_detections}\nTime taken: {time_str}")
         msg.exec()
 
     def go_to_review_from_popup(self, popup):
@@ -4800,6 +4583,39 @@ class MainWindow(QMainWindow):
         )
         return str(frame_path) if frame_path.exists() else None
 
+    def _current_experiment_drone_altitude(self):
+        """Read the Drone + Altitude the current experiment was processed with, from its CSV,
+        so the editor auto-selects the drone whose FOV profile matches the footage (and fills
+        altitude). Returns (drone_or_None, altitude_or_None); legacy CSVs without the columns,
+        or a non-historical context, return (None, None) so the caller falls back."""
+        try:
+            row = self.historical_items.currentRow()
+            if row < 0:
+                return (None, None)
+            item = self.historical_items.item(row, 0)
+            meta = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if not meta:
+                return (None, None)
+            experiment, _video_name, csv_name, track_id = meta
+            csv_path = Path(get_results_dir()) / experiment / "detection_results" / csv_name
+            if not csv_path.exists():
+                return (None, None)
+            df = pd.read_csv(csv_path)
+            m = df["Track Id"].astype(int) == int(track_id)
+            if not m.any():
+                return (None, None)
+            rowdata = df[m].iloc[0]
+            drone = rowdata["Drone"] if "Drone" in df.columns else None
+            alt = rowdata["Altitude"] if "Altitude" in df.columns else None
+            drone = str(drone) if not _csv_value_is_empty(drone) else None
+            try:
+                alt = float(alt) if not _csv_value_is_empty(alt) else None
+            except (TypeError, ValueError):
+                alt = None
+            return (drone, alt)
+        except Exception:
+            return (None, None)
+
     def open_frame_editor(self):
         """Replace the active frame view with the in-place line editor.
 
@@ -4807,21 +4623,50 @@ class MainWindow(QMainWindow):
         edits the frame currently paused in the player (captured full-res from memory).
         """
         self.frame_editor._update_drone_settings()
-        initial_drone = self.settings_obj.value("last_drone_type") or None
+        # Seed the editor's drone + altitude so feet resolve without the user re-picking.
+        # Current run just processed: use exactly what was selected on the home page (the
+        # drone that processed this footage). Historical review: use the drone/altitude that
+        # experiment was processed with (persisted in its CSV), falling back to last_drone_type
+        # for legacy CSVs.
+        if getattr(self, "reviewing_history", False):
+            exp_drone, initial_altitude = self._current_experiment_drone_altitude()
+            initial_drone = exp_drone or (self.settings_obj.value("last_drone_type") or None)
+        else:
+            initial_drone = (self.drone_select.currentText()
+                             or self.settings_obj.value("last_drone_type") or None)
+            try:
+                initial_altitude = float(self.altitude_input.text())
+            except (TypeError, ValueError):
+                initial_altitude = None
+
+        # Capture (native) resolution = the full-res still frame's size. FOV must be resolved
+        # against this, not the on-screen frame, because the review clip is downscaled to
+        # <=1080p — a resolution the drone map doesn't list. frames/*.jpg is always native res.
+        capture_res = None
+        still_path = self._current_frame_image_path()
+        if still_path:
+            from PyQt6.QtGui import QImageReader
+            sz = QImageReader(still_path).size()
+            if sz.isValid():
+                capture_res = (sz.width(), sz.height())
 
         if getattr(self, "mask_active", False):
             frame_path = self._current_frame_image_path()
             if not frame_path:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_image(frame_path, initial_drone=initial_drone)
+            loaded = self.frame_editor.load_image(frame_path, drone_altitude=initial_altitude,
+                                                  initial_drone=initial_drone,
+                                                  capture_resolution=capture_res)
         else:
             # Playback frame — only reachable while paused (button is disabled otherwise).
             pixmap = self.frame_player.current_frame_pixmap()
             if pixmap is None:
                 self._frame_editor_error("Error: No frame available to edit")
                 return
-            loaded = self.frame_editor.load_pixmap(pixmap, initial_drone=initial_drone)
+            loaded = self.frame_editor.load_pixmap(pixmap, drone_altitude=initial_altitude,
+                                                   initial_drone=initial_drone,
+                                                   capture_resolution=capture_res)
 
         if not loaded:
             self._frame_editor_error("Error: Failed to load frame for editing")
@@ -4871,9 +4716,13 @@ class MainWindow(QMainWindow):
                 raise FileNotFoundError(f"CSV not found: {csv_path}")
 
             df = pd.read_csv(csv_path)
-            for col in ("manual_length_px", "manual_length_ft"):
+            # An all-blank column reads back as float64 (all-NaN), and pandas then rejects a
+            # "" write into it ("Invalid value '' for dtype 'float64'"). Coerce the columns we
+            # touch to object dtype so both blanks and floats are accepted.
+            for col in ("manual_length_px", "manual_length_ft", "Length (ft)"):
                 if col not in df.columns:
                     df[col] = ""
+                df[col] = df[col].astype(object)
 
             mask = df["Track Id"].astype(int) == int(track_id)
             if not mask.any():
@@ -4881,18 +4730,32 @@ class MainWindow(QMainWindow):
 
             df.loc[mask, "manual_length_px"] = length_px
             df.loc[mask, "manual_length_ft"] = length_ft if length_ft is not None else ""
+            # Re-resolve the canonical 'Length (ft)' with precedence manual > SAM, so every
+            # CSV consumer gets the human's correction without reimplementing the fallback.
+            if length_ft is not None:
+                df.loc[mask, "Length (ft)"] = length_ft
+            elif "Highest Confidence Length" in df.columns:
+                df.loc[mask, "Length (ft)"] = df.loc[mask, "Highest Confidence Length"]
             df.to_csv(csv_path, index=False)
 
             if length_ft is not None:
                 length_item = self.historical_items.item(row, 5)
                 if length_item is not None:
                     length_item.setText(f"{float(length_ft):.1f}ft")
-
-            QMessageBox.information(
-                self,
-                "Length Saved",
-                "Length correction saved to detection results.",
-            )
+                QMessageBox.information(
+                    self,
+                    "Length Saved",
+                    f"Length correction saved: {float(length_ft):.1f} ft.",
+                )
+            else:
+                # Pixels were saved but feet couldn't be computed — the editor's drone
+                # doesn't have a FOV profile for this frame's resolution, or altitude is blank.
+                QMessageBox.warning(
+                    self,
+                    "Pixel Length Saved (no feet)",
+                    "Saved the pixel length, but couldn't convert to feet: pick the drone that "
+                    "matches this footage and enter an altitude in the editor, then draw again.",
+                )
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -5137,8 +5000,14 @@ class MainWindow(QMainWindow):
                         time_str = str(length_ts)
                         conf_longest = float(row.get('Confidence of Longest Length', 0.0))
                         len_high_conf = float(row.get('Highest Confidence Length', 0.0))
+                        # Prefer the canonical 'Length (ft)' column (already resolves
+                        # manual > SAM). Fall back to the manual/SAM precedence for legacy
+                        # CSVs written before the column existed.
+                        canonical_len = row.get('Length (ft)', '')
                         manual_ft = row.get('manual_length_ft', '')
-                        if not _csv_value_is_empty(manual_ft):
+                        if not _csv_value_is_empty(canonical_len):
+                            display_length = float(canonical_len)
+                        elif not _csv_value_is_empty(manual_ft):
                             display_length = float(manual_ft)
                         else:
                             display_length = len_high_conf
@@ -6520,78 +6389,18 @@ class FramePlayer(QLabel):
         return QRect(x, y, scaled.width(), scaled.height())
 
 class HeadlessVideoProcessor(VideoProcessingWorker):
-    def __init__(self, video_path, model, output_dir):
+    def __init__(self, video_path, model, output_dir, drone_type="Air 2S", altitude=40.0):
         self.settings_obj = ensure_app_settings()
         self.video_path = video_path
         self.model = model
         self.output_dir = output_dir
         self.detection_threshold = float(self.settings_obj.value("confidence_threshold", "0.40"))
         self.drone_settings = get_drone_settings_dict(self.settings_obj)
-    
+        self.drone_type = drone_type
+        self.altitude = float(altitude)
+
     progress_update = 0
     processing_complete = {}
-
-    @staticmethod
-    def save_best_frames(output_dir, video_path, tracks, tracker=None):
-        """Save best frames for each significant track"""
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-
-        # Same significance thresholds the tracker uses (static method has no self).
-        settings_obj = ensure_app_settings()
-        min_frames = int(settings_obj.value("min_frames", "5"))
-        confidence_threshold = float(settings_obj.value("confidence_threshold", "0.40"))
-
-        images_saved = 0
-
-        for track_id, track in tracks.items():
-            if tracker and not tracker.is_significant_track(track):
-                continue
-
-            logger.debug("Starting new track")
-            num_frames = len(track['positions'])
-            avg_confidence = np.mean(track['confidences'])
-
-            longest_frame = track['longest_frame']
-            longest_confidence = track['longest_conf']
-            longest_length = track['longest_length']
-
-            if longest_frame is None:
-                continue
-
-            x, y, w, h = track['positions'][track['confidences'].index(longest_confidence)]
-
-            # SAM is the expensive per-track step; run it only on significant tracks.
-            is_significant = num_frames >= min_frames and avg_confidence > confidence_threshold
-            if is_significant:
-                # Use segmentation model to generate lengths (SAM/draw_mask expect RGB).
-                rgb_frame = cv2.cvtColor(longest_frame, cv2.COLOR_BGR2RGB)
-                seg_start = time.perf_counter()
-                mask = run_prediction(rgb_frame, (int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)))
-                seg_end = time.perf_counter()
-                seg_duration = seg_end - seg_start
-                track['segmentation_duration'] = seg_duration
-                pixel_length = find_pixel_length(mask, draw_line=False, viz_name = f'{video_name}-viz')
-
-                track['longest_length'] = pixel_length
-                longest_length = track['longest_length']
-
-                mask_overlay = draw_mask(mask, rgb_frame)
-                track['mask_overlay'] = mask_overlay
-
-            filename = f"{Path(video_path).name}_{track_id}.jpg"
-
-            # Save the raw best-confidence frame. The annotated "bounding_boxes/" copy is no
-            # longer written (see the segmentation path in VideoProcessingWorker).
-            cv2.imwrite(os.path.join(output_dir, 'frames', filename), longest_frame)
-
-            # Mask only exists for segmented (significant) tracks.
-            if is_significant:
-                mask_path = os.path.join(output_dir, 'masks', filename)
-                cv2.imwrite(mask_path, mask_overlay)
-
-            images_saved += 1
-
-        logger.info(f"Shark Images Saved: {images_saved}")
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
@@ -6600,6 +6409,17 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
         custom_tracker = CustomTracker()
         video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Per-video FOV so length math matches the GUI (previously this path silently used
+        # the default FOV). Falls back to the default + a warning when the drone/resolution
+        # isn't in the map.
+        fov = resolve_fov_radians(self.drone_type, video_width, video_height, self.drone_settings)
+        if fov is not None:
+            custom_tracker.fov_radians = fov
+            custom_tracker.drone_altitude = self.altitude
+        else:
+            logger.warning(f"[gsd] {Path(self.video_path).name}: no FOV for drone={self.drone_type!r} "
+                           f"@ {video_width}x{video_height}; using default {custom_tracker.fov_radians:.4f}rad")
 
         os.makedirs(os.path.join(self.output_dir, 'frames'), exist_ok=True)
         os.makedirs(os.path.join(self.output_dir, 'false_positives'), exist_ok=True)
@@ -6635,12 +6455,10 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
 
         cap.release()
         significant_tracks = custom_tracker.get_significant_tracks()
-        self.save_best_frames(
-            self.output_dir,
-            self.video_path,
-            tracks=significant_tracks,
-            tracker=custom_tracker,
-        )
+        # Shared implementation (Priority 2: segments the best-confidence frame; converts
+        # SAM pixels -> feet, which this path previously failed to do). FOV was resolved
+        # per-video above from --drone/--altitude.
+        custom_tracker.save_best_frames(self.output_dir, self.video_path)
 
         all_track_info = []
 
@@ -6649,13 +6467,16 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     
             track_info = {
                 'video_name': self.video_path,
+                'Drone': self.drone_type,
+                'Altitude': self.altitude,
                 'Track Id': track_id,
+                'Length (ft)': track['longest_length'],   # canonical: SAM (manual overrides in review)
                 'Highest Conf Timestamp': CustomTracker._format_timestamp(track['best_timestamp']),
                 'Highest Confidence': max(track['confidences']),
                 'Average Confidence': np.mean(track['confidences']),
                 'Lowest Confidence': min(track['confidences']),
-                'Longest Length': max(track['lengths']),  
-                'Highest Confidence Length': track['longest_length'], # 
+                'Longest Length': track['best_length'],   # bbox at best-conf frame (diagnostic, not max)
+                'Highest Confidence Length': track['longest_length'], # SAM mask measurement
                 'Number of Detections': len(track['confidences']),
                 'Meets Thresholds': meets_thresholds,
                 'Confidence of Longest Length': track['longest_conf'],
@@ -6669,18 +6490,19 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
     
         return all_track_info            
 
-def mass_prediction(video_paths, current_output_dir):
+def mass_prediction(video_paths, current_output_dir, drone_type="Air 2S", altitude=40.0):
     device = select_torch_device()
     logger.info(f"Using device: {device}")
     model = YOLO(MODEL_PATH).to(device)
-    
+
     videos_tqdm = tqdm(video_paths)
     all_track_results = []
     processing_logs = {}
     for path in videos_tqdm:
         videos_tqdm.set_description(f"Processing {path}")
         path_start = time.perf_counter()
-        processor = HeadlessVideoProcessor(path, model, current_output_dir)
+        processor = HeadlessVideoProcessor(path, model, current_output_dir,
+                                           drone_type=drone_type, altitude=altitude)
         path_results = processor.run()
         path_end = time.perf_counter()
 
@@ -6710,8 +6532,10 @@ def mass_prediction(video_paths, current_output_dir):
 def parse_args(): 
     parser = argparse.ArgumentParser(description="Run headless object tracking on videos.")
     parser.add_argument('--testing', action='store_true', help='Enables testing for app in headless environment')
-    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing .mp4 videos to process')
+    parser.add_argument('--input_dir', type=str, required=False, help='Directory containing videos to process (.mp4/.mov, case-insensitive)')
     parser.add_argument('--output_dir', type=str, default='./headless_predictions', help='Directory to store output predictions and CSV')
+    parser.add_argument('--drone', type=str, default='Air 2S', help='Drone model, for per-video FOV / length calibration')
+    parser.add_argument('--altitude', type=float, default=40.0, help='Flight altitude in meters, for length calibration')
     return parser.parse_args()
 
 def _install_qt_message_filter():
@@ -6737,14 +6561,18 @@ if __name__ == '__main__':
     if args.input_dir and args.output_dir:
         input_dir = Path(args.input_dir)
         output_dir = Path(args.output_dir)
-        video_paths = input_dir.rglob("*.mp4")
+        # Case-insensitive, de-duped, sorted list (not a generator) so real ".MP4" drone
+        # files match and the `if not video_paths` guard actually works.
+        video_exts = {".mp4", ".mov"}
+        video_paths = sorted({p for p in input_dir.rglob("*") if p.suffix.lower() in video_exts})
         if not video_paths:
-            logger.warning(f"No .mp4 videos found in {input_dir}")
+            logger.warning(f"No videos found under {input_dir}")
             exit(1)
 
         # Run prediction
         output_dir.mkdir(parents=True, exist_ok=True)
-        results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir)
+        results = mass_prediction(video_paths=video_paths, current_output_dir=output_dir,
+                                  drone_type=args.drone, altitude=args.altitude)
 
         # Save results to CSV
         if results:
