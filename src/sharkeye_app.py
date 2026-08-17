@@ -45,7 +45,6 @@ from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
-from report_problem import ReportProblemDialog
 from frame_line_editor import FrameLineEditorWidget
 import signal
 import json
@@ -2758,10 +2757,6 @@ class MainWindow(QMainWindow):
         self._help_docs_window.raise_()
         self._help_docs_window.activateWindow()
 
-    def show_report_problem(self):
-        dialog = ReportProblemDialog(parent=self)
-        dialog.exec()
-
     def _start_model_loading(self):
         """Kick off model load + warmup on a background QThread (see ModelLoader)."""
         self._model_thread = QThread()
@@ -2843,21 +2838,15 @@ class MainWindow(QMainWindow):
             "Help", "question-circle-fill.svg", "Open the user guide")
         self.banner_help_button.clicked.connect(self.show_help_docs)
 
-        self.banner_report_button = self._make_banner_button(
-            "Report a Problem", "exclamation-circle-fill.svg",
-            "Send feedback to the SharkEye team")
-        self.banner_report_button.clicked.connect(self.show_report_problem)
-
-        # Trailing group: settings + help + report, sized to their content so it hugs
-        # the right edge without spanning the cell (a full-width sibling would repaint
-        # over — and erase — the left button beneath it).
+        # Trailing group: settings + help, sized to their content so it hugs the right
+        # edge without spanning the cell (a full-width sibling would repaint over — and
+        # erase — the left button beneath it).
         right_group = QWidget()
         right_row = QHBoxLayout(right_group)
         right_row.setContentsMargins(0, 0, 0, 0)
         right_row.setSpacing(8)
         right_row.addWidget(self.banner_right_button)
         right_row.addWidget(self.banner_help_button)
-        right_row.addWidget(self.banner_report_button)
 
         # All three occupy cell (0, 0). Each is content-sized and edge/center-aligned, so
         # they sit at the left edge, right edge, and true center without overlapping — the
@@ -2897,12 +2886,9 @@ class MainWindow(QMainWindow):
         self.banner_left_button.show()
         self.banner_right_button.show()
 
-        # Help and Report a Problem are reachable from every screen — they are
-        # deliberately never disabled here.
+        # Help is reachable from every screen — it is deliberately never disabled here.
         self.banner_help_button.setEnabled(True)
         self.banner_help_button.show()
-        self.banner_report_button.setEnabled(True)
-        self.banner_report_button.show()
 
         if review == True:
             # Review Window
