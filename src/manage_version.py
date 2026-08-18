@@ -8,8 +8,8 @@ import os
 import subprocess
 import time
 
+from google.api_core.exceptions import NotFound, PreconditionFailed
 from google.cloud import storage
-from google.api_core.exceptions import PreconditionFailed
 
 BUCKET_NAME = "sharkeye-app-build"
 VERSION_BLOB_NAME = "latest_version.json"
@@ -59,19 +59,30 @@ def get_commit_timestamp(commit: str) -> str:
         return ""
 
 
-def load_versions(blob: storage.Blob) -> tuple[dict[str, dict[str, str]], int | None]:
-    """Return (versions, generation). generation is None if the blob does not exist."""
-    if not blob.exists():
-        return _empty_versions(), None
-
-    blob.reload()
-    data = json.loads(blob.download_as_text())
+def _parse_versions(data: object) -> dict[str, dict[str, str]]:
     versions = _empty_versions()
     if isinstance(data, dict):
         for platform in PLATFORMS:
             if platform in data:
                 versions[platform] = _coerce_entry(data[platform])
-    return versions, blob.generation
+    return versions
+
+
+def load_versions(bucket: storage.Bucket) -> tuple[dict[str, dict[str, str]], int]:
+    """Return (versions, generation). generation is 0 if the blob does not exist.
+
+    Download the *live* object on a generation-free Blob. Reusing a Blob after
+    reload() pins ``blob.generation``; Blob.exists() then queries that specific
+    generation. After a concurrent overwrite the old generation is gone, exists()
+    returns False, and a create with ifGenerationMatch=0 412s on every retry.
+    """
+    blob = bucket.blob(VERSION_BLOB_NAME)
+    try:
+        data = json.loads(blob.download_as_text())
+    except NotFound:
+        return _empty_versions(), 0
+    generation = blob.generation
+    return _parse_versions(data), 0 if generation is None else int(generation)
 
 
 def update_latest_version(platform: str, commit: str, committed_at: str) -> dict[str, dict[str, str]]:
@@ -82,27 +93,22 @@ def update_latest_version(platform: str, commit: str, committed_at: str) -> dict
 
     client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
-    blob = bucket.blob(VERSION_BLOB_NAME)
 
     for attempt in range(1, MAX_RETRIES + 1):
-        versions, generation = load_versions(blob)
+        versions, generation = load_versions(bucket)
         versions[platform] = {"latest_commit": commit, "committed_at": committed_at}
         payload = json.dumps(versions, indent=2, sort_keys=True) + "\n"
 
+        # Fresh Blob so a prior generation is never attached as a query param.
+        blob = bucket.blob(VERSION_BLOB_NAME)
         try:
             # Optimistic concurrency so parallel platform builds don't clobber each other.
-            if generation is None:
-                blob.upload_from_string(
-                    payload,
-                    content_type="application/json",
-                    if_generation_match=0,
-                )
-            else:
-                blob.upload_from_string(
-                    payload,
-                    content_type="application/json",
-                    if_generation_match=generation,
-                )
+            # generation=0 is GCS's "create only if the object does not exist" sentinel.
+            blob.upload_from_string(
+                payload,
+                content_type="application/json",
+                if_generation_match=generation,
+            )
             print(f"Updated {VERSION_BLOB_NAME}: {platform} -> {commit} ({committed_at})")
             print(json.dumps(versions, indent=2, sort_keys=True))
             return versions

@@ -45,6 +45,7 @@ from log_config import get_logger, install_crash_handlers
 
 logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
+from report_problem import ReportProblemDialog
 from frame_line_editor import FrameLineEditorWidget
 import signal
 import json
@@ -1284,9 +1285,17 @@ class AccessibilityPage(QWidget):
         
         # Load current settings or use defaults
         default_color = (255, 96, 31)  # Neon orange in RGB
-        color_str = self.settings_obj.value("annotation_color", f"{default_color[0]},{default_color[1]},{default_color[2]}")
+        color_str = str(self.settings_obj.value(
+            "annotation_color",
+            f"{default_color[0]},{default_color[1]},{default_color[2]}",
+        ) or "")
         color_parts = color_str.split(",")
-        self.annotation_color = tuple(int(c.strip()) for c in color_parts) if len(color_parts) == 3 else default_color
+        try:
+            self.annotation_color = tuple(int(c.strip()) for c in color_parts)
+            if len(self.annotation_color) != 3:
+                self.annotation_color = default_color
+        except ValueError:
+            self.annotation_color = default_color
         
         self.box_thickness = int(self.settings_obj.value("box_thickness", "2"))
         self.text_thickness = int(self.settings_obj.value("text_thickness", "2"))
@@ -1445,6 +1454,7 @@ class AccessibilityPage(QWidget):
         # Save settings
         color_str = f"{self.annotation_color[0]},{self.annotation_color[1]},{self.annotation_color[2]}"
         self.settings_obj.setValue("annotation_color", color_str)
+        self.settings_obj.remove("review_box_color")
         self.settings_obj.setValue("box_thickness", str(box_thick))
         self.settings_obj.setValue("text_thickness", str(text_thick))
         self.settings_obj.setValue("text_scale", str(text_scale_val))
@@ -1575,14 +1585,22 @@ class CloudUploadPage(HistoricalExperimentsPage):
 def get_annotation_settings(settings_obj):
     """Get annotation color, thickness, and scale from settings"""
     default_color = (255, 96, 31)  # Neon orange in RGB
-    color_str = settings_obj.value("annotation_color", f"{default_color[0]},{default_color[1]},{default_color[2]}")
+    color_str = str(settings_obj.value(
+        "annotation_color",
+        f"{default_color[0]},{default_color[1]},{default_color[2]}",
+    ) or "")
     color_parts = color_str.split(",")
-    annotation_color = tuple(int(c.strip()) for c in color_parts) if len(color_parts) == 3 else default_color
-    
+    try:
+        annotation_color = tuple(int(c.strip()) for c in color_parts)
+        if len(annotation_color) != 3:
+            annotation_color = default_color
+    except ValueError:
+        annotation_color = default_color
+
     box_thickness = int(settings_obj.value("box_thickness", "2"))
     text_thickness = int(settings_obj.value("text_thickness", "2"))
     text_scale = float(settings_obj.value("text_scale", "2.0"))
-    
+
     return annotation_color, box_thickness, text_thickness, text_scale
 
 
@@ -2557,6 +2575,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("SharkEye")
         self.setGeometry(100, 100, 1000, 800)
+        self.setMinimumWidth(900)
 
         warn_on_libav_collision()
         self.initialize_settings()
@@ -2618,6 +2637,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "speed_cycle_button"):
             self.frame_player.set_speed(self.playback_speed)
             self._check_speed_button(self.playback_speed)
+        # Accessibility color is the same setting the review overlay reads; apply it now
+        # so a save in Settings is visible without switching tracks.
+        if hasattr(self, "frame_player"):
+            self.frame_player.set_box_color(self._review_box_color())
 
     def check_for_update(self):
         """Kick off a background version check against the Cloud Function on startup."""
@@ -2757,6 +2780,10 @@ class MainWindow(QMainWindow):
         self._help_docs_window.raise_()
         self._help_docs_window.activateWindow()
 
+    def show_report_problem(self):
+        dialog = ReportProblemDialog(parent=self)
+        dialog.exec()
+
     def _start_model_loading(self):
         """Kick off model load + warmup on a background QThread (see ModelLoader)."""
         self._model_thread = QThread()
@@ -2838,15 +2865,21 @@ class MainWindow(QMainWindow):
             "Help", "question-circle-fill.svg", "Open the user guide")
         self.banner_help_button.clicked.connect(self.show_help_docs)
 
-        # Trailing group: settings + help, sized to their content so it hugs the right
-        # edge without spanning the cell (a full-width sibling would repaint over — and
-        # erase — the left button beneath it).
+        self.banner_report_button = self._make_banner_button(
+            "Report a Problem", "exclamation-circle-fill.svg",
+            "Send feedback to the SharkEye team")
+        self.banner_report_button.clicked.connect(self.show_report_problem)
+
+        # Trailing group: settings + help + report, sized to their content so it hugs
+        # the right edge without spanning the cell (a full-width sibling would repaint
+        # over — and erase — the left button beneath it).
         right_group = QWidget()
         right_row = QHBoxLayout(right_group)
         right_row.setContentsMargins(0, 0, 0, 0)
         right_row.setSpacing(8)
         right_row.addWidget(self.banner_right_button)
         right_row.addWidget(self.banner_help_button)
+        right_row.addWidget(self.banner_report_button)
 
         # All three occupy cell (0, 0). Each is content-sized and edge/center-aligned, so
         # they sit at the left edge, right edge, and true center without overlapping — the
@@ -2886,9 +2919,12 @@ class MainWindow(QMainWindow):
         self.banner_left_button.show()
         self.banner_right_button.show()
 
-        # Help is reachable from every screen — it is deliberately never disabled here.
+        # Help and Report a Problem are reachable from every screen — they are
+        # deliberately never disabled here.
         self.banner_help_button.setEnabled(True)
         self.banner_help_button.show()
+        self.banner_report_button.setEnabled(True)
+        self.banner_report_button.show()
 
         if review == True:
             # Review Window
@@ -4352,15 +4388,9 @@ class MainWindow(QMainWindow):
     def _review_box_color(self):
         """The color to draw review bounding boxes in.
 
-        Persisted per-user under "review_box_color"; defaults to the app's annotation
-        color so the review overlay matches exported annotations out of the box."""
-        stored = self.settings_obj.value("review_box_color", None)
-        if stored:
-            try:
-                r, g, b = (int(v) for v in str(stored).split(","))
-                return QColor(r, g, b)
-            except (TypeError, ValueError):
-                pass
+        Same `annotation_color` setting as Accessibility, so the live overlay matches
+        the color picked in Settings (and the color burned into exported clips).
+        """
         annotation_color, *_ = get_annotation_settings(self.settings_obj)
         return QColor(annotation_color[0], annotation_color[1], annotation_color[2])
 
@@ -4416,7 +4446,10 @@ class MainWindow(QMainWindow):
     def _pick_box_color(self, swatch=None):
         color = QColorDialog.getColor(self._review_box_color(), self, "Bounding Box Color")
         if color.isValid():
-            self.settings_obj.setValue("review_box_color", f"{color.red()},{color.green()},{color.blue()}")
+            self.settings_obj.setValue(
+                "annotation_color", f"{color.red()},{color.green()},{color.blue()}")
+            # Drop the old overlay-only key so it cannot drift from Settings again.
+            self.settings_obj.remove("review_box_color")
             if swatch is not None:
                 self._style_color_swatch(swatch)
             self.frame_player.set_box_color(color)
