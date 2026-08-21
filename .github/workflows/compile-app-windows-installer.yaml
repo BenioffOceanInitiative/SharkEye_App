@@ -1,0 +1,116 @@
+name: Build Windows Executable (PyInstaller Spec)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11.4"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify CUDA PyTorch wheel
+        run: |
+          python -c "import torch; v=torch.__version__; assert '+cu' in v or 'cu118' in v, f'Expected CUDA torch, got {v}'; print('torch', v)"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{secrets.ACTIONS_SERVICE_ACCOUNT}}
+          
+      - name: Run download_models_from_gcs.py
+        run: python model_weights/download_models_from_gcs.py
+
+      - name: Update latest_version.json
+        run: python src/manage_version.py --platform windows
+
+      - name: Detect help docs changes
+        id: help_docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          BEFORE="${{ github.event.before }}"
+          if [ -z "${BEFORE}" ] || [[ "${BEFORE}" =~ ^0+$ ]]; then
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              BEFORE="$(git rev-parse HEAD^)"
+            else
+              BEFORE="$(git hash-object -t tree /dev/null)"
+            fi
+          fi
+          if git diff --name-only "${BEFORE}" "${{ github.sha }}" -- docs/images docs/USER_GUIDE_VISUAL.md | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Help docs changed; will upload to GCS."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No help docs changes."
+          fi
+
+      - name: Upload help docs to GCS
+        if: steps.help_docs.outputs.changed == 'true'
+        run: python -c "import sys; sys.path.insert(0, 'src'); from utility import post_help_docs; post_help_docs()"
+
+      - name: Build with PyInstaller spec
+        run: pyinstaller SharkEye.spec
+
+      - name: List dist contents
+        run: |
+          dir dist
+          dir dist\SharkEye
+    
+      - name: Compile .ISS to .EXE Installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: src/setup.iss
+          options: /o"SharkEyeInstaller"
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          $date = (Get-Date -Format "yyyyMMdd")
+          $zipName = "SharkEye_Windows_$date.zip"
+          Compress-Archive -Path SharkEyeInstaller\* -DestinationPath $zipName
+          Write-Host "Created $zipName"
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_Windows$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
+      - name: Upload ZIP to Google Drive
+        uses: willo32/google-drive-upload-action@v1
+        with:
+          target: ${{ env.ZIP_NAME }}
+          credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+          parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+          name: ${{ env.ZIP_NAME }}
+
+      - name: Upload build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
+
+
