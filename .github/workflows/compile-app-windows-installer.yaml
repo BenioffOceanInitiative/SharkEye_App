@@ -76,11 +76,13 @@ jobs:
         run: |
           dir dist
           dir dist\SharkEye
-    
+          if (-not (Test-Path "dist\SharkEye\SharkEye.exe")) { throw "Missing dist\SharkEye\SharkEye.exe" }
+          if (-not (Test-Path "dist\SharkEye\_internal\python311.dll")) { throw "Missing dist\SharkEye\_internal\python311.dll" }
+
       - name: Compile .ISS to .EXE Installer
         uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
         with:
-          path: src/setup.iss
+          path: SharkEyeInstallScript.iss
           options: /o"SharkEyeInstaller"
 
       - name: Create ZIP archive

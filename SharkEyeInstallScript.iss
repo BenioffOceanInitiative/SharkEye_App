@@ -33,8 +33,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 DefaultGroupName={#MyAppName}
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
-OutputDir=dist\Sharkeye
-OutputBaseFilename=sharkeye_logs
+; CI overrides this with ISCC /O; keep installer output out of dist\SharkEye.
+OutputDir=SharkEyeInstaller
+OutputBaseFilename=SharkEye_Setup
 SolidCompression=yes
 WizardStyle=modern dynamic
 
@@ -45,8 +46,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\SharkEye\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\SharkEye\_internal\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Keep the PyInstaller onedir layout (exe next to _internal\python311.dll).
+; Flattening _internal into {app} causes "Failed to Load Python DLL".
+Source: "dist\SharkEye\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files.
 
 [Icons]
