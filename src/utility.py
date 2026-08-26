@@ -27,19 +27,79 @@ def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_user_data_dir():
+    """Per-user writable data root (experiments, logs, synced docs).
+
+    Used when the frozen app lives in a non-writable location such as
+    ``C:\\Program Files\\SharkEye``.
+    """
+    if sys.platform.startswith("win"):
+        root = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local"
+        )
+        return os.path.join(root, "SharkEye")
+    if sys.platform == "darwin":
+        return os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "SharkEye"
+        )
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    return os.path.join(xdg, "SharkEye")
+
+
+def _path_is_under(path, root):
+    try:
+        path_abs = os.path.abspath(path)
+        root_abs = os.path.abspath(root)
+        return os.path.commonpath([path_abs, root_abs]) == root_abs
+    except ValueError:
+        return False
+
+
+def _frozen_exe_is_in_program_files():
+    if not sys.platform.startswith("win"):
+        return False
+    exe_dir = os.path.dirname(sys.executable)
+    for key in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        root = os.environ.get(key)
+        if root and _path_is_under(exe_dir, root):
+            return True
+    return False
+
+
+def _ensure_writable_dir(path):
+    """Create *path* and verify this process can write into it."""
+    os.makedirs(path, exist_ok=True)
+    probe = os.path.join(path, ".sharkeye_write_test")
+    with open(probe, "w", encoding="utf-8") as handle:
+        handle.write("ok")
+    os.remove(probe)
+
+
 def get_results_dir():
     if getattr(sys, 'frozen', False):
-        # We are running in a bundle
-        base_dir = os.path.dirname(sys.executable)
+        candidates = [os.path.join(os.path.dirname(sys.executable), "results")]
+        # An Inno/MSI install under Program Files is not writable without
+        # elevation; skip it so startup does not PermissionError.
+        if _frozen_exe_is_in_program_files():
+            candidates = []
+        candidates.append(os.path.join(get_user_data_dir(), "results"))
     else:
-        # We are running in a normal Python environment
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        # Move back one directory to reach the project root
         base_dir = os.path.abspath(os.path.join(base_dir, '..'))
-    
-    results_dir = os.path.join(base_dir, "results")
-    os.makedirs(results_dir, exist_ok=True)
-    return results_dir
+        candidates = [os.path.join(base_dir, "results")]
+
+    last_error = None
+    for results_dir in candidates:
+        try:
+            _ensure_writable_dir(results_dir)
+            return results_dir
+        except OSError as exc:
+            last_error = exc
+    raise PermissionError(
+        f"Cannot create a writable results directory. Last error: {last_error}"
+    ) from last_error
 
 
 def resource_path(relative_path):
