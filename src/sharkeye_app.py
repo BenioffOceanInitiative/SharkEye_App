@@ -47,6 +47,7 @@ logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
 from report_problem import ReportProblemDialog
 from frame_line_editor import FrameLineEditorWidget
+from tutorial import maybe_show_tutorial, setup_tutorial_tooltips
 import signal
 import json
 import requests
@@ -2600,6 +2601,12 @@ class MainWindow(QMainWindow):
         self.docs_sync_thread = None
         QTimer.singleShot(0, self.sync_help_docs)
 
+        # First-launch tutorial (skipped after completion, and in --testing / minimal Qt).
+        QTimer.singleShot(0, self._maybe_show_tutorial)
+
+    def _maybe_show_tutorial(self):
+        maybe_show_tutorial(parent=self, settings_obj=self.settings_obj)
+
     def initialize_settings(self):
         self.settings_obj = ensure_app_settings()
 
@@ -2747,6 +2754,7 @@ class MainWindow(QMainWindow):
         self.setup_stack_widget()
         self.setup_home_page()
         self.setup_review_widget()
+        setup_tutorial_tooltips(self)
 
     def sync_help_docs(self):
         """Kick off a background help-docs sync against the Cloud Function on startup."""
@@ -3610,6 +3618,9 @@ class MainWindow(QMainWindow):
             )
             self.edit_mode = False
             self.render_historical_experiments()
+            self._enable_review_frame_controls()
+            if tour := getattr(self, "_guided_tour", None):
+                tour.on_review_ui_ready()
 
     def finish_processing(self):
         release_sam_model()
@@ -3640,6 +3651,8 @@ class MainWindow(QMainWindow):
                   f"video time skipped by acceleration={tot_accel_skip:.1f}s | wall clock={time_str}")
 
         # Close processing window and show completion popup with both time and detections
+        if tour := getattr(self, "_guided_tour", None):
+            tour.before_processing_complete_dialog()
         self.progress_display_dialog.close()
         msg = QMessageBox()
         msg.setWindowTitle("Processing Complete")
@@ -3647,6 +3660,8 @@ class MainWindow(QMainWindow):
         # label it as such. The [batch] log line reports both track and detection counts.
         msg.setText(f"Processing completed!\n\nSharks detected: {total_detections}\nTime taken: {time_str}")
         msg.exec()
+        if tour := getattr(self, "_guided_tour", None):
+            tour.acknowledge_processing_complete()
 
     def go_to_review_from_popup(self, popup):
         popup.accept()
@@ -3966,7 +3981,23 @@ class MainWindow(QMainWindow):
         self.setup_review_dropdown(select_newest=True)
         self.edit_mode = False
         self.render_historical_experiments()
-        self.toggle_banner_buttons(review=True)        
+        self.toggle_banner_buttons(review=True)
+        self._enable_review_frame_controls()
+
+    def _enable_review_frame_controls(self):
+        """Enable overlay-settings and edit-frame controls on the review screen.
+
+        Skipped while a guided tour is active so the tour can keep locking them.
+        """
+        if getattr(self, "_guided_tour", None) is not None:
+            return
+        # Re-apply mode visibility so the gear strip appears even with no clip loaded.
+        self._on_playback_mode_changed(getattr(self, "_playback_mode", "empty"))
+        if hasattr(self, "overlay_settings_button"):
+            self.overlay_settings_button.setEnabled(True)
+        self._update_edit_frame_button()
+        if hasattr(self, "edit_frame_button") and self.edit_frame_button.isVisible():
+            self.edit_frame_button.setEnabled(True) 
 
     def _apply_review_ui_state(self):
         confirming = self.confirming_detections
@@ -4036,8 +4067,9 @@ class MainWindow(QMainWindow):
 
     def confirm_detections(self):
         if not self._save_historical_label_changes(confirm_always=True):
-            return
+            return False
         self._enter_normal_review_mode()
+        return True
 
     def _enter_normal_review_mode(self):
         self.confirming_detections = False
@@ -4053,7 +4085,8 @@ class MainWindow(QMainWindow):
         else:
             self.setup_review_dropdown(select_newest=True)
         self.render_historical_experiments()
-        
+        self._enable_review_frame_controls()
+
     def toggle_display_mode(self):
         """Toggle the segmentation mask overlay.
 
@@ -4298,7 +4331,8 @@ class MainWindow(QMainWindow):
         self.play_pause_button.clicked.connect(self.toggle_playback)
         row.addWidget(self.play_pause_button)
 
-        row.addWidget(QLabel("Speed:"))
+        self.speed_label = QLabel("Speed:")
+        row.addWidget(self.speed_label)
         # A single button that cycles through PLAYBACK_SPEEDS; its label is the active rate.
         self.speed_cycle_button = QPushButton()
         self.speed_cycle_button.setMaximumWidth(56)
@@ -4481,22 +4515,34 @@ class MainWindow(QMainWindow):
         self.frame_player.seek(value)
 
     def _on_playback_mode_changed(self, mode):
-        """Show controls only for the backend that can actually use them.
+        """Show play/scrub controls only for backends that can use them.
 
         "frames" (MP4 clips) supports everything; "movie" (legacy GIFs) supports
         play/pause and speed but not reliable frame seeking; "static"/"empty" (clips
         below playback_min_frames, the mask overlay, no selection) support nothing.
+
+        On the review screen the control strip (and overlay-settings gear) stays
+        visible even with no selection so prefs are always reachable. Guided tour
+        owns enable/disable while active.
         """
         self._playback_mode = mode
-        self.playback_controls.setVisible(mode in ("frames", "movie"))
-        # The box overlay is only drawn in frame-sequence (MP4) mode and only when the
-        # player actually has box data, so gate its controls on both.
-        if hasattr(self, "overlay_settings_button"):
-            overlay_ok = mode == "frames" and self.frame_player.has_boxes()
-            self.overlay_settings_button.setEnabled(overlay_ok)
+        on_review = (
+            hasattr(self, "stack_widget")
+            and hasattr(self, "review_widget")
+            and self.stack_widget.currentWidget() is self.review_widget
+        )
+        playable = mode in ("frames", "movie")
         scrubbable = mode == "frames"
+        # Keep the strip (gear) on review; hide entirely only off-review with no clip.
+        self.playback_controls.setVisible(playable or on_review)
+        self.play_pause_button.setVisible(playable)
+        self.speed_label.setVisible(playable)
+        self.speed_cycle_button.setVisible(playable)
+        self.frame_slider.setVisible(playable)
         self.frame_slider.setEnabled(scrubbable)
         self.frame_counter_label.setVisible(scrubbable)
+        if hasattr(self, "overlay_settings_button") and getattr(self, "_guided_tour", None) is None:
+            self.overlay_settings_button.setEnabled(True)
         if not scrubbable:
             self.frame_slider.blockSignals(True)
             self.frame_slider.setValue(0)
@@ -4572,8 +4618,9 @@ class MainWindow(QMainWindow):
         """Show the draw-line overlay whenever there's a measurable frame to edit.
 
         Two sources: the mask overlay (edits the saved best frame) and clip playback
-        (edits the frame currently shown). A playback frame must be paused before it
-        can be drawn on, so the button is disabled while the clip is playing.
+        (edits the frame currently shown). Outside the guided tour the button stays
+        enabled whenever it is visible so reviewers can open it without waiting for
+        a table re-selection or pause state.
         """
         if not hasattr(self, "edit_frame_button"):
             return
@@ -4584,19 +4631,25 @@ class MainWindow(QMainWindow):
         )
         mask_showing = bool(getattr(self, "mask_active", False))
         playback_frames = getattr(self, "_playback_mode", None) == "frames"
-        visible = (mask_showing or playback_frames) and not editing
+        on_review = (
+            hasattr(self, "stack_widget")
+            and hasattr(self, "review_widget")
+            and self.stack_widget.currentWidget() is self.review_widget
+        )
+        visible = (mask_showing or playback_frames or on_review) and not editing
         self.edit_frame_button.setVisible(visible)
         if not visible:
             return
-        if playback_frames and not mask_showing:
-            paused = not self.frame_player.is_playing()
-            self.edit_frame_button.setEnabled(paused)
+        # Guided tour owns enable/disable for its steps — don't override.
+        if getattr(self, "_guided_tour", None) is not None:
+            self.edit_frame_button.raise_()
+            return
+        self.edit_frame_button.setEnabled(True)
+        if playback_frames and not mask_showing and self.frame_player.is_playing():
             self.edit_frame_button.setToolTip(
-                "Draw a measurement line on this frame" if paused
-                else "Pause the clip to draw on a frame"
+                "Draw a measurement line on this frame (clip will pause)"
             )
         else:
-            self.edit_frame_button.setEnabled(True)
             self.edit_frame_button.setToolTip("Draw a measurement line on this frame")
         self.edit_frame_button.raise_()
 
@@ -4653,8 +4706,11 @@ class MainWindow(QMainWindow):
         """Replace the active frame view with the in-place line editor.
 
         From the mask overlay this edits the saved best frame; during clip playback it
-        edits the frame currently paused in the player (captured full-res from memory).
+        edits the frame currently shown in the player (captured full-res from memory).
         """
+        if self.frame_player.is_playing():
+            self.frame_player.pause()
+            self._sync_play_pause_button()
         self.frame_editor._update_drone_settings()
         # Seed the editor's drone + altitude so feet resolve without the user re-picking.
         # Current run just processed: use exactly what was selected on the home page (the
@@ -4980,8 +5036,10 @@ class MainWindow(QMainWindow):
         self.frame_player.set_box_color(self._review_box_color())
         self.frame_player.set_boxes_visible(self.show_boxes if has else False)
         self.frame_player.set_confidence_visible(self.show_confidence if has else False)
-        if hasattr(self, "overlay_settings_button"):
-            self.overlay_settings_button.setEnabled(has)
+        # Overlay settings stay enabled even when this track has no boxes — do not
+        # gate on selection/box presence. Guided tour owns enable state when active.
+        if hasattr(self, "overlay_settings_button") and getattr(self, "_guided_tour", None) is None:
+            self.overlay_settings_button.setEnabled(True)
 
     def render_historical_experiments(self):
         # Render Historical Experiments and add to List

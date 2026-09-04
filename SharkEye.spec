@@ -92,6 +92,13 @@ datas += [
     (str(HERE / "docs"), "docs"),
     (str(_version_path), "."),                        # build identifier: os/commit/committed_at
 ]
+_example_footage = HERE / "sample_data" / "example_footage.mp4"
+if _example_footage.is_file():
+    datas += [(str(_example_footage), "sample_data")]
+# Legacy path kept for older layouts
+_example_footage_data = HERE / "data" / "example_footage.mp4"
+if _example_footage_data.is_file():
+    datas += [(str(_example_footage_data), "data")]
 
 # ---------- native binaries (DLLs/SOs) ----------
 binaries  = []
