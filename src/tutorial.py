@@ -28,7 +28,7 @@ from utility import resource_path
 
 TUTORIAL_SETTING_KEY = "tutorial_completed"
 # Testing: show welcome + guided tour on every app launch.
-FORCE_TUTORIAL_FOR_TESTING = True
+FORCE_TUTORIAL_FOR_TESTING = False
 
 TUTORIAL_WIDTH = 560
 TUTORIAL_HEIGHT = 560
@@ -39,6 +39,7 @@ TUTORIAL_IMAGE_BOTTOM_MARGIN = 16
 BANNER_HEIGHT = 60
 
 EXAMPLE_FOOTAGE_FILENAME = "example_footage.mp4"
+SAMPLE_RESULTS_DIRNAME = "sample_results"
 GUIDED_DRONE = "Air 2S"
 GUIDED_ALTITUDE = "40"
 GUIDED_LOCATION = "Goleta"
@@ -52,7 +53,13 @@ DETECTION_COLUMN_TIPS: list[tuple[int, str]] = [
     (6, "Label: the type of object the model detected. You can correct the object type before confirming if needed."),
 ]
 
-HIGHLIGHT_STYLE = "border: 2px solid #ff6020; border-radius: 4px;"
+HIGHLIGHT_STYLE = (
+    "QFrame#tutorialHighlight {"
+    "  border: 2px solid #ff6020;"
+    "  border-radius: 4px;"
+    "  background: transparent;"
+    "}"
+)
 
 # Secondary-axis alignment of the bubble along the host edge chosen by ``position``.
 # top/bottom → left|center|right; left/right → top|center|bottom.
@@ -217,6 +224,49 @@ def example_footage_path() -> str | None:
         )
     )
     return repo_sample if os.path.isfile(repo_sample) else None
+
+
+def sample_results_path() -> str | None:
+    """Bundled tutorial fallback experiment folder (frames/masks/CSV/clips)."""
+    relative = os.path.join("sample_data", SAMPLE_RESULTS_DIRNAME)
+    path = resource_path(relative)
+    if os.path.isdir(path) and os.path.isdir(os.path.join(path, "detection_results")):
+        return path
+    repo_sample = os.path.abspath(
+        os.path.join(
+            os.path.dirname(__file__),
+            os.pardir,
+            "sample_data",
+            SAMPLE_RESULTS_DIRNAME,
+        )
+    )
+    if os.path.isdir(repo_sample) and os.path.isdir(
+        os.path.join(repo_sample, "detection_results")
+    ):
+        return repo_sample
+    return None
+
+
+def count_tracks_in_experiment_dir(experiment_dir: str) -> int:
+    """Count detection rows across CSVs in ``detection_results/``."""
+    det_dir = os.path.join(experiment_dir, "detection_results")
+    if not os.path.isdir(det_dir):
+        return 0
+    total = 0
+    try:
+        import pandas as pd
+    except ImportError:
+        return 0
+    for name in os.listdir(det_dir):
+        if not name.lower().endswith(".csv"):
+            continue
+        csv_path = os.path.join(det_dir, name)
+        try:
+            df = pd.read_csv(csv_path)
+            total += len(df)
+        except Exception:
+            continue
+    return total
 
 
 def _has_example_footage(window) -> bool:
@@ -425,6 +475,14 @@ class WelcomeDialog(QDialog):
         event.ignore()
 
 
+class TutorialCompletePage(TutorialPage):
+    title = "Tutorial Complete"
+    body = (
+        "You're all set! You can revisit this walkthrough any time from the Help menu."
+    )
+    image_path = ""
+
+
 class TutorialCompleteDialog(QDialog):
     """Shown when the user finishes the guided walkthrough."""
 
@@ -446,16 +504,10 @@ class TutorialCompleteDialog(QDialog):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(_make_logo_banner())
-
-        body = QLabel(
-            "You're all set! You can revisit this walkthrough any time from the Help menu."
-        )
-        body.setWordWrap(True)
-        body.setContentsMargins(28, 20, 28, 20)
-        root.addWidget(body, stretch=1)
+        root.addWidget(TutorialCompletePage(), stretch=1)
 
         footer = QHBoxLayout()
-        footer.setContentsMargins(28, 0, 28, 20)
+        footer.setContentsMargins(28, 12, 28, 20)
         footer.addStretch(1)
         done = QPushButton("Done")
         done.setDefault(True)
@@ -701,8 +753,8 @@ class TutorialTooltip(QObject):
         self.align = _normalize_align(align, position)
         self.highlight = highlight
         self._margin = margin
-        self._saved_style = ""
         self._highlighted = False
+        self._highlight_frame: QFrame | None = None
         self._surface: QWidget | None = None
         self._overlay: QWidget | None = None
         self._bubble: TutorialTooltipBubble | None = None
@@ -770,7 +822,6 @@ class TutorialTooltip(QObject):
         self._anchor_rect = anchor_rect if anchor_provider is None else None
         text = message if message is not None else self._default_message
         show_next = self.press_next if press_next is None else press_next
-        self.set_highlight(self.highlight)
         if anchor_provider is not None:
             self._install_table_tracking()
         if not self._ensure_bubble():
@@ -788,6 +839,7 @@ class TutorialTooltip(QObject):
         window = self.host.window()
         if window is not None:
             _ensure_tooltip_parent_layers_enabled(window)
+        self.set_highlight(self.highlight)
         self._bubble.prepare_bubble(text, press_next=show_next, on_next=on_next)
         if not self._reposition():
             if window is not None:
@@ -831,8 +883,7 @@ class TutorialTooltip(QObject):
         self._anchor_rect = None
         self._anchor_provider = None
         self._clear_table_tracking()
-        if _qt_is_valid(self.host):
-            self.set_highlight(False)
+        self.set_highlight(False)
         if self._bubble is not None:
             if _qt_is_valid(self._bubble):
                 self._bubble.hide()
@@ -845,16 +896,65 @@ class TutorialTooltip(QObject):
             _maybe_hide_tutorial_overlay(window)
 
     def set_highlight(self, enabled: bool) -> None:
-        if not _qt_is_valid(self.host):
+        """Draw an orange ring on the overlay (host or anchor), never greying icons."""
+        if not enabled:
+            self._clear_highlight_frame()
             self._highlighted = False
             return
-        if enabled and not self._highlighted:
-            self._saved_style = self.host.styleSheet()
-            self.host.setStyleSheet(self.host.styleSheet() + HIGHLIGHT_STYLE)
-            self._highlighted = True
-        elif not enabled and self._highlighted:
-            self.host.setStyleSheet(self._saved_style)
+        if not _qt_is_valid(self.host):
+            self._clear_highlight_frame()
             self._highlighted = False
+            return
+        if self._overlay is None or not _qt_is_valid(self._overlay):
+            self._highlighted = False
+            return
+        self._ensure_highlight_frame()
+        self._sync_highlight_geometry()
+        self._highlighted = True
+
+    def _ensure_highlight_frame(self) -> None:
+        if self._overlay is None or not _qt_is_valid(self._overlay):
+            return
+        if self._highlight_frame is None or not _qt_is_valid(self._highlight_frame):
+            frame = QFrame(self._overlay)
+            frame.setObjectName("tutorialHighlight")
+            frame.setStyleSheet(HIGHLIGHT_STYLE)
+            frame.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            frame.setAttribute(Qt.WidgetAttribute.WA_AlwaysStackOnTop, True)
+            self._highlight_frame = frame
+        elif self._highlight_frame.parent() is not self._overlay:
+            self._highlight_frame.setParent(self._overlay)
+
+    def _clear_highlight_frame(self) -> None:
+        if self._highlight_frame is not None and _qt_is_valid(self._highlight_frame):
+            self._highlight_frame.hide()
+            self._highlight_frame.deleteLater()
+        self._highlight_frame = None
+
+    def _highlight_local_rect(self) -> QRect | None:
+        if self._anchor_provider is not None:
+            return self._anchor_provider()
+        if self._anchor_rect is not None:
+            return QRect(self._anchor_rect)
+        if not _qt_is_valid(self.host):
+            return None
+        return QRect(0, 0, max(self.host.width(), 1), max(self.host.height(), 1))
+
+    def _sync_highlight_geometry(self) -> None:
+        if self._highlight_frame is None or not _qt_is_valid(self._highlight_frame):
+            return
+        local = self._highlight_local_rect()
+        if local is None or local.isNull():
+            self._highlight_frame.hide()
+            return
+        top_left = self._host_point_on_surface(local.topLeft())
+        geo = QRect(top_left, local.size())
+        # Slightly pad so the ring sits outside the control edge.
+        self._highlight_frame.setGeometry(geo.adjusted(-3, -3, 3, 3))
+        self._highlight_frame.show()
+        self._highlight_frame.raise_()
+        if self._bubble is not None and _qt_is_valid(self._bubble):
+            self._bubble.raise_()
 
     def _retry_pending_show(self) -> None:
         pending = self._pending_show
@@ -981,6 +1081,8 @@ class TutorialTooltip(QObject):
             self._bubble.raise_()
             if self._next_btn_active():
                 self._bubble.ensure_interactive()
+            if self._highlighted:
+                self._sync_highlight_geometry()
             return True
 
         edge = _edge_anchor_point(pos, base, host_w, host_h)
@@ -1034,6 +1136,8 @@ class TutorialTooltip(QObject):
         self._bubble.raise_()
         if self._next_btn_active():
             self._bubble.ensure_interactive()
+        if self._highlighted:
+            self._sync_highlight_geometry()
         return True
 
     def _next_btn_active(self) -> bool:
@@ -1244,16 +1348,35 @@ def _table_column_top_rect(table, col: int) -> QRect | None:
     if col < 0 or col >= table.columnCount() or table.isColumnHidden(col):
         return None
     header = table.horizontalHeader()
+    if header is None:
+        return None
     x_in_viewport = header.sectionViewportPosition(col)
     w = max(header.sectionSize(col), table.columnWidth(col), 1)
     if w <= 0:
         return None
-    # If the column is scrolled off-screen, still produce a usable top-edge anchor.
+    # If the column is scrolled off-screen, still produce a usable header anchor.
     if x_in_viewport + w <= 0:
         x_in_viewport = 0
-    top_left = table.viewport().mapTo(table, QPoint(max(x_in_viewport, 0), 0))
+    # Map the header section into table coordinates so only that header is highlighted.
+    top_left = header.mapTo(table, QPoint(max(x_in_viewport, 0), 0))
     anchor_h = max(header.height() if header.isVisible() else 0, 1)
-    return QRect(top_left.x(), 0, w, anchor_h)
+    return QRect(top_left.x(), top_left.y(), w, anchor_h)
+
+
+def _processing_status_anchor(window) -> QRect | None:
+    """Union of status label, timer, and progress bar (in status-label coords)."""
+    status = getattr(window, "progress_status_label", None)
+    timer = getattr(window, "timer_label", None)
+    bar = getattr(window, "progress_bar", None)
+    parts = [w for w in (status, timer, bar) if w is not None and _qt_is_valid(w) and w.isVisible()]
+    if not parts or status is None or not _qt_is_valid(status):
+        return None
+    united: QRect | None = None
+    for widget in parts:
+        top_left = status.mapFromGlobal(widget.mapToGlobal(QPoint(0, 0)))
+        part = QRect(top_left, widget.size())
+        united = part if united is None else united.united(part)
+    return united
 
 
 def _flight_fields_anchor_rect(window) -> QRect | None:
@@ -1280,6 +1403,35 @@ def _frame_center_anchor(frame_player) -> QRect | None:
 # Guided tour controller
 # ---------------------------------------------------------------------------
 
+# Input events swallowed for widgets locked by the tour (widgets stay enabled so
+# they keep the native look — no greying / stylesheet fallback).
+_LOCKED_INPUT_EVENTS = frozenset(
+    {
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseButtonRelease,
+        QEvent.Type.MouseButtonDblClick,
+        QEvent.Type.Wheel,
+        QEvent.Type.KeyPress,
+        QEvent.Type.KeyRelease,
+        QEvent.Type.ShortcutOverride,
+        QEvent.Type.ContextMenu,
+        QEvent.Type.TouchBegin,
+        QEvent.Type.TouchUpdate,
+        QEvent.Type.TouchEnd,
+    }
+)
+
+
+class _TutorialInputGuard(QObject):
+    """App-level filter: block interaction with tour-locked widgets."""
+
+    def __init__(self, tour: "GuidedTour"):
+        super().__init__(tour)
+        self._tour = tour
+
+    def eventFilter(self, obj, event) -> bool:
+        return self._tour._filter_locked_input(obj, event)
+
 
 class GuidedTour(QObject):
     """Full walkthrough: home → processing → review."""
@@ -1300,30 +1452,107 @@ class GuidedTour(QObject):
     _STEP_GEAR = 13
     _STEP_DETECTION_COL_BASE = 14
     _STEP_CONFIRM = _STEP_DETECTION_COL_BASE + len(DETECTION_COLUMN_TIPS)
+    _STEP_HOME = _STEP_CONFIRM + 1
 
     def __init__(self, main_window):
         super().__init__(main_window)
         self.window = main_window
         self._step_index = 0
-        self._saved_enabled: list[tuple[QWidget, bool]] = []
-        self._review_widgets_captured = False
+        self._allowed_ids: set[int] = set()
+        self._input_lock_active = False
+        self._input_guard: _TutorialInputGuard | None = None
         self._select_hooked = False
         self._process_hooked = False
         self._mask_hooked = False
         self._mask_saw_on = False
         self._confirm_hooked = False
+        self._home_hooked = False
         self._processing_dialog_acknowledged = False
         self._review_ui_ready = False
 
     def start(self) -> None:
         self.window.stack_widget.setCurrentWidget(self.window.home_widget)
-        self._capture_widget_states()
+        self._install_input_guard()
         try:
             self.window.stack_widget.currentChanged.disconnect(self._on_stack_changed)
         except TypeError:
             pass
         self.window.stack_widget.currentChanged.connect(self._on_stack_changed)
         QTimer.singleShot(150, self._show_current_step)
+
+    def _install_input_guard(self) -> None:
+        if self._input_guard is not None:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        self._input_guard = _TutorialInputGuard(self)
+        self._input_lock_active = True
+        self._allowed_ids = set()
+        app.installEventFilter(self._input_guard)
+
+    def _remove_input_guard(self) -> None:
+        self._input_lock_active = False
+        self._allowed_ids = set()
+        app = QApplication.instance()
+        if app is not None and self._input_guard is not None:
+            app.removeEventFilter(self._input_guard)
+        self._input_guard = None
+
+    def _is_tutorial_chrome(self, widget: QWidget) -> bool:
+        """Tooltip bubbles / overlay must always receive input."""
+        current: QWidget | None = widget
+        while current is not None:
+            if isinstance(current, TutorialTooltipBubble):
+                return True
+            if current.objectName() in ("tutorialOverlay", "tutorialHighlight"):
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _is_cancel_processing_button(self, widget: QWidget) -> bool:
+        cancel = getattr(self.window, "cancel_processsing_button", None)
+        if cancel is None or not _qt_is_valid(cancel):
+            return False
+        current: QWidget | None = widget
+        while current is not None:
+            if current is cancel:
+                return True
+            if current.isWindow():
+                break
+            current = current.parentWidget()
+        return False
+
+    def _is_interaction_allowed(self, widget: QWidget) -> bool:
+        if not self._input_lock_active:
+            return True
+        # Never allow Cancel Processing during the tour.
+        if self._is_cancel_processing_button(widget):
+            return False
+        current: QWidget | None = widget
+        while current is not None:
+            if id(current) in self._allowed_ids:
+                return True
+            # Processing Complete (and similar) must stay clickable during the tour.
+            if isinstance(current, QMessageBox):
+                return True
+            if current is self.window:
+                break
+            if current.isWindow() and current is not self.window:
+                break
+            current = current.parentWidget()
+        return False
+
+    def _filter_locked_input(self, obj, event) -> bool:
+        if event.type() not in _LOCKED_INPUT_EVENTS:
+            return False
+        if not isinstance(obj, QWidget):
+            return False
+        if self._is_tutorial_chrome(obj):
+            return False
+        if self._is_interaction_allowed(obj):
+            return False
+        return True
 
     def _on_stack_changed(self, _index: int = 0) -> None:
         QTimer.singleShot(0, self._raise_active_overlays)
@@ -1367,159 +1596,18 @@ class GuidedTour(QObject):
             return
         if self._step_index != self._STEP_PROCESSING:
             return
-        self._enter_review_phase()
         self.window.raise_()
         self.window.activateWindow()
         self._advance()
 
-    def _home_widgets(self) -> list[QWidget]:
-        return [
-            self.window.select_videos_button,
-            self.window.remove_all_button,
-            self.window.video_list,
-            self.window.drone_select,
-            self.window.altitude_input,
-            self.window.flight_location_input,
-            self.window.process_button,
-        ]
-
-    def _banner_widgets(self) -> list[QWidget]:
-        widgets = []
-        for attr in (
-            "banner_left_button",
-            "banner_right_button",
-            "banner_help_button",
-            "banner_report_button",
-        ):
-            widget = getattr(self.window, attr, None)
-            if widget is not None:
-                widgets.append(widget)
-        return widgets
-
-    def _review_widgets(self) -> list[QWidget]:
-        mw = self.window
-        candidates = [
-            mw.frame_stack,
-            mw.frame_player,
-            mw.toggle_display_switch,
-            mw.mask_icon,
-            mw.box_icon,
-            mw.edit_frame_button,
-            mw.playback_controls,
-            mw.play_pause_button,
-            mw.speed_cycle_button,
-            mw.frame_slider,
-            mw.overlay_settings_button,
-            mw.frame_counter_label,
-            mw.historical_items,
-            mw.detection_list,
-            mw.confirm_detections_button,
-            mw.save_changes_button,
-            mw.edit_tracks_button,
-            mw.review_dropdown,
-            mw.experiment_note_button,
-        ]
-        return [w for w in candidates if w is not None]
-
-    def _all_lock_widgets(self) -> list[QWidget]:
-        return self._home_widgets() + self._banner_widgets() + self._review_widgets()
-
-    def _widget_lock_exempt(self, widget: QWidget) -> bool:
-        if widget is self.window:
-            return True
-        if widget is getattr(self.window, "central_widget", None):
-            return True
-        overlay = getattr(self.window, "_tutorial_overlay", None)
-        return widget is overlay
-
-    def _capture_widget_states(self) -> None:
-        if self._saved_enabled:
-            return
-        for widget in self._all_lock_widgets():
-            if _qt_is_valid(widget) and not self._widget_lock_exempt(widget):
-                self._saved_enabled.append((widget, widget.isEnabled()))
-
-    def _prune_saved_enabled(self) -> None:
-        self._saved_enabled = [
-            (w, e) for w, e in self._saved_enabled if _qt_is_valid(w)
-        ]
-
-    def _enter_review_phase(self) -> None:
-        if self._review_widgets_captured:
-            return
-        self._prune_saved_enabled()
-        saved_ids = {id(w) for w, _ in self._saved_enabled}
-        for widget in self._review_widgets():
-            if not _qt_is_valid(widget) or id(widget) in saved_ids:
-                continue
-            if not self._widget_lock_exempt(widget):
-                self._saved_enabled.append((widget, True))
-        self._review_widgets_captured = True
-
-    def _read_only_home_field_ids(self) -> set[int]:
-        return {
-            id(widget)
-            for widget in (
-                self.window.drone_select,
-                self.window.altitude_input,
-                self.window.flight_location_input,
-            )
-            if _qt_is_valid(widget)
-        }
-
     def _set_allowed_widgets(self, *allowed: QWidget) -> None:
-        self._prune_saved_enabled()
-        allowed_set = {w for w in allowed if _qt_is_valid(w)}
-        read_only = self._read_only_home_field_ids()
-        for widget, _ in self._saved_enabled:
-            if not _qt_is_valid(widget):
-                continue
-            if self._widget_lock_exempt(widget):
-                widget.setEnabled(True)
-                continue
-            if id(widget) in read_only:
-                widget.setEnabled(False)
-            else:
-                widget.setEnabled(widget in allowed_set)
-        self._set_video_row_delete_buttons_enabled(False)
-        self._set_table_delete_buttons_enabled(False)
+        """Allow input only on the given widgets; all others stay visually enabled."""
+        self._allowed_ids = {id(w) for w in allowed if _qt_is_valid(w)}
         _ensure_tooltip_parent_layers_enabled(self.window)
 
     def _allow_tooltip_target(self, target: QWidget) -> None:
-        chain: list[QWidget] = []
-        current: QWidget | None = target
-        while current is not None:
-            chain.append(current)
-            if current.isWindow():
-                break
-            current = current.parentWidget()
-        for widget in chain:
-            widget.setEnabled(True)
-        self._set_allowed_widgets(*chain)
-
-    def _set_video_row_delete_buttons_enabled(self, enabled: bool) -> None:
-        table = self.window.video_list
-        for row in range(table.rowCount()):
-            button = table.cellWidget(row, 1)
-            if button is not None:
-                button.setEnabled(enabled)
-
-    def _set_table_delete_buttons_enabled(self, enabled: bool) -> None:
-        for table in (self.window.detection_list, self.window.historical_items):
-            for row in range(table.rowCount()):
-                button = table.cellWidget(row, 7)
-                if button is not None:
-                    button.setEnabled(enabled)
-
-    def _restore_widgets(self) -> None:
-        self._prune_saved_enabled()
-        for widget, was_enabled in self._saved_enabled:
-            if _qt_is_valid(widget):
-                widget.setEnabled(was_enabled)
-        self._saved_enabled = []
-        self._review_widgets_captured = False
-        self._set_video_row_delete_buttons_enabled(True)
-        self._set_table_delete_buttons_enabled(True)
+        # Only the step target (and its descendants via ancestry check) may be clicked.
+        self._set_allowed_widgets(target)
 
     def _apply_step_widget_lock(self, target: QWidget) -> None:
         tooltip = getattr(target, "tutorial_tooltip", None)
@@ -1661,6 +1749,7 @@ class GuidedTour(QObject):
                 )
             )
         steps.append(self._step_confirm)
+        steps.append(self._step_return_home)
         if self._step_index >= len(steps):
             self._finish()
             return
@@ -1710,30 +1799,32 @@ class GuidedTour(QObject):
         if self._step_index != self._STEP_PROCESSING:
             return
         dlg = getattr(self.window, "progress_display_dialog", None)
-        progress_bar = getattr(self.window, "progress_bar", None)
-        if dlg is None or not dlg.isVisible() or progress_bar is None:
+        status = getattr(self.window, "progress_status_label", None)
+        if dlg is None or not dlg.isVisible() or status is None:
             QTimer.singleShot(200, self._try_show_processing_tooltip)
             return
         cancel_btn = getattr(self.window, "cancel_processsing_button", None)
         if cancel_btn is not None and _qt_is_valid(cancel_btn):
             cancel_btn.setEnabled(False)
-        if not hasattr(progress_bar, "tutorial_tooltip"):
+        if not hasattr(status, "tutorial_tooltip"):
             attach_tutorial_tooltip(
-                progress_bar,
+                status,
                 "Processing logs show live status, progress, and elapsed time while inference runs.",
                 press_next=False,
                 enable_parent=False,
                 position="top",
-                highlight=False,
+                highlight=True,
                 margin=4,
             )
-            register_tutorial_tooltip_host(self.window, progress_bar)
+            register_tutorial_tooltip_host(self.window, status)
         self._show_tooltip(
-            progress_bar,
+            status,
             message=(
                 "Processing logs show live status, progress, and elapsed time "
                 "while inference runs."
             ),
+            highlight=True,
+            anchor_provider=lambda: _processing_status_anchor(self.window),
         )
 
     def _step_frame_intro(self) -> None:
@@ -1752,6 +1843,7 @@ class GuidedTour(QObject):
         self._hook_mask_toggle()
         self._show_review_tooltip(
             self.window.toggle_display_switch,
+            highlight=True,
             expected_step=self._STEP_MASK_ON,
         )
 
@@ -1780,6 +1872,7 @@ class GuidedTour(QObject):
         self._show_review_tooltip(
             self.window.toggle_display_switch,
             message="Click the mask toggle again to turn the overlay off and continue.",
+            highlight=True,
             expected_step=self._STEP_MASK_OFF,
         )
 
@@ -1793,6 +1886,7 @@ class GuidedTour(QObject):
         switch.setEnabled(True)
         switch.setVisible(True)
         mw.update_frame_elements()
+        # Raise only the toggle — leave mask/box icons unhighlighted underneath.
         switch.raise_()
 
     def _step_gear(self) -> None:
@@ -1857,7 +1951,7 @@ class GuidedTour(QObject):
             table,
             message=message,
             press_next=True,
-            highlight=False,
+            highlight=True,
             anchor_provider=lambda c=col, t=table: _table_column_top_rect(t, c),
             margin=DETECTION_TABLE_TOOLTIP_MARGIN,
             expected_step=expected_step,
@@ -1868,6 +1962,26 @@ class GuidedTour(QObject):
         btn.setVisible(True)
         self._show_review_tooltip(btn, expected_step=self._STEP_CONFIRM)
         self._hook_confirm_detections()
+
+    def _step_return_home(self) -> None:
+        btn = self.window.banner_left_button
+        # Confirm clears confirming_detections; ensure Home is visible for this tip.
+        self.window.confirming_detections = False
+        if hasattr(self.window, "_apply_review_ui_state"):
+            self.window._apply_review_ui_state()
+        btn.setVisible(True)
+        tip = getattr(btn, "tutorial_tooltip", None)
+        if tip is not None:
+            # Opening banner tip is Next-only; Home must be clickable.
+            tip.enable_parent = True
+        self._show_review_tooltip(
+            btn,
+            message="Press Home to return to the main screen and start your own experiments.",
+            press_next=False,
+            highlight=True,
+            expected_step=self._STEP_HOME,
+        )
+        self._hook_return_home()
 
     def _hook_select_videos(self) -> None:
         if self._select_hooked:
@@ -1945,8 +2059,51 @@ class GuidedTour(QObject):
         if result is False:
             self._hook_confirm_detections()
             return
+        self._advance()
+
+    def _hook_return_home(self) -> None:
+        if self._home_hooked:
+            return
+        self._home_hooked = True
+        btn = self.window.banner_left_button
+        try:
+            btn.clicked.disconnect(self.window.go_to_home)
+        except TypeError:
+            pass
+        btn.clicked.connect(self._on_guided_return_home)
+
+    def _on_guided_return_home(self) -> None:
+        self._unhook_return_home()
+        was_on_review = (
+            self.window.stack_widget.currentWidget() is self.window.review_widget
+        )
+        self.window.go_to_home()
+        # User cancelled an unsaved-changes prompt — stay on this tip.
+        if (
+            was_on_review
+            and self.window.stack_widget.currentWidget() is self.window.review_widget
+        ):
+            self._hook_return_home()
+            return
         self._finish()
         show_tutorial_complete_dialog(parent=self.window)
+
+    def _unhook_return_home(self) -> None:
+        if not self._home_hooked:
+            return
+        btn = self.window.banner_left_button
+        try:
+            btn.clicked.disconnect(self._on_guided_return_home)
+        except TypeError:
+            pass
+        # Re-wire the normal Home action if still on the review banner.
+        try:
+            btn.clicked.disconnect(self.window.go_to_home)
+        except TypeError:
+            pass
+        if self.window.stack_widget.currentWidget() is self.window.review_widget:
+            btn.clicked.connect(self.window.go_to_home)
+        self._home_hooked = False
 
     def _unhook_confirm_detections(self) -> None:
         if not self._confirm_hooked:
@@ -1994,6 +2151,7 @@ class GuidedTour(QObject):
     def _advance(self) -> None:
         self._unhook_select_videos()
         self._unhook_confirm_detections()
+        self._unhook_return_home()
         self._hide_all_tooltips()
         self._step_index += 1
         self._show_current_step()
@@ -2007,11 +2165,12 @@ class GuidedTour(QObject):
         self._unhook_process_videos()
         self._unhook_mask_toggle()
         self._unhook_confirm_detections()
+        self._unhook_return_home()
         self._hide_all_tooltips()
-        self._restore_widgets()
+        self._remove_input_guard()
         mark_tutorial_completed(self.window.settings_obj)
         self.window._guided_tour = None
-        self._step_index = self._STEP_CONFIRM + 1
+        self._step_index = self._STEP_HOME + 1
 
 
 def start_guided_tour(main_window) -> GuidedTour:

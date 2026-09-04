@@ -47,7 +47,12 @@ logger = get_logger("sharkeye.app")
 from help_docs_window import HelpDocsWindow
 from report_problem import ReportProblemDialog
 from frame_line_editor import FrameLineEditorWidget
-from tutorial import maybe_show_tutorial, setup_tutorial_tooltips
+from tutorial import (
+    count_tracks_in_experiment_dir,
+    maybe_show_tutorial,
+    sample_results_path,
+    setup_tutorial_tooltips,
+)
 import signal
 import json
 import requests
@@ -2955,9 +2960,7 @@ class MainWindow(QMainWindow):
             self.banner_left_button.setText(" Review Previous Experiments")
             self.banner_left_button.setIcon(banner_icon(resource_path("assets/images/clock-history.svg")))
             self.banner_left_button.setFlat(True)
-            self.banner_left_button.setStyleSheet(
-                BANNER_BUTTON
-            )
+            self.banner_left_button.setStyleSheet(BANNER_BUTTON)
             self.banner_left_button.setToolTip("Previous Experiments")
 
             self.banner_left_button.clicked.connect(lambda: setattr(self, "reviewing_history", True))
@@ -3601,6 +3604,11 @@ class MainWindow(QMainWindow):
             # writing to disk before building the review page (which loads the GIFs).
             self.set_progress_status("Finalizing")
             self.postproc_pool.waitForDone()
+            # Tutorial with no detections: install bundled sample_results so the
+            # walkthrough still has a reviewable track (and the complete popup
+            # reports that count).
+            if getattr(self, "_guided_tour", None) is not None:
+                self._seed_tutorial_sample_results_if_needed()
             # Sort tracks before showing review widget
             self.sort_tracks()
             # Update detection list
@@ -3622,6 +3630,105 @@ class MainWindow(QMainWindow):
             if tour := getattr(self, "_guided_tour", None):
                 tour.on_review_ui_ready()
 
+    def _tutorial_live_result_count(self) -> int:
+        """Tracks found this run (in-memory, else CSV rows under current_output_dir)."""
+        in_memory = sum(len(tracks) for tracks in getattr(self, "tracks", {}).values())
+        if in_memory > 0:
+            return in_memory
+        out = getattr(self, "current_output_dir", None)
+        if out and os.path.isdir(out):
+            return count_tracks_in_experiment_dir(out)
+        return 0
+
+    def _seed_tutorial_sample_results_if_needed(self) -> bool:
+        """Copy ``sample_data/sample_results`` into the run folder when the tour got 0 hits.
+
+        Returns True when sample results were installed.
+        """
+        if self._tutorial_live_result_count() > 0:
+            return False
+        src = sample_results_path()
+        if not src:
+            logger.warning(
+                "Tutorial produced 0 detections and sample_data/sample_results is missing"
+            )
+            return False
+        dest = getattr(self, "current_output_dir", None)
+        if not dest:
+            return False
+        try:
+            os.makedirs(dest, exist_ok=True)
+            for name in os.listdir(src):
+                s_path = os.path.join(src, name)
+                d_path = os.path.join(dest, name)
+                if os.path.isdir(s_path):
+                    if os.path.isdir(d_path):
+                        shutil.rmtree(d_path)
+                    shutil.copytree(s_path, d_path)
+                else:
+                    shutil.copy2(s_path, d_path)
+            self._load_tracks_from_experiment_dir(dest)
+            seeded = self._tutorial_live_result_count()
+            logger.info(
+                f"Tutorial seeded {seeded} track(s) from sample_results into {dest}"
+            )
+            return seeded > 0
+        except Exception as e:
+            logger.error(f"Failed to seed tutorial sample results: {e}")
+            return False
+
+    def _load_tracks_from_experiment_dir(self, experiment_dir):
+        """Rebuild ``self.tracks`` from detection_results CSVs (enough for sort/count)."""
+        det_dir = Path(experiment_dir) / "detection_results"
+        loaded = {}
+        if not det_dir.is_dir():
+            self.tracks = {}
+            return
+        for csv_path in sorted(det_dir.glob("*.csv")):
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception as e:
+                logger.error(f"Error reading sample CSV {csv_path}: {e}")
+                continue
+            video_tracks = {}
+            video_key = csv_path.name[:-4] if csv_path.name.lower().endswith(".csv") else csv_path.stem
+            for _, row in df.iterrows():
+                try:
+                    tid = int(row.get("Track Id"))
+                except (TypeError, ValueError):
+                    continue
+                video_name = str(row.get("video_name", video_key) or video_key)
+                full_video = video_name
+                for queued in getattr(self, "video_queue", []) or []:
+                    if Path(queued).name == Path(video_name).name:
+                        full_video = queued
+                        break
+                video_key = Path(full_video).name
+                try:
+                    longest_conf = float(row.get("Highest Confidence", 0) or 0)
+                except (TypeError, ValueError):
+                    longest_conf = 0.0
+                length_raw = row.get("Length (ft)", "")
+                try:
+                    longest_length = (
+                        float(length_raw) if not _csv_value_is_empty(length_raw) else 0.0
+                    )
+                except (TypeError, ValueError):
+                    longest_length = 0.0
+                video_tracks[tid] = {
+                    "id": tid,
+                    "unique_id": tid,
+                    "timestamps": [0],
+                    "video_name": full_video,
+                    "longest_timestamp": 0,
+                    "longest_conf": longest_conf,
+                    "longest_length": longest_length,
+                    "label": row.get("Label", "Shark") or "Shark",
+                }
+            if video_tracks:
+                loaded[video_key] = video_tracks
+        self.tracks = loaded
+
     def finish_processing(self):
         release_sam_model()
         self.is_processing = False
@@ -3631,8 +3738,10 @@ class MainWindow(QMainWindow):
         # Calculate total time using the standalone function
         time_str = format_time(self.elapsed_time)
 
-        # Calculate total detections
+        # Calculate total detections (includes tutorial sample_results seed when used)
         total_detections = sum(len(tracks) for tracks in self.tracks.values())
+        if total_detections == 0 and getattr(self, "current_output_dir", None):
+            total_detections = count_tracks_in_experiment_dir(self.current_output_dir)
 
         # Batch analysis summary: critical-path phase totals across all videos vs.
         # the actual wall clock (the gap shows how much the async pipeline hid).
