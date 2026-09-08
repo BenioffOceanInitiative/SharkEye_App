@@ -416,6 +416,7 @@ class WelcomeDialog(QDialog):
         super().__init__(parent)
         self.settings_obj = settings_obj or QSettings("BOSL", "SharkEye_App")
         self._finished = False
+        self.start_tour = False
 
         self.setWindowTitle("Welcome")
         self.setModal(True)
@@ -439,6 +440,9 @@ class WelcomeDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.setContentsMargins(28, 12, 28, 20)
+        skip = QPushButton("Skip Tutorial")
+        skip.clicked.connect(self._skip)
+        footer.addWidget(skip)
         footer.addStretch(1)
         get_started = QPushButton("Get Started")
         get_started.setDefault(True)
@@ -459,8 +463,16 @@ class WelcomeDialog(QDialog):
         self.move(frame.topLeft())
 
     def _finish(self) -> None:
+        self.start_tour = True
         self._finished = True
         self.accept()
+
+    def _skip(self) -> None:
+        """Dismiss without the walkthrough; do not show the welcome again."""
+        self.start_tour = False
+        self._finished = True
+        mark_tutorial_completed(self.settings_obj)
+        self.reject()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -478,7 +490,7 @@ class WelcomeDialog(QDialog):
 class TutorialCompletePage(TutorialPage):
     title = "Tutorial Complete"
     body = (
-        "You're all set! You can revisit this walkthrough any time from the Help menu."
+        "Now you're all set to use SharkEye! For more instructions on using the app or to revisit the tutorial, click the Help button in the top right."
     )
     image_path = ""
 
@@ -2181,12 +2193,13 @@ def start_guided_tour(main_window) -> GuidedTour:
 
 
 def maybe_show_tutorial(parent=None, settings_obj: QSettings | None = None) -> bool:
-    """Show welcome popup, then the guided tour. Returns True if shown."""
+    """Show welcome popup, then the guided tour unless skipped. Returns True if shown."""
     settings_obj = settings_obj or QSettings("BOSL", "SharkEye_App")
     if not should_show_tutorial(settings_obj):
         return False
-    WelcomeDialog(settings_obj=settings_obj, parent=parent).exec()
-    if parent is not None:
+    dialog = WelcomeDialog(settings_obj=settings_obj, parent=parent)
+    dialog.exec()
+    if dialog.start_tour and parent is not None:
         start_guided_tour(parent)
     return True
 
