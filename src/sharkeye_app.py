@@ -52,6 +52,7 @@ from tutorial import (
     maybe_show_tutorial,
     sample_results_path,
     setup_tutorial_tooltips,
+    start_guided_tour,
 )
 import signal
 import json
@@ -2787,11 +2788,30 @@ class MainWindow(QMainWindow):
         help_window = getattr(self, "_help_docs_window", None)
         if help_window is None or not help_window.isVisible():
             self._help_docs_window = HelpDocsWindow(guide_path, parent=self)
+            self._help_docs_window.replay_tutorial_requested.connect(self.replay_tutorial)
             self._help_docs_window.show()
             return
 
         self._help_docs_window.raise_()
         self._help_docs_window.activateWindow()
+
+    def replay_tutorial(self):
+        """Restart the interactive guided tour from the Help window."""
+        if getattr(self, "_guided_tour", None) is not None:
+            QMessageBox.information(
+                self,
+                "Tutorial In Progress",
+                "The tutorial is already running.",
+            )
+            return
+        help_window = getattr(self, "_help_docs_window", None)
+        if help_window is not None:
+            help_window.close()
+        if hasattr(self, "stack_widget") and hasattr(self, "home_widget"):
+            self.stack_widget.setCurrentWidget(self.home_widget)
+            if hasattr(self, "toggle_banner_buttons"):
+                self.toggle_banner_buttons(review=False)
+        start_guided_tour(self)
 
     def show_report_problem(self):
         dialog = ReportProblemDialog(parent=self)

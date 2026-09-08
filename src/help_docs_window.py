@@ -11,7 +11,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, Qt, QRegularExpression, QTimer
+from PyQt6.QtCore import QEvent, Qt, QRegularExpression, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -650,6 +651,8 @@ class HelpDocContentPanel(QScrollArea):
 class HelpDocsWindow(QMainWindow):
     """Window for browsing help documentation parsed from markdown."""
 
+    replay_tutorial_requested = pyqtSignal()
+
     def __init__(self, markdown_path: str | Path, parent: QWidget | None = None):
         super().__init__(parent)
         self._doc_path = Path(markdown_path).resolve()
@@ -685,14 +688,28 @@ class HelpDocsWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
+        nav_column = QWidget()
+        nav_column.setMinimumWidth(220)
+        nav_layout = QVBoxLayout(nav_column)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(8)
+
         self._nav_list = QListWidget()
-        self._nav_list.setMinimumWidth(220)
         self._nav_list.setFrameShape(QFrame.Shape.NoFrame)
         nav_font = QFont(self._nav_list.font())
         nav_font.setWeight(QFont.Weight.Normal)
         self._nav_list.setFont(nav_font)
         self._nav_list.currentRowChanged.connect(self._on_nav_selection_changed)
-        splitter.addWidget(self._nav_list)
+        nav_layout.addWidget(self._nav_list, stretch=1)
+
+        replay = QPushButton("Replay Tutorial")
+        replay.setToolTip("Start the interactive SharkEye walkthrough again")
+        replay.setCursor(Qt.CursorShape.PointingHandCursor)
+        replay.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        replay.clicked.connect(self.replay_tutorial_requested.emit)
+        nav_layout.addWidget(replay)
+
+        splitter.addWidget(nav_column)
 
         self._content_view = HelpDocContentPanel()
         splitter.addWidget(self._content_view)
