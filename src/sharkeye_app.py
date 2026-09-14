@@ -1615,8 +1615,8 @@ def render_annotation_preview(annotation_color, box_thickness, text_thickness, t
     """Draw a sample detection box for the Accessibility settings preview.
 
     Deliberately uses the same cv2.rectangle / cv2.putText calls (and the same RGB->BGR
-    flip) as encode_track_clips, so the preview is a faithful rendering of what will be
-    burned into the exported clips rather than an approximation.
+    flip) as Accessibility would apply to a burned-in annotation, so the settings preview
+    is a faithful rendering rather than an approximation.
     """
     # Muted ocean backdrop so the annotation color is judged against something
     # representative rather than flat white.
@@ -1652,14 +1652,60 @@ def _downscale_frame_to_fit(frame, max_w, max_h):
                       interpolation=cv2.INTER_LINEAR)
 
 
+def _draw_processing_preview_box(frame, pos, conf, orig_size):
+    """Burn a processing-preview-style green box onto ``frame`` (in place).
+
+    Matches ``VideoProcessingWorker.draw_bounding_boxes``: green rectangle + ``Shark: conf``
+    label. ``pos`` is ``(cx, cy, w, h)`` in *original* source pixels; ``orig_size`` is
+    ``(orig_w, orig_h)``. Coordinates are scaled onto ``frame``'s current size.
+    """
+    if pos is None or orig_size is None:
+        return frame
+    ow, oh = orig_size
+    if ow <= 0 or oh <= 0:
+        return frame
+    fh, fw = frame.shape[:2]
+    sx = fw / ow
+    sy = fh / oh
+    cx, cy, bw, bh = pos
+    x1 = int((cx - bw / 2) * sx)
+    y1 = int((cy - bh / 2) * sy)
+    x2 = int((cx + bw / 2) * sx)
+    y2 = int((cy + bh / 2) * sy)
+    color = (0, 255, 0)
+    # Keep preview-like weight on downscaled clips (preview drew scale=2 on full-res,
+    # then shrunk the pixmap; drawing after resize needs a milder scale).
+    text_scale = max(0.6, min(2.0, fh / 540.0))
+    thickness = max(1, int(round(text_scale)))
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+    label = f"Shark: {float(conf):.2f}" if conf is not None else "Shark"
+    cv2.putText(
+        frame,
+        label,
+        (x1, max(y1 - 10, int(20 * text_scale))),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        text_scale,
+        color,
+        thickness,
+    )
+    return frame
+
+
 def encode_track_clips(payload, output_dir, video_name, annotation_color,
-                       box_thickness, text_thickness, text_scale, fps=10):
+                       box_thickness, text_thickness, text_scale, fps=10,
+                       source_fps=None):
     """Persist per-track review/upload artifacts from a self-contained payload.
 
-    For each track this writes three things, all from the same in-memory frames:
+    For each track this writes:
       * tracking_gifs/<video_name>_<key>.mp4 — a RAW clip (no baked bounding box). The
         review player (FramePlayer) draws the box as a live, toggleable/recolorable
         overlay from the sidecar below, so it must not be burned into the pixels.
+      * tracking_gifs_boxed/<video_name>_<key>.mp4 — same clip with processing-preview
+        style green boxes burned in (export/archive convenience; not used by review).
+      * tracking_gifs_original_fps/<video_name>_<key>.mp4 — raw clip encoded at the
+        source video's FPS.
+      * tracking_gifs_boxed_original_fps/<video_name>_<key>.mp4 — boxed clip encoded
+        at the source video's FPS.
       * shark_frames/<video_name>_<key>/frame_<NNNN>.jpg — every sampled frame of the
         shark at full resolution, for upload ("every frame per shark").
       * shark_frames/<video_name>_<key>/frame_<NNNN>.txt — a YOLO label per frame
@@ -1674,11 +1720,17 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
     starve the concurrent inference thread. `payload` maps track key -> {'frames',
     'positions', 'lengths', 'confidences', 'timestamps', 'longest_timestamp'}; the
     payload owns its own frame buffers (no shared state with the UI's track dicts).
-    The `annotation_*` args are retained for signature stability but no longer used to
-    draw — the box is an overlay now, not baked in.
+    The `annotation_*` args are retained for signature stability / Accessibility
+    preview wiring; boxed clips use the fixed processing-preview green style.
     """
     clips_dir = os.path.join(output_dir, "tracking_gifs")
+    boxed_dir = os.path.join(output_dir, "tracking_gifs_boxed")
+    original_fps_dir = os.path.join(output_dir, "tracking_gifs_original_fps")
+    boxed_original_fps_dir = os.path.join(output_dir, "tracking_gifs_boxed_original_fps")
     os.makedirs(clips_dir, exist_ok=True)
+    os.makedirs(boxed_dir, exist_ok=True)
+    os.makedirs(original_fps_dir, exist_ok=True)
+    os.makedirs(boxed_original_fps_dir, exist_ok=True)
     frames_root = os.path.join(output_dir, "shark_frames")
     os.makedirs(frames_root, exist_ok=True)
     # Class-name manifest for the YOLO dataset rooted at shark_frames/.
@@ -1686,6 +1738,12 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         f.write("\n".join(YOLO_CLASS_NAMES) + "\n")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    try:
+        export_source_fps = float(source_fps or fps or 10)
+    except (TypeError, ValueError):
+        export_source_fps = float(fps or 10)
+    if not np.isfinite(export_source_fps) or export_source_fps <= 0:
+        export_source_fps = float(fps or 10)
 
     for key, track in payload.items():
         positions = track.get('positions') or []
@@ -1696,9 +1754,15 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         longest_ts = track.get('longest_timestamp')
 
         writer = None
+        boxed_writer = None
+        original_fps_writer = None
+        boxed_original_fps_writer = None
         frame_size = None   # the CLIP/JPG/meta size (downscaled to <=1080p)
         orig_size = None    # the source frame size, for normalizing box coords
         clip_path = os.path.join(clips_dir, f"{video_name}_{key}.mp4")
+        boxed_path = os.path.join(boxed_dir, f"{video_name}_{key}.mp4")
+        original_fps_path = os.path.join(original_fps_dir, f"{video_name}_{key}.mp4")
+        boxed_original_fps_path = os.path.join(boxed_original_fps_dir, f"{video_name}_{key}.mp4")
         track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
         os.makedirs(track_frames_dir, exist_ok=True)
 
@@ -1727,18 +1791,40 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                         logger.error(f"Could not open video writer for {clip_path}; skipping track {key}")
                         writer = None
                         break
+                    boxed_writer = cv2.VideoWriter(boxed_path, fourcc, fps, frame_size)
+                    if not boxed_writer.isOpened():
+                        logger.error(f"Could not open boxed video writer for {boxed_path}")
+                        boxed_writer = None
+                    original_fps_writer = cv2.VideoWriter(original_fps_path, fourcc, export_source_fps, frame_size)
+                    if not original_fps_writer.isOpened():
+                        logger.error(f"Could not open original-FPS video writer for {original_fps_path}")
+                        original_fps_writer = None
+                    boxed_original_fps_writer = cv2.VideoWriter(boxed_original_fps_path, fourcc, export_source_fps, frame_size)
+                    if not boxed_original_fps_writer.isOpened():
+                        logger.error(f"Could not open boxed original-FPS video writer for {boxed_original_fps_path}")
+                        boxed_original_fps_writer = None
 
                 # One downscale serves both the clip and the JPG.
                 small = _downscale_frame_to_fit(frame, UPLOAD_IMAGE_MAX_W, UPLOAD_IMAGE_MAX_H)
                 if (small.shape[1], small.shape[0]) != frame_size:
                     small = cv2.resize(small, frame_size)   # guard a stray odd-sized frame
                 writer.write(small)
+                if original_fps_writer is not None:
+                    original_fps_writer.write(small)
                 cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), small)
 
                 pos = positions[frame_idx] if frame_idx < len(positions) else None
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
                 length = lengths[frame_idx] if frame_idx < len(lengths) else None
                 t_ms = timestamps[frame_idx] if frame_idx < len(timestamps) else None
+
+                if boxed_writer is not None or boxed_original_fps_writer is not None:
+                    boxed = small.copy()
+                    _draw_processing_preview_box(boxed, pos, conf, orig_size)
+                    if boxed_writer is not None:
+                        boxed_writer.write(boxed)
+                    if boxed_original_fps_writer is not None:
+                        boxed_original_fps_writer.write(boxed)
 
                 # YOLO label, parallel to frame_<seq>.jpg. Normalized by the ORIGINAL
                 # source dims (pos is in source pixels); normalized coords are scale-free,
@@ -1767,10 +1853,24 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
 
             if writer is not None:
                 writer.release()
+                writer = None
                 logger.info(f"Saved clip: {clip_path}")
+            if boxed_writer is not None:
+                boxed_writer.release()
+                boxed_writer = None
+                logger.info(f"Saved boxed clip: {boxed_path}")
+            if original_fps_writer is not None:
+                original_fps_writer.release()
+                original_fps_writer = None
+                logger.info(f"Saved original-FPS clip: {original_fps_path}")
+            if boxed_original_fps_writer is not None:
+                boxed_original_fps_writer.release()
+                boxed_original_fps_writer = None
+                logger.info(f"Saved boxed original-FPS clip: {boxed_original_fps_path}")
 
             meta = {
                 'video': video_name, 'track_id': key, 'fps': fps,
+                'source_fps': export_source_fps,
                 # The .txt coords are normalized; these are the CLIP/JPG dims (<=1080p) the
                 # review overlay multiplies them by to map boxes onto the clip it plays.
                 'frame_width': (frame_size[0] if frame_size else None),
@@ -1785,8 +1885,141 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         except Exception as e:
             logger.error(f"Clip/frame export failed for track {key}: {e}")
         finally:
+            if writer is not None:
+                try:
+                    writer.release()
+                except Exception:
+                    pass
+            if boxed_writer is not None:
+                try:
+                    boxed_writer.release()
+                except Exception:
+                    pass
+            if original_fps_writer is not None:
+                try:
+                    original_fps_writer.release()
+                except Exception:
+                    pass
+            if boxed_original_fps_writer is not None:
+                try:
+                    boxed_original_fps_writer.release()
+                except Exception:
+                    pass
             # Free the frame buffers as we go
             track['frames'] = None
+
+
+def export_full_video_with_tracking_boxes(payload, output_dir, video_path, video_name, source_fps=None):
+    """Write the full source video with tracked detection boxes burned in.
+
+    Unlike the per-track clips, this decodes and re-encodes every frame from the original
+    video at the original resolution/FPS, so the resulting MP4 duration matches the input
+    video. Boxes are drawn on detection frames and linearly interpolated across the source
+    frames between detections for the same track, preventing flicker from sampled inference.
+    """
+    if not payload or not video_path:
+        return
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Could not open source video for boxed full-video export: {video_path}")
+        return
+
+    writer = None
+    out_path = None
+    try:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        try:
+            export_fps = float(source_fps or cap.get(cv2.CAP_PROP_FPS) or 30)
+        except (TypeError, ValueError):
+            export_fps = 30.0
+        if not math.isfinite(export_fps) or export_fps <= 0:
+            export_fps = 30.0
+        if width <= 0 or height <= 0:
+            logger.error(f"Invalid source video dimensions for boxed export: {video_path}")
+            return
+
+        def _as_float(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        boxes_by_frame = defaultdict(list)
+        for track in payload.values():
+            positions = track.get('all_positions') or track.get('positions') or []
+            timestamps = track.get('all_timestamps') or track.get('timestamps') or []
+            confidences = track.get('all_confidences') or track.get('confidences') or []
+
+            detections_by_frame = {}
+            for idx, pos in enumerate(positions):
+                if pos is None or idx >= len(timestamps):
+                    continue
+                try:
+                    frame_idx = int(round((float(timestamps[idx]) / 1000.0) * export_fps))
+                except (TypeError, ValueError):
+                    continue
+                if frame_idx < 0:
+                    continue
+                if frame_count > 0:
+                    frame_idx = min(frame_idx, frame_count - 1)
+                conf = confidences[idx] if idx < len(confidences) else None
+                try:
+                    detections_by_frame[frame_idx] = (np.array(pos, dtype=float), _as_float(conf))
+                except (TypeError, ValueError):
+                    continue
+
+            detections = sorted(detections_by_frame.items())
+            for frame_idx, (pos, conf) in detections:
+                boxes_by_frame[frame_idx].append((tuple(pos.tolist()), conf))
+
+            for (start_frame, (start_pos, start_conf)), (end_frame, (end_pos, end_conf)) in zip(detections, detections[1:]):
+                gap = end_frame - start_frame
+                if gap <= 1:
+                    continue
+                for interp_frame in range(start_frame + 1, end_frame):
+                    alpha = (interp_frame - start_frame) / gap
+                    interp_pos = start_pos + (end_pos - start_pos) * alpha
+                    if start_conf is not None and end_conf is not None:
+                        interp_conf = start_conf + (end_conf - start_conf) * alpha
+                    else:
+                        interp_conf = start_conf if start_conf is not None else end_conf
+                    boxes_by_frame[interp_frame].append((tuple(interp_pos.tolist()), interp_conf))
+
+        out_dir = os.path.join(output_dir, "original_video_boxed")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"{Path(video_name).stem}_boxed.mp4")
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(out_path, fourcc, export_fps, (width, height))
+        if not writer.isOpened():
+            logger.error(f"Could not open full-video boxed writer for {out_path}")
+            return
+
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            for pos, conf in boxes_by_frame.get(frame_idx, []):
+                _draw_processing_preview_box(frame, pos, conf, (width, height))
+            writer.write(frame)
+            frame_idx += 1
+
+        logger.info(
+            f"Saved full-video boxed export: {out_path} "
+            f"({frame_idx} frames @ {export_fps:.3f} fps, source frames={frame_count})"
+        )
+    except Exception as e:
+        logger.error(f"Full-video boxed export failed for {video_name}: {e}")
+    finally:
+        cap.release()
+        if writer is not None:
+            try:
+                writer.release()
+            except Exception:
+                pass
 
 
 def export_training_frames_locally(payload, video_stem, annotation_format="yolo"):
@@ -1905,20 +2138,22 @@ class PostProcessJob(QRunnable):
     """Runs the per-video CPU/IO post-processing (training-frame export + MP4 clip
     encoding) on a background thread pool so the next video's inference isn't blocked."""
 
-    def __init__(self, payload, output_dir, video_name, annotation_color,
-                 box_thickness, text_thickness, text_scale):
+    def __init__(self, payload, output_dir, video_name, video_path, annotation_color,
+                 box_thickness, text_thickness, text_scale, source_fps=None):
         super().__init__()
         self.payload = payload
         self.output_dir = output_dir
         self.video_name = video_name
+        self.video_path = video_path
         self.annotation_color = annotation_color
         self.box_thickness = box_thickness
         self.text_thickness = text_thickness
         self.text_scale = text_scale
+        self.source_fps = source_fps
 
     def run(self):
         video_stem = Path(self.video_name).stem
-        t_export = t_clip = -1.0
+        t_export = t_clip = t_full_video = -1.0
         try:
             t0 = time.perf_counter()
             export_training_frames_locally(self.payload, video_stem, annotation_format="yolo")
@@ -1929,11 +2164,24 @@ class PostProcessJob(QRunnable):
             t0 = time.perf_counter()
             encode_track_clips(self.payload, self.output_dir, self.video_name,
                                self.annotation_color, self.box_thickness,
-                               self.text_thickness, self.text_scale)
+                               self.text_thickness, self.text_scale,
+                               source_fps=self.source_fps)
             t_clip = time.perf_counter() - t0
         except Exception as e:
             logger.error(f"Async clip encoding failed: {e}")
-        logger.info(f"[timing] {self.video_name}: (background) export={t_export:.2f}s clip={t_clip:.2f}s")
+        try:
+            t0 = time.perf_counter()
+            export_full_video_with_tracking_boxes(
+                self.payload, self.output_dir, self.video_path, self.video_name,
+                source_fps=self.source_fps,
+            )
+            t_full_video = time.perf_counter() - t0
+        except Exception as e:
+            logger.error(f"Async full-video boxed export failed: {e}")
+        logger.info(
+            f"[timing] {self.video_name}: (background) export={t_export:.2f}s "
+            f"clip={t_clip:.2f}s full_video={t_full_video:.2f}s"
+        )
 
 
 class VideoProcessingWorker(QObject):
@@ -1941,7 +2189,7 @@ class VideoProcessingWorker(QObject):
     processing_complete = pyqtSignal(dict, str)
     frame_processed = pyqtSignal(QImage)  # owned image — do not queue raw ndarray across threads
     progress_status_changed = pyqtSignal(str)  # current process summary for MainWindow.progress_status
-    postproc_ready = pyqtSignal(dict, str, str)  # (payload, output_dir, video_name) for async export + clip encoding
+    postproc_ready = pyqtSignal(dict, str, str, str, float)  # payload/output/video/path/source_fps for async exports
     video_timing_ready = pyqtSignal(dict)  # per-video phase timing for the batch summary
 
     def __init__(self, video_path, model, output_dir, drone_type, altitude, flight_location):
@@ -2142,9 +2390,9 @@ class VideoProcessingWorker(QObject):
                 logger.info(f"Filtered out {filtered_count} track(s) below confidence/minimum-frame thresholds")
 
             # Only save results if not interrupted
-            self.progress_status_changed.emit("Running Segmentation")
+            self.progress_status_changed.emit("Saving best frames")
             seg_start = time.perf_counter()
-            custom_tracker.save_best_frames(self.output_dir, self.video_path)
+            custom_tracker.save_best_frames(self.output_dir, self.video_path, run_segmentation=False)
             seg_time = time.perf_counter() - seg_start
 
             self.progress_status_changed.emit("Saving detection results")
@@ -2162,7 +2410,10 @@ class VideoProcessingWorker(QObject):
             # background job never share mutable state.
             self.progress_status_changed.emit("Finalizing")
             payload = self._extract_postproc_payload(significant_tracks)
-            self.postproc_ready.emit(payload, self.output_dir, Path(self.video_path).name)
+            self.postproc_ready.emit(
+                payload, self.output_dir, Path(self.video_path).name,
+                self.video_path, float(fps),
+            )
 
             # Per-phase timing breakdown (export + clip are timed in the background job).
             # `infer_time` is the whole sampling-loop wall; break it into decode vs. YOLO
@@ -2288,6 +2539,9 @@ class VideoProcessingWorker(QObject):
                 'lengths': list(track.get('lengths', [])),
                 'confidences': list(track.get('confidences', [])),
                 'timestamps': list(track.get('timestamps', [])),
+                'all_positions': list(track.get('all_positions', track.get('positions', []))),
+                'all_confidences': list(track.get('all_confidences', track.get('confidences', []))),
+                'all_timestamps': list(track.get('all_timestamps', track.get('timestamps', []))),
                 'longest_timestamp': track.get('longest_timestamp'),
             }
         return payload
@@ -3418,13 +3672,13 @@ class MainWindow(QMainWindow):
         """Accumulate per-video phase timings for the end-of-batch summary."""
         self.batch_timings.append(timing)
 
-    def dispatch_postproc_job(self, payload, output_dir, video_name):
+    def dispatch_postproc_job(self, payload, output_dir, video_name, video_path, source_fps):
         """Queue per-video post-processing (export + GIF) on the background pool so the next video can start inference."""
         if not payload:
             return
         annotation_color, box_thickness, text_thickness, text_scale = get_annotation_settings(self.settings_obj)
-        job = PostProcessJob(payload, output_dir, video_name, annotation_color,
-                             box_thickness, text_thickness, text_scale)
+        job = PostProcessJob(payload, output_dir, video_name, video_path, annotation_color,
+                             box_thickness, text_thickness, text_scale, source_fps)
         self.postproc_pool.start(job)
 
     def update_video_list_emoji(self):
@@ -3937,7 +4191,11 @@ class MainWindow(QMainWindow):
         exp_dir = Path(get_results_dir()) / experiment
 
         # Remove images from bounding_boxes, frames, masks, tracking_gifs
-        folders = ["bounding_boxes", "frames", "masks", "tracking_gifs"]
+        folders = [
+            "bounding_boxes", "frames", "masks", "tracking_gifs",
+            "tracking_gifs_boxed", "tracking_gifs_original_fps",
+            "tracking_gifs_boxed_original_fps", "original_video_boxed",
+        ]
 
         # Check if this is the last track in the experiment
         det_dir = exp_dir / "detection_results"
@@ -6675,10 +6933,9 @@ class HeadlessVideoProcessor(VideoProcessingWorker):
 
         cap.release()
         significant_tracks = custom_tracker.get_significant_tracks()
-        # Shared implementation (Priority 2: segments the best-confidence frame; converts
-        # SAM pixels -> feet, which this path previously failed to do). FOV was resolved
-        # per-video above from --drone/--altitude.
-        custom_tracker.save_best_frames(self.output_dir, self.video_path)
+        # Shared implementation saves the best-confidence frame. Segmentation is skipped
+        # here to keep processing fast; lengths remain bbox-estimated.
+        custom_tracker.save_best_frames(self.output_dir, self.video_path, run_segmentation=False)
 
         all_track_info = []
 
