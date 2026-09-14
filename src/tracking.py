@@ -313,6 +313,11 @@ class CustomTracker:
             'unique_id': self.next_id,
             'positions': deque([(x, y, w, h)], maxlen=100),
             'confidences': deque([confidence], maxlen=100),
+            # Full lightweight history for exports that need to align boxes back onto
+            # the complete source video. Frame buffers stay capped below for memory.
+            'all_positions': [(x, y, w, h)],
+            'all_confidences': [confidence],
+            'all_timestamps': [timestamp],
             # Each cap.retrieve() returns a fresh buffer that is never mutated in place
             # (all consumers copy before drawing), so store references rather than paying
             # for a full-frame copy per detection.
@@ -351,6 +356,9 @@ class CustomTracker:
         
         track['positions'].append((x, y, w, h))
         track['confidences'].append(confidence)
+        track.setdefault('all_positions', []).append((x, y, w, h))
+        track.setdefault('all_confidences', []).append(confidence)
+        track.setdefault('all_timestamps', []).append(timestamp)
         track['frames'].append(frame)
         track['timestamps'].append(timestamp)
         track['lengths'].append(length)
@@ -401,8 +409,12 @@ class CustomTracker:
         """Format timestamp in MMSS format for filename"""
         return datetime.fromtimestamp(milliseconds / 1000, timezone.utc).strftime("%M%S")
 
-    def save_best_frames(self, output_dir, video_path):
-        """Save best frames for each significant track"""
+    def save_best_frames(self, output_dir, video_path, run_segmentation=True):
+        """Save best frames for each significant track.
+
+        When ``run_segmentation`` is false, skip SAM entirely and keep the track's
+        bbox-estimated length. This still writes the review/export frame artifacts.
+        """
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         
         images_saved = 0
@@ -435,7 +447,7 @@ class CustomTracker:
             # bbox-estimated length, and get no mask.
             is_significant = (num_frames >= self.min_frames
                               and avg_confidence > self.confidence_threshold)
-            if is_significant:
+            if run_segmentation and is_significant:
                 # SAM (and draw_mask) expect RGB; seg_frame is BGR from the decoder.
                 # Feeding BGR gave the model channel-swapped pixels and measurably worse
                 # masks (it under-captured the shark's extent — up to ~18% shorter length),
@@ -487,6 +499,8 @@ class CustomTracker:
 
                 mask_overlay = draw_mask(mask, rgb_frame)
                 track['mask_overlay'] = mask_overlay
+            else:
+                track['segmentation_duration'] = 0.0
 
             filename = f"{Path(video_path).name}_{track_id}.jpg"
 
@@ -498,13 +512,16 @@ class CustomTracker:
             cv2.imwrite(os.path.join(output_dir, 'frames', filename), seg_frame)
 
             # Mask image only exists for segmented (significant) tracks.
-            if is_significant:
+            if run_segmentation and is_significant:
                 mask_path = os.path.join(output_dir, 'masks', filename)
                 cv2.imwrite(mask_path, mask_overlay)
 
             images_saved += 1
 
-        logger.info(f"[segmentation] saved {images_saved} track image(s)")
+        if run_segmentation:
+            logger.info(f"[segmentation] saved {images_saved} track image(s)")
+        else:
+            logger.info(f"[frames] saved {images_saved} track image(s); segmentation skipped")
 
     def reset(self):
         """Reset tracker state"""
