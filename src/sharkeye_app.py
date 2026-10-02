@@ -145,10 +145,10 @@ DEFAULT_DETECTION_LABELS = [
 
 # --- YOLO annotation format ---------------------------------------------------
 # Detections are stored on disk as YOLO — the single format for the review overlay,
-# the upload, and retraining. Each sampled frame gets a `frame_<NNNN>.txt` with a
-# line "class cx cy w h" (normalized 0-1, so it survives the <=1080p downscale at
-# upload), alongside a `meta.json` holding the per-frame data YOLO can't carry
-# (confidence, length, timestamp, length-source frame). The class map is fixed:
+# the upload, and retraining. Each track stores JPGs under `images/` and matching
+# `labels/frame_<NNNN>.txt` YOLO annotations with normalized "class cx cy w h" values.
+# Track-level `meta.json` holds per-frame data YOLO can't carry (confidence, length,
+# timestamp, length-source frame). The class map is fixed:
 # Shark -> 0, Kelp -> 1, everything else -> 2.
 YOLO_CLASS_NAMES = ["shark", "kelp", "other"]
 
@@ -919,36 +919,55 @@ class HistoricalExperimentsPage(QWidget):
     
     def on_upload(self):
         checked = self.find_checked_boxes()
+        if not checked:
+            QMessageBox.information(self, "No Selection", "Please select at least one experiment to upload.")
+            return
+
         api_url = "https://us-central1-sharkeye-329715.cloudfunctions.net/sharkeye-app-upload"
         logger.info(f"[upload] Manual upload requested for {len(checked)} selected experiment(s)")
-        for experiment_dir in checked:
-            zip_name = f'{Path(experiment_dir).name}.zip'
-            logger.info(f"[upload] Zipping experiment '{experiment_dir}' -> {zip_name}")
-            try:
-                # Bake the reviewer's corrected labels into the YOLO class column first.
-                refresh_yolo_labels_from_csv(experiment_dir)
-                buffer = io.BytesIO()
-                with zipfile.ZipFile(buffer, 'w') as zipf:
-                    # 'shark_frames' = every sampled frame per shark + YOLO labels; images
-                    # are downscaled to <=1080p to keep the upload under the size limit.
-                    file_count = add_experiment_to_zip(zipf, experiment_dir)
+        self.upload_progress_dialog = QProgressDialog(self)
+        self.upload_progress_dialog.setWindowTitle("Uploading Results")
+        self.upload_progress_dialog.setLabelText("Preparing selected experiments...")
+        self.upload_progress_dialog.setCancelButton(None)
+        self.upload_progress_dialog.setRange(0, 100)
+        self.upload_progress_dialog.setValue(0)
+        self.upload_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.upload_progress_dialog.setMinimumDuration(0)
+        self.upload_progress_dialog.setAutoClose(False)
+        self.upload_progress_dialog.setAutoReset(False)
+        self.upload_progress_dialog.show()
 
-                zip_size = buffer.tell()
-                buffer.seek(0)
-                logger.info(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
-                      f"POST -> {api_url}")
-                files = {'file': (zip_name, buffer, 'application/zip')}
-                response = requests.post(api_url, files=files)
-                response.raise_for_status()
-                logger.info(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
-                upload_status, message = "Upload Finished", "Folder uploaded successfully"
-            except requests.RequestException as e:
-                logger.error(f"[upload] {zip_name}: FAILED (request error): {e}")
-                upload_status, message = "Upload Error", "Failed to Upload folder to cloud storage: {}".format(str(e))
-            except Exception as e:
-                logger.error(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
-                upload_status, message = "Upload Error", "An unexpected error occurred: {}".format(str(e))
-            QMessageBox.information(self, upload_status, message)
+        self._upload_result = None
+        self.upload_thread = UploadBatchThread(api_url, checked)
+        self.upload_thread.progress_updated.connect(self._update_upload_progress)
+        self.upload_thread.upload_finished.connect(self._record_upload_result)
+        self.upload_thread.finished.connect(self._finish_manual_upload)
+        self.upload_thread.finished.connect(self.upload_thread.deleteLater)
+        self.upload_thread.start()
+
+    def _update_upload_progress(self, value, message):
+        if getattr(self, "upload_progress_dialog", None) is not None:
+            self.upload_progress_dialog.setLabelText(message)
+            if value < 0:
+                self.upload_progress_dialog.setRange(0, 0)
+            else:
+                self.upload_progress_dialog.setRange(0, 100)
+                self.upload_progress_dialog.setValue(value)
+
+    def _record_upload_result(self, success, message):
+        self._upload_result = (success, message)
+
+    def _finish_manual_upload(self):
+        if getattr(self, "upload_progress_dialog", None) is not None:
+            self.upload_progress_dialog.close()
+            self.upload_progress_dialog = None
+        success, message = self._upload_result or (False, "Upload stopped unexpectedly.")
+        self.upload_thread = None
+        QMessageBox.information(
+            self,
+            "Upload Finished" if success else "Upload Error",
+            message,
+        )
 
 
     def populate_experiment_table(self):
@@ -1660,12 +1679,10 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
       * tracking_gifs/<video_name>_<key>.mp4 — a RAW clip (no baked bounding box). The
         review player (FramePlayer) draws the box as a live, toggleable/recolorable
         overlay from the sidecar below, so it must not be burned into the pixels.
-      * shark_frames/<video_name>_<key>/frame_<NNNN>.jpg — every sampled frame of the
-        shark at full resolution, for upload ("every frame per shark").
-      * shark_frames/<video_name>_<key>/frame_<NNNN>.txt — a YOLO label per frame
-        (class cx cy w h, normalized), parallel to the JPG sequence. Class is 0 (shark)
-        here; the reviewer's corrected label is baked in at upload time (see
-        refresh_yolo_labels_from_csv). This is the upload / retraining annotation.
+            * shark_frames/<video_name>_<key>/images/frame_<NNNN>.jpg — each sampled frame.
+            * shark_frames/<video_name>_<key>/labels/frame_<NNNN>.txt — the parallel YOLO
+                label (class cx cy w h, normalized). Class is 0 (shark) here; the reviewer's
+                corrected label is baked in at upload time (see refresh_yolo_labels_from_csv).
       * shark_frames/<video_name>_<key>/meta.json — the per-frame metadata YOLO can't
         carry (confidence, length, timestamp) plus the length-source (longest) frame
         index. Drives the review overlay's confidence / length-source display.
@@ -1701,6 +1718,10 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
         clip_path = os.path.join(clips_dir, f"{video_name}_{key}.mp4")
         track_frames_dir = os.path.join(frames_root, f"{video_name}_{key}")
         os.makedirs(track_frames_dir, exist_ok=True)
+        images_dir = os.path.join(track_frames_dir, "images")
+        labels_dir = os.path.join(track_frames_dir, "labels")
+        os.makedirs(images_dir, exist_ok=True)
+        os.makedirs(labels_dir, exist_ok=True)
 
         meta_frames = []      # per-frame metadata (aligned with the clip/JPGs/.txt files)
         longest_index = None  # which written frame is the length-source frame
@@ -1733,7 +1754,7 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                 if (small.shape[1], small.shape[0]) != frame_size:
                     small = cv2.resize(small, frame_size)   # guard a stray odd-sized frame
                 writer.write(small)
-                cv2.imwrite(os.path.join(track_frames_dir, f"frame_{seq:04d}.jpg"), small)
+                cv2.imwrite(os.path.join(images_dir, f"frame_{seq:04d}.jpg"), small)
 
                 pos = positions[frame_idx] if frame_idx < len(positions) else None
                 conf = confidences[frame_idx] if frame_idx < len(confidences) else None
@@ -1745,7 +1766,7 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
                 # so they map correctly onto the downscaled JPG/clip and survive the upload
                 # downscale. Class is 0 (shark) now; refresh_yolo_labels_from_csv() rewrites
                 # it from the reviewer's corrected label. An empty file = a negative frame.
-                label_path = os.path.join(track_frames_dir, f"frame_{seq:04d}.txt")
+                label_path = os.path.join(labels_dir, f"frame_{seq:04d}.txt")
                 if pos is not None and orig_size:
                     x, y, w, h = pos
                     ow, oh = orig_size
@@ -1789,121 +1810,8 @@ def encode_track_clips(payload, output_dir, video_name, annotation_color,
             track['frames'] = None
 
 
-def export_training_frames_locally(payload, video_stem, annotation_format="yolo"):
-    """Bundle per-track frames + annotations into a training zip under the results dir.
-
-    Extracted from the old `VideoProcessingWorker.upload_frames_for_training` (local
-    export path) so it can run off the worker/UI thread. Operates on the self-contained
-    post-processing payload (track key -> {'frames', 'positions', ...}), so it shares no
-    mutable state with the tracks handed to the UI.
-    """
-    fmt = (annotation_format or "yolo").strip().lower()
-    if fmt not in ("coco", "yolo"):
-        logger.warning(f"Unsupported annotation_format {annotation_format!r}; skipping training export")
-        return
-
-    # Same class scheme as the shark_frames YOLO labels (Shark->0, Kelp->1, else->2).
-    category_names = list(YOLO_CLASS_NAMES)
-    num_classes = len(category_names)
-
-    coco = {
-        "licenses": [{"name": "", "id": 0, "url": ""}],
-        "info": {"contributor": "", "date_created": "", "description": "",
-                 "url": "", "version": "", "year": ""},
-        "categories": [{"id": i + 1, "name": name, "supercategory": ""}
-                       for i, name in enumerate(category_names)],
-        "images": [],
-        "annotations": [],
-    }
-    image_id = 1
-    annotation_id = 1
-    buffer = io.BytesIO()
-    yolo_data_dir = "obj_train_data"
-    yolo_train_paths = []
-
-    try:
-        with zipfile.ZipFile(buffer, "w") as zipf:
-            for track_id, track in payload.items():
-                positions = track.get("positions")
-                frames = track.get("frames")
-                if positions is None or frames is None:
-                    continue
-
-                for frame_idx, (pos, frame) in enumerate(zip(positions, frames)):
-                    x, y, w, h = pos
-                    if frame is None:
-                        continue
-                    try:
-                        height, width = frame.shape[:2]
-                    except Exception:
-                        continue
-
-                    x_min = max(0, int(x - w / 2))
-                    y_min = max(0, int(y - h / 2))
-                    box_w = int(w)
-                    box_h = int(h)
-                    if x_min >= width or y_min >= height:
-                        continue
-                    box_w = min(box_w, width - x_min)
-                    box_h = min(box_h, height - y_min)
-                    if box_w <= 0 or box_h <= 0:
-                        continue
-
-                    image_basename = f"{video_stem}_track{track_id}_frame{frame_idx:04d}"
-                    success, encoded = cv2.imencode(".jpg", frame)
-                    if not success:
-                        continue
-
-                    if fmt == "yolo":
-                        image_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".jpg")
-                        label_path_in_zip = os.path.join(yolo_data_dir, image_basename + ".txt")
-                        zipf.writestr(image_path_in_zip, encoded.tobytes())
-                        yolo_train_paths.append(image_path_in_zip)
-                        cx_norm = x / width
-                        cy_norm = y / height
-                        rw = w / width
-                        rh = h / height
-                        zipf.writestr(label_path_in_zip,
-                                      f"0 {cx_norm:.6f} {cy_norm:.6f} {rw:.6f} {rh:.6f}\n")
-                    else:
-                        image_filename = image_basename + ".jpg"
-                        zipf.writestr(os.path.join("images", image_filename), encoded.tobytes())
-                        coco["images"].append({
-                            "id": image_id, "width": int(width), "height": int(height),
-                            "file_name": image_filename, "license": 0, "flickr_url": "",
-                            "coco_url": "", "date_captured": 0,
-                        })
-                        coco["annotations"].append({
-                            "id": annotation_id, "image_id": image_id, "category_id": 1,
-                            "segmentation": [], "area": float(box_w * box_h),
-                            "bbox": [float(x_min), float(y_min), float(box_w), float(box_h)],
-                            "iscrowd": 0,
-                            "attributes": {"occluded": False, "rotation": 0.0,
-                                           "track_id": track_id, "keyframe": True},
-                        })
-                        image_id += 1
-                        annotation_id += 1
-
-            if fmt == "coco":
-                zipf.writestr("instances_default.json", json.dumps(coco))
-            else:
-                zipf.writestr("train.txt", "\n".join(yolo_train_paths) + ("\n" if yolo_train_paths else ""))
-                zipf.writestr("obj.names", "\n".join(category_names) + "\n")
-                zipf.writestr("obj.data", f"classes = {num_classes}\nnames = obj.names\ntrain = train.txt\n")
-
-        export_dir = get_results_dir()
-        os.makedirs(export_dir, exist_ok=True)
-        export_path = os.path.join(export_dir, f"{video_stem}_training_frames.zip")
-        with open(export_path, "wb") as f:
-            f.write(buffer.getvalue())
-        logger.info(f"Training frames zip saved to {export_path}")
-    except Exception as e:
-        logger.error(f"Training frame export failed: {e}")
-
-
 class PostProcessJob(QRunnable):
-    """Runs the per-video CPU/IO post-processing (training-frame export + MP4 clip
-    encoding) on a background thread pool so the next video's inference isn't blocked."""
+    """Encode per-video clips and training frames off the inference thread."""
 
     def __init__(self, payload, output_dir, video_name, annotation_color,
                  box_thickness, text_thickness, text_scale):
@@ -1917,14 +1825,7 @@ class PostProcessJob(QRunnable):
         self.text_scale = text_scale
 
     def run(self):
-        video_stem = Path(self.video_name).stem
-        t_export = t_clip = -1.0
-        try:
-            t0 = time.perf_counter()
-            export_training_frames_locally(self.payload, video_stem, annotation_format="yolo")
-            t_export = time.perf_counter() - t0
-        except Exception as e:
-            logger.error(f"Async training-frame export failed: {e}")
+        t_clip = -1.0
         try:
             t0 = time.perf_counter()
             encode_track_clips(self.payload, self.output_dir, self.video_name,
@@ -1933,7 +1834,7 @@ class PostProcessJob(QRunnable):
             t_clip = time.perf_counter() - t0
         except Exception as e:
             logger.error(f"Async clip encoding failed: {e}")
-        logger.info(f"[timing] {self.video_name}: (background) export={t_export:.2f}s clip={t_clip:.2f}s")
+        logger.info(f"[timing] {self.video_name}: (background) clip={t_clip:.2f}s")
 
 
 class VideoProcessingWorker(QObject):
@@ -5097,9 +4998,9 @@ class MainWindow(QMainWindow):
     def _read_overlay_annotations(self, track_dir):
         """Return (boxes, longest_index) for a track's frame dir.
 
-        Prefers the YOLO format — frame_<NNNN>.txt (class cx cy w h, normalized) plus
-        meta.json (per-frame confidence + length-source index) — and denormalizes the
-        coords to native pixels using meta's frame dims. Falls back to the legacy
+        Prefers the YOLO format — labels/frame_<NNNN>.txt (class cx cy w h, normalized)
+        plus track-level meta.json (per-frame confidence + length-source index) — and
+        denormalizes the coords to native pixels using meta's frame dims. Falls back to the legacy
         boxes.json (full-res pixel coords) so pre-migration experiments still render.
         Each returned box is (x_center, y_center, w, h, conf) in native pixels, or None
         for a frame with no detection. Returns ([], None) if nothing is readable."""
@@ -5112,7 +5013,9 @@ class MainWindow(QMainWindow):
                 boxes = []
                 for i, fm in enumerate(meta.get('frames') or []):
                     box = None
-                    txt = track_dir / f"frame_{i:04d}.txt"
+                    txt = track_dir / "labels" / f"frame_{i:04d}.txt"
+                    if not txt.exists():
+                        txt = track_dir / f"frame_{i:04d}.txt"
                     if fw and fh and txt.exists():
                         line = txt.read_text().strip()
                         if line:
@@ -5141,8 +5044,8 @@ class MainWindow(QMainWindow):
     def _apply_overlay_boxes(self, frames_dir, video_basename, track_id):
         """Feed a clip's per-frame boxes into the player as a live overlay.
 
-        Reads the YOLO annotation for the track (frame_<NNNN>.txt + meta.json, written by
-        encode_track_clips), converting the normalized coords back to native pixels.
+        Reads the YOLO annotation for the track (labels/frame_<NNNN>.txt + meta.json,
+        written by encode_track_clips), converting normalized coords back to native pixels.
         Legacy experiments have a single boxes.json instead — _read_overlay_annotations
         falls back to it so old runs still render."""
         track_dir = Path(frames_dir) / f"{video_basename}_{track_id}"
@@ -5850,9 +5753,11 @@ class MainWindow(QMainWindow):
 # those. bounding_boxes/ is intentionally excluded: it was a burned-in duplicate of frames/
 # reconstructable from the YOLO label + CSV, and is no longer generated.
 UPLOAD_FOLDERS = ['detection_results', 'false_positives',
-                  'frames', 'masks', 'shark_frames']
+                  'frames', 'masks', 'tracking_gifs', 'shark_frames']
 UPLOAD_IMAGE_MAX_W = 1920
 UPLOAD_IMAGE_MAX_H = 1080
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+MAX_UPLOAD_ZIP_BYTES = MAX_UPLOAD_BYTES - 1024 * 1024
 
 
 def _downscale_image_bytes(path, max_w=UPLOAD_IMAGE_MAX_W, max_h=UPLOAD_IMAGE_MAX_H):
@@ -5906,49 +5811,179 @@ def refresh_yolo_labels_from_csv(experiment_dir):
             track_dir = os.path.join(frames_root, f"{video_base}_{track_id}")
             if not os.path.isdir(track_dir):
                 continue
-            for fn in os.listdir(track_dir):
-                if not fn.endswith(".txt"):
-                    continue
-                p = os.path.join(track_dir, fn)
-                try:
-                    with open(p) as tf:
-                        line = tf.read().strip()
-                    if not line:
-                        continue  # negative frame — no box to reclass
-                    parts = line.split()
-                    parts[0] = str(cls)
-                    with open(p, "w") as tf:
-                        tf.write(" ".join(parts) + "\n")
-                except Exception as e:
-                    logger.warning(f"[upload] could not relabel {p}: {e}")
+            for root, _, filenames in os.walk(track_dir):
+                for filename in filenames:
+                    if not filename.endswith(".txt"):
+                        continue
+                    p = os.path.join(root, filename)
+                    try:
+                        with open(p) as tf:
+                            line = tf.read().strip()
+                        if not line:
+                            continue  # negative frame — no box to reclass
+                        parts = line.split()
+                        parts[0] = str(cls)
+                        with open(p, "w") as tf:
+                            tf.write(" ".join(parts) + "\n")
+                    except Exception as e:
+                        logger.warning(f"[upload] could not relabel {p}: {e}")
 
 
-def add_experiment_to_zip(zipf, experiment_dir, folders=UPLOAD_FOLDERS):
-    """Add an experiment's upload folders to an open ZipFile, downscaling images.
-
-    Any .jpg/.jpeg/.png is downscaled to <=1080p (see _downscale_image_bytes); everything
-    else — CSVs, the YOLO frame_*.txt labels, meta.json, classes.txt — is added verbatim.
-    Returns the number of files written."""
-    count = 0
+def get_experiment_upload_files(experiment_dir, folders=UPLOAD_FOLDERS):
+    """List uploadable files in the experiment folders in stable path order."""
+    files = []
     for folder in folders:
         folder_path = os.path.join(experiment_dir, folder)
-        if not os.path.exists(folder_path):
-            logger.warning(f"[upload]   skipping missing folder: {folder}")
+        if not os.path.isdir(folder_path):
+            logger.warning(f"[upload] skipping missing folder: {folder}")
             continue
-        for root, _, files in os.walk(folder_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                arcname = os.path.relpath(file_path, experiment_dir)
-                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    data = _downscale_image_bytes(file_path)
-                    if data is not None:
-                        zipf.writestr(arcname, data)
-                    else:
-                        zipf.write(file_path, arcname)
-                else:
-                    zipf.write(file_path, arcname)
-                count += 1
+        for root, _, filenames in os.walk(folder_path):
+            files.extend(os.path.join(root, filename) for filename in filenames)
+    return sorted(files, key=lambda path: os.path.relpath(path, experiment_dir))
+
+
+def add_experiment_to_zip(zipf, experiment_dir, file_paths):
+    """Add selected experiment files to a ZIP, downscaling image files."""
+    count = 0
+    for file_path in file_paths:
+        arcname = Path(file_path).relative_to(experiment_dir).as_posix()
+        if file_path.lower().endswith((".jpg", ".jpeg", ".png")):
+            data = _downscale_image_bytes(file_path)
+            if data is not None:
+                zipf.writestr(arcname, data)
+            else:
+                zipf.write(file_path, arcname)
+        else:
+            zipf.write(file_path, arcname)
+        count += 1
     return count
+
+
+def _iter_experiment_zip_parts(experiment_dir, file_paths):
+    """Yield ZIP parts whose finalized archive size stays below the request limit."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zipf:
+        file_count = add_experiment_to_zip(zipf, experiment_dir, file_paths)
+
+    if buffer.tell() <= MAX_UPLOAD_ZIP_BYTES:
+        buffer.seek(0)
+        yield buffer, file_count
+        return
+
+    buffer.close()
+    if len(file_paths) == 1:
+        relative_path = os.path.relpath(file_paths[0], experiment_dir)
+        raise ValueError(
+            f"A single file exceeds the {MAX_UPLOAD_ZIP_BYTES // (1024 * 1024)} MiB upload-part limit: "
+            f"{relative_path}"
+        )
+
+    middle = len(file_paths) // 2
+    yield from _iter_experiment_zip_parts(experiment_dir, file_paths[:middle])
+    yield from _iter_experiment_zip_parts(experiment_dir, file_paths[middle:])
+
+
+def upload_experiment_in_parts(api_url, experiment_dir, progress_callback=None):
+    """Upload an experiment as size-bounded ZIP requests with stable cloud paths."""
+    experiment_name = Path(experiment_dir).name
+    refresh_yolo_labels_from_csv(experiment_dir)
+    file_paths = get_experiment_upload_files(experiment_dir)
+
+    # Reserve headroom for ZIP headers and multipart framing while grouping by source size.
+    group_limit = MAX_UPLOAD_ZIP_BYTES - 1024 * 1024
+    file_groups = []
+    current_group = []
+    current_size = 0
+    for file_path in file_paths:
+        file_size = os.path.getsize(file_path)
+        if current_group and current_size + file_size > group_limit:
+            file_groups.append(current_group)
+            current_group = []
+            current_size = 0
+        current_group.append(file_path)
+        current_size += file_size
+    if current_group:
+        file_groups.append(current_group)
+    if not file_groups:
+        file_groups = [[]]
+
+    part_count = total_files = 0
+    for group in file_groups:
+        for buffer, file_count in _iter_experiment_zip_parts(experiment_dir, group):
+            part_count += 1
+            part_name = f"{experiment_name}.part{part_count:04d}.zip"
+            try:
+                response = requests.post(
+                    api_url,
+                    data={"experiment": experiment_name},
+                    files={"file": (part_name, buffer, "application/zip")},
+                )
+                response.raise_for_status()
+            finally:
+                buffer.close()
+            total_files += file_count
+            if progress_callback is not None:
+                progress_callback(total_files, len(file_paths))
+            logger.info(
+                f"[upload] {part_name}: {file_count} file(s), "
+                f"POST {part_count} succeeded (HTTP {response.status_code})"
+            )
+
+    return part_count, total_files
+
+
+class UploadBatchThread(QThread):
+    progress_updated = pyqtSignal(int, str)
+    upload_finished = pyqtSignal(bool, str)
+
+    def __init__(self, api_url, experiment_dirs):
+        super().__init__()
+        self.api_url = api_url
+        self.experiment_dirs = list(experiment_dirs)
+
+    def run(self):
+        uploaded_files = 0
+        experiment_count = len(self.experiment_dirs)
+
+        try:
+            for experiment_index, experiment_dir in enumerate(self.experiment_dirs):
+                experiment_name = Path(experiment_dir).name
+                logger.info(f"[upload] Uploading experiment '{experiment_dir}' in bounded parts")
+                self.progress_updated.emit(
+                    -1,
+                    f"Preparing and uploading {experiment_name}...",
+                )
+
+                def report_progress(experiment_files, experiment_total):
+                    fraction = (experiment_files / experiment_total
+                                if experiment_total else 1.0)
+                    value = round(100 * (experiment_index + fraction) / experiment_count)
+                    self.progress_updated.emit(
+                        value,
+                        f"Uploading {experiment_name}: {experiment_files} of {experiment_total} files",
+                    )
+
+                part_count, file_count = upload_experiment_in_parts(
+                    self.api_url,
+                    experiment_dir,
+                    progress_callback=report_progress,
+                )
+                uploaded_files += file_count
+                self.progress_updated.emit(
+                    round(100 * (experiment_index + 1) / experiment_count),
+                    f"Uploaded {experiment_name} in {part_count} request(s)",
+                )
+
+            self.upload_finished.emit(
+                True,
+                f"Uploaded {uploaded_files} file(s) across {experiment_count} experiment(s).",
+            )
+        except requests.RequestException as e:
+            logger.error(f"[upload] Batch failed (request error): {e}")
+            self.upload_finished.emit(False, f"Upload failed: {e}")
+        except Exception as e:
+            logger.exception("[upload] Batch failed")
+            self.upload_finished.emit(False, f"Upload failed: {e}")
 
 
 class UploadThread(QThread):
@@ -5961,33 +5996,19 @@ class UploadThread(QThread):
         self.experiment_dir = experiment_dir
 
     def run(self):
-        zip_name = f'{Path(self.experiment_dir).name}.zip'
-        logger.info(f"[upload] Zipping experiment '{self.experiment_dir}' -> {zip_name}")
+        experiment_name = Path(self.experiment_dir).name
+        logger.info(f"[upload] Uploading experiment '{self.experiment_dir}' in bounded parts")
         try:
-            # Bake the reviewer's corrected labels into the YOLO class column first.
-            refresh_yolo_labels_from_csv(self.experiment_dir)
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, 'w') as zipf:
-                # 'shark_frames' carries every sampled frame of each shark (+ per-frame
-                # YOLO labels); add_experiment_to_zip downscales images to <=1080p so the
-                # full detection sequence fits under the upload size limit.
-                file_count = add_experiment_to_zip(zipf, self.experiment_dir)
-
-            zip_size = buffer.tell()
-            buffer.seek(0)
-            logger.info(f"[upload] {zip_name}: {file_count} file(s), {zip_size / 1024:.1f} KB; "
-                  f"POST -> {self.api_url}")
-            files = {'file': (zip_name, buffer, 'application/zip')}
-            response = requests.post(self.api_url, files=files)
-            response.raise_for_status()
-
-            logger.info(f"[upload] {zip_name}: SUCCESS (HTTP {response.status_code})")
-            self.upload_finished.emit(True, "Folder uploaded successfully")
+            part_count, file_count = upload_experiment_in_parts(self.api_url, self.experiment_dir)
+            self.upload_finished.emit(
+                True,
+                f"Uploaded {file_count} file(s) in {part_count} request(s).",
+            )
         except requests.RequestException as e:
-            logger.error(f"[upload] {zip_name}: FAILED (request error): {e}")
+            logger.error(f"[upload] {experiment_name}: FAILED (request error): {e}")
             self.upload_finished.emit(False, "Upload failed: {}".format(str(e)))
         except Exception as e:
-            logger.error(f"[upload] {zip_name}: FAILED (unexpected error): {e}")
+            logger.error(f"[upload] {experiment_name}: FAILED (unexpected error): {e}")
             self.upload_finished.emit(False, "An unexpected error occurred: {}".format(str(e)))
 
     # def run(self):
