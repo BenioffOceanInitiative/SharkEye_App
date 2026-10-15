@@ -62,6 +62,9 @@ VIDEO_EXTENSIONS = {'.mp4', '.mov'}
 # Parseable completion marker written after each successful video (resume skips these).
 VIDEO_COMPLETE_PREFIX = "[video_complete]"
 _VIDEO_COMPLETE_RE = re.compile(r"\[video_complete\]\s+(.+)\s*$")
+# Legacy runs (pre-checkpoint) logged this after each video's inference loop finished.
+# Basename only — matched case-insensitively against candidate video paths.
+_STATS_COMPLETE_RE = re.compile(r"\[stats\]\s+([^:]+):")
 
 
 def normalize_video_key(path) -> str:
@@ -70,6 +73,11 @@ def normalize_video_key(path) -> str:
         return str(Path(path).resolve())
     except Exception:
         return os.path.normcase(os.path.normpath(str(path)))
+
+
+def normalize_video_basename(path) -> str:
+    """Case-folded basename for matching legacy ``[stats] name:`` log lines."""
+    return Path(path).name.casefold()
 
 
 def attach_output_dir_logging(output_dir: Path) -> Path | None:
@@ -95,32 +103,69 @@ def attach_output_dir_logging(output_dir: Path) -> Path | None:
         return None
 
 
-def load_completed_videos_from_logs(output_dir: Path) -> set[str]:
-    """Return video path keys marked ``[video_complete]`` in prior output-dir logs."""
+def load_completed_videos(output_dir: Path) -> set[str]:
+    """Collect completed-video keys from prior logs and ``output.csv``.
+
+    Keys may be:
+    * resolved absolute paths from ``[video_complete]`` / CSV ``Video name``
+    * case-folded basenames from legacy ``[stats] filename:`` lines (and CSV)
+
+    ``filter_incomplete_videos`` accepts either form.
+    """
     completed: set[str] = set()
     logs_dir = Path(output_dir) / "logs"
-    if not logs_dir.is_dir():
-        return completed
-    for log_file in sorted(logs_dir.glob("*.log*")):
+    if logs_dir.is_dir():
+        for log_file in sorted(logs_dir.glob("*.log*")):
+            try:
+                text = log_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                logger.warning("Could not read log %s: %s", log_file, e)
+                continue
+            for line in text.splitlines():
+                match = _VIDEO_COMPLETE_RE.search(line)
+                if match:
+                    raw = match.group(1).strip()
+                    completed.add(normalize_video_key(raw))
+                    completed.add(normalize_video_basename(raw))
+                    continue
+                match = _STATS_COMPLETE_RE.search(line)
+                if match:
+                    completed.add(normalize_video_basename(match.group(1).strip()))
+
+    csv_path = Path(output_dir) / "output.csv"
+    if csv_path.is_file():
         try:
-            text = log_file.read_text(encoding="utf-8", errors="replace")
+            with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    name = (row.get("Video name") or row.get("video_name") or "").strip()
+                    if not name:
+                        continue
+                    completed.add(normalize_video_key(name))
+                    completed.add(normalize_video_basename(name))
         except OSError as e:
-            logger.warning("Could not read log %s: %s", log_file, e)
-            continue
-        for line in text.splitlines():
-            match = _VIDEO_COMPLETE_RE.search(line)
-            if match:
-                completed.add(normalize_video_key(match.group(1).strip()))
+            logger.warning("Could not read CSV %s for resume: %s", csv_path, e)
+
     return completed
 
 
+# Backward-compatible alias used by older call sites / docs.
+load_completed_videos_from_logs = load_completed_videos
+
+
+def is_video_completed(path, completed: set[str]) -> bool:
+    """True if ``path`` matches a completed key by resolved path or basename."""
+    if not completed:
+        return False
+    return (normalize_video_key(path) in completed
+            or normalize_video_basename(path) in completed)
+
+
 def filter_incomplete_videos(video_paths, completed: set[str]) -> list:
-    """Drop videos already marked complete in prior logs."""
+    """Drop videos already marked complete in prior logs / CSV."""
     remaining = []
     skipped = 0
     for path in video_paths:
-        key = normalize_video_key(path)
-        if key in completed:
+        if is_video_completed(path, completed):
             skipped += 1
             logger.info("Skipping already completed video: %s", path)
             continue
@@ -412,7 +457,7 @@ def mass_prediction(video_paths, current_output_dir, sam_model_path, drone_type=
     all_track_results = []
     for path in videos_tqdm:
         video_key = normalize_video_key(path)
-        if video_key in completed:
+        if is_video_completed(path, completed):
             logger.info("Skipping already completed video: %s", path)
             continue
 
@@ -430,6 +475,7 @@ def mass_prediction(video_paths, current_output_dir, sam_model_path, drone_type=
             upsert_results_csv(output_dir, video_key, rows)
             logger.info("%s %s", VIDEO_COMPLETE_PREFIX, video_key)
             completed.add(video_key)
+            completed.add(normalize_video_basename(path))
             all_track_results.extend(rows)
         except Exception:
             logger.exception("Failed processing %s — will retry on a later run", path)
@@ -577,11 +623,11 @@ def cloud_bucket_inference():
     output_dir.mkdir(parents=True, exist_ok=True)
     attach_output_dir_logging(output_dir)
 
-    # Resume: skip videos that prior runs in this output_dir already finished successfully.
-    completed_videos = load_completed_videos_from_logs(output_dir)
+    # Resume: skip videos finished in prior runs (legacy [stats] logs, [video_complete], CSV).
+    completed_videos = load_completed_videos(output_dir)
     if completed_videos:
-        logger.info("Found %d completed video(s) in prior logs under %s",
-                    len(completed_videos), output_dir / "logs")
+        logger.info("Found %d completed video key(s) under %s (logs + output.csv)",
+                    len(completed_videos), output_dir)
 
     max_videos = args.max_videos
     drone_type = args.drone
