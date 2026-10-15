@@ -325,10 +325,13 @@ class CustomTracker:
             'best_length': length,
             'best_pos': (x, y, w, h),   # box at the highest-confidence frame; what SAM segments
             'segmentation_duration': 0.0,  # set when SAM runs in save_best_frames (mass_prediction CSV reads it)
+            'segmentation_length_px': None,  # mask major-axis px; set in save_best_frames
+            'segmentation_length_ft': None,  # mask length in feet; set in save_best_frames
             'longest_frame': frame,
-            'longest_conf': confidence, 
+            'longest_conf': confidence,
             'longest_timestamp': timestamp,
-            'longest_length': length,            
+            'longest_length': length,
+            'longest_pos': (x, y, w, h),  # box at the longest bbox-length frame (conf>0.8 gate)
             'frames_since_last_detection': 0,
             'velocity': np.array([0, 0]),
             'label': 'Shark',
@@ -367,6 +370,7 @@ class CustomTracker:
             track['longest_frame'] = frame  # fresh un-mutated buffer; no copy needed
             track['longest_timestamp'] = timestamp
             track['longest_length'] = length
+            track['longest_pos'] = (x, y, w, h)
 
         if len(track['positions']) > 1:
             prev_pos = np.array(track['positions'][-2][:2])
@@ -455,7 +459,9 @@ class CustomTracker:
                                                                          original_width=seg_frame.shape[1], original_height=seg_frame.shape[0],
                                                                          drone_altitude=self.drone_altitude,
                                                                          fov_radians=self.fov_radians)
-                track['longest_length'] = segmentation_length
+                track['segmentation_length_px'] = float(pixel_length)
+                track['segmentation_length_ft'] = float(segmentation_length)
+                track['longest_length'] = segmentation_length  # canonical length for GUI / downstream
 
                 # Length provenance + sanity. Both estimators now share the per-video
                 # calibration (_bbox_length_ft uses the same ground pixel-size as SAM), so a
