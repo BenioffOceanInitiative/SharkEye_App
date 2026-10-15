@@ -15,7 +15,9 @@ import csv
 from tqdm import tqdm
 import re
 from utility import resource_path, get_results_dir, select_torch_device
-from log_config import get_logger, install_crash_handlers
+from log_config import get_logger, install_crash_handlers, ROOT_NAME
+from logging.handlers import RotatingFileHandler
+import logging
 
 logger = get_logger("sharkeye.headless")
 from frame_sampling import (iter_sampled_frames, parse_detections, format_sampling_stats,
@@ -57,8 +59,121 @@ MODEL_PATH = resource_path('model_weights/runs-detect-train-weights-best.pt')
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 VIDEO_EXTENSIONS = {'.mp4', '.mov'}
 
+# Parseable completion marker written after each successful video (resume skips these).
+VIDEO_COMPLETE_PREFIX = "[video_complete]"
+_VIDEO_COMPLETE_RE = re.compile(r"\[video_complete\]\s+(.+)\s*$")
 
-    
+
+def normalize_video_key(path) -> str:
+    """Stable absolute path key for resume matching across log/CSV/CLI inputs."""
+    try:
+        return str(Path(path).resolve())
+    except Exception:
+        return os.path.normcase(os.path.normpath(str(path)))
+
+
+def attach_output_dir_logging(output_dir: Path) -> Path | None:
+    """Also write logs under ``{output_dir}/logs/`` (in addition to results/logs)."""
+    try:
+        logs_dir = Path(output_dir) / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        name = f"sharkeye_{datetime.now().strftime('%m%d%Y_%H%M%S')}_{os.getpid()}.log"
+        path = logs_dir / name
+        fmt = logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler = RotatingFileHandler(
+            path, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        handler.setLevel(logging.getLogger(ROOT_NAME).level)
+        handler.setFormatter(fmt)
+        logging.getLogger(ROOT_NAME).addHandler(handler)
+        logger.info("Logging to %s", path)
+        return path
+    except Exception as e:
+        logger.warning("Could not attach output-dir log handler: %s", e)
+        return None
+
+
+def load_completed_videos_from_logs(output_dir: Path) -> set[str]:
+    """Return video path keys marked ``[video_complete]`` in prior output-dir logs."""
+    completed: set[str] = set()
+    logs_dir = Path(output_dir) / "logs"
+    if not logs_dir.is_dir():
+        return completed
+    for log_file in sorted(logs_dir.glob("*.log*")):
+        try:
+            text = log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            logger.warning("Could not read log %s: %s", log_file, e)
+            continue
+        for line in text.splitlines():
+            match = _VIDEO_COMPLETE_RE.search(line)
+            if match:
+                completed.add(normalize_video_key(match.group(1).strip()))
+    return completed
+
+
+def filter_incomplete_videos(video_paths, completed: set[str]) -> list:
+    """Drop videos already marked complete in prior logs."""
+    remaining = []
+    skipped = 0
+    for path in video_paths:
+        key = normalize_video_key(path)
+        if key in completed:
+            skipped += 1
+            logger.info("Skipping already completed video: %s", path)
+            continue
+        remaining.append(path)
+    if skipped:
+        logger.info("Resume: skipping %d completed video(s); %d remaining",
+                    skipped, len(remaining))
+    return remaining
+
+
+def upsert_results_csv(output_dir: Path, video_key: str, new_rows: list[dict]) -> None:
+    """Merge ``new_rows`` into ``output.csv``, replacing any prior rows for ``video_key``.
+
+    Preserves rows from other videos so continued runs update the same CSV in place.
+    Writes even when ``new_rows`` is empty (clears stale rows for a zero-detection video).
+    """
+    csv_path = Path(output_dir) / "output.csv"
+    existing: list[dict] = []
+    fieldnames: list[str] = []
+
+    if csv_path.exists():
+        try:
+            with open(csv_path, mode="r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames:
+                    fieldnames = list(reader.fieldnames)
+                for row in reader:
+                    row_key = normalize_video_key(row.get("Video name") or row.get("video_name") or "")
+                    if row_key and row_key == video_key:
+                        continue  # drop prior rows for this video; replaced below
+                    existing.append(row)
+        except OSError as e:
+            logger.warning("Could not read existing CSV %s: %s", csv_path, e)
+
+    if new_rows:
+        for key in new_rows[0].keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+        existing.extend(new_rows)
+    elif not fieldnames:
+        # Nothing to write and no prior schema — skip creating an empty header-only file.
+        logger.info("No tracks for %s; CSV unchanged (no prior schema)", video_key)
+        return
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(existing)
+    logger.info("Updated %s (%d row(s) total) after %s",
+                csv_path, len(existing), Path(video_key).name)
+
+
 class HeadlessVideoProcessor():
     progress_update = 0
     processing_complete = {}
@@ -271,12 +386,16 @@ def warmup_models(model, sam_model_path=None):
 
 
 def mass_prediction(video_paths, current_output_dir, sam_model_path, drone_type="Air 2S",
-                    altitude=40.0, group_name=None, model=None, drone_settings=None):
+                    altitude=40.0, group_name=None, model=None, drone_settings=None,
+                    completed_videos: set[str] | None = None):
     """Run inference on ``video_paths``, writing frames/masks under ``{output}/{group_name}/``.
 
     ``group_name`` is the input-folder label (e.g. ``sample_data``, ``2023``). When omitted,
     it falls back to each video's parent directory name.
     If ``model`` is provided it is reused (cloud-bucket path loads once across year folders).
+
+    After each successful video: append/upsert rows into ``{output}/output.csv`` and log
+    ``[video_complete]`` so later runs can skip it. Failures are logged and do not mark complete.
     """
     if model is None:
         device = select_torch_device()
@@ -286,16 +405,34 @@ def mass_prediction(video_paths, current_output_dir, sam_model_path, drone_type=
     if drone_settings is None:
         drone_settings = load_drone_settings()
 
+    completed = completed_videos if completed_videos is not None else set()
+    output_dir = Path(current_output_dir)
+
     videos_tqdm = tqdm(video_paths)
     all_track_results = []
     for path in videos_tqdm:
+        video_key = normalize_video_key(path)
+        if video_key in completed:
+            logger.info("Skipping already completed video: %s", path)
+            continue
+
         videos_tqdm.set_description(f"Processing {path}")
-        processor = HeadlessVideoProcessor(
-            path, model, current_output_dir, sam_model_path=sam_model_path,
-            drone_type=drone_type, altitude=altitude, drone_settings=drone_settings,
-            group_name=group_name,
-        )
-        all_track_results.extend(processor.run())
+        try:
+            processor = HeadlessVideoProcessor(
+                path, model, current_output_dir, sam_model_path=sam_model_path,
+                drone_type=drone_type, altitude=altitude, drone_settings=drone_settings,
+                group_name=group_name,
+            )
+            rows = processor.run()
+            # Normalize Video name to the resolved key so CSV resume matching is stable.
+            for row in rows:
+                row["Video name"] = video_key
+            upsert_results_csv(output_dir, video_key, rows)
+            logger.info("%s %s", VIDEO_COMPLETE_PREFIX, video_key)
+            completed.add(video_key)
+            all_track_results.extend(rows)
+        except Exception:
+            logger.exception("Failed processing %s — will retry on a later run", path)
 
     return all_track_results
 
@@ -430,18 +567,6 @@ def collect_local_videos(input_path: Path) -> list[Path]:
     })
 
 
-def write_results_csv(output_dir: Path, results) -> None:
-    if results:
-        csv_path = output_dir / "output.csv"
-        with open(csv_path, mode="w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=results[0].keys())
-            writer.writeheader()
-            writer.writerows(results)
-        logger.info(f"Results saved to {csv_path}")
-    else:
-        logger.warning("No valid tracks were found.")
-
-
 def cloud_bucket_inference():
     """Entry point: local file/dir via ``--input_dir``, else cloud-bucket scan."""
     install_crash_handlers()
@@ -450,6 +575,14 @@ def cloud_bucket_inference():
     sam_model_path = Path(args.sam_model_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    attach_output_dir_logging(output_dir)
+
+    # Resume: skip videos that prior runs in this output_dir already finished successfully.
+    completed_videos = load_completed_videos_from_logs(output_dir)
+    if completed_videos:
+        logger.info("Found %d completed video(s) in prior logs under %s",
+                    len(completed_videos), output_dir / "logs")
+
     max_videos = args.max_videos
     drone_type = args.drone
     altitude = args.altitude
@@ -463,28 +596,31 @@ def cloud_bucket_inference():
         except (FileNotFoundError, ValueError) as e:
             logger.error(str(e))
             return
+        video_paths = filter_incomplete_videos(video_paths, completed_videos)
         if max_videos is not None:
             video_paths = video_paths[:max_videos]
         group_name = input_path.name if input_path.is_dir() else input_path.parent.name
         if not group_name or group_name in (".", ".."):
             group_name = "videos"
-        logger.info(f"Found {len(video_paths)} video(s) under {args.input_dir} "
+        logger.info(f"Found {len(video_paths)} video(s) to process under {args.input_dir} "
                     f"(output group: {group_name})")
-        results = mass_prediction(
+        if not video_paths:
+            logger.info("Nothing left to process.")
+            return
+        mass_prediction(
             video_paths=video_paths,
             current_output_dir=output_dir,
             sam_model_path=sam_model_path,
             drone_type=drone_type,
             altitude=altitude,
             group_name=group_name,
+            completed_videos=completed_videos,
         )
-        write_results_csv(output_dir, results)
         return
 
     # Cloud-bucket mirror under ./sharkeye_videos (default when --input_dir omitted).
     # One output group per year/subdir: headless_predictions/2023/, /2024/, ...
     videos_dict = scan_bucket_for_videos()
-    all_track_results = []
     remaining_videos = max_videos
 
     device = select_torch_device()
@@ -496,24 +632,24 @@ def cloud_bucket_inference():
     for subdir, paths in videos_dict.items():
         if remaining_videos is not None and remaining_videos <= 0:
             break
+        paths = filter_incomplete_videos(paths, completed_videos)
         if remaining_videos is not None and len(paths) > remaining_videos:
             paths = paths[:remaining_videos]
-        all_track_results.extend(
-            mass_prediction(
-                video_paths=paths,
-                current_output_dir=output_dir,
-                sam_model_path=sam_model_path,
-                drone_type=drone_type,
-                altitude=altitude,
-                group_name=subdir,
-                model=model,
-                drone_settings=drone_settings,
-            )
+        if not paths:
+            continue
+        mass_prediction(
+            video_paths=paths,
+            current_output_dir=output_dir,
+            sam_model_path=sam_model_path,
+            drone_type=drone_type,
+            altitude=altitude,
+            group_name=subdir,
+            model=model,
+            drone_settings=drone_settings,
+            completed_videos=completed_videos,
         )
         if remaining_videos is not None:
             remaining_videos -= len(paths)
-
-    write_results_csv(output_dir, all_track_results)
 
 
 def main():
