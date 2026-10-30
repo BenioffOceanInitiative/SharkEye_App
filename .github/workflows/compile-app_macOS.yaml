@@ -84,6 +84,7 @@ jobs:
           set -euxo pipefail
           python -m PyInstaller --clean --noconfirm SharkEye.spec
 
+
       - name: List dist contents
         shell: bash
         run: |
@@ -94,3 +95,53 @@ jobs:
             du -sh dist/SharkEye.app || true
             ls -lah "dist/SharkEye.app/Contents/MacOS" || true
           elif [ -d "dist/SharkEye" ]; then
+            ls -lah dist/SharkEye || true
+          fi
+
+      - name: Ad-hoc codesign app
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Ad-hoc signature (no paid cert). Avoids "app is damaged" errors. Does NOT
+          # remove the Gatekeeper "Allow" prompt — that requires Developer ID
+          # notarization (see plan Phase 3).
+          codesign --force --deep --sign - "dist/SharkEye.app"
+          codesign --verify --deep --strict "dist/SharkEye.app" || true
+
+      - name: Create Intel DMG (drag-to-Applications)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew install create-dmg
+          date=$(date +"%Y%m%d")
+          dmgName="SharkEye_macOS_Intel_$date.dmg"
+          create-dmg \
+            --volname "SharkEye" \
+            --app-drop-link 450 180 \
+            --icon "SharkEye.app" 150 180 \
+            --window-size 600 360 \
+            "$dmgName" "dist/SharkEye.app" \
+          || hdiutil create -volname "SharkEye" -srcfolder "dist/SharkEye.app" -ov -format UDZO "$dmgName"
+          echo "ZIP_NAME=$dmgName" >> "$GITHUB_ENV"
+          echo "Created $dmgName"
+
+      - name: Run build performance logging
+        env:
+          QT_QPA_PLATFORM: minimal
+        run: >
+          python src/build_logging.py
+          --build_name SharkEye_macOS_Intel$date
+          --commit_hash ${{ github.sha }}
+          --num_videos 6
+          --save_results
+
+      # - name: Upload ZIP to Google Drive
+      #   uses: willo32/google-drive-upload-action@v1
+      #   with:
+      #     target: ${{ env.ZIP_NAME }}
+      #     credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
+      #     parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
+      #     name: ${{ env.ZIP_NAME }}
+
+      - name: Upload Intel build to Google Cloud Bucket
+        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
