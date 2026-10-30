@@ -1,35 +1,3 @@
-name: Build macOS Executable (PyInstaller Spec, Intel)
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-jobs:
-  build-macos-intel:
-    runs-on: macos-15-intel
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-        with:
-          lfs: false
-          fetch-depth: 0
-          # submodules: recursive   # uncomment if weights live in submodules
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11.4"
-          architecture: "x64" # ensure x86_64 on Intel runner
-
-      - name: Confirm runner and Python architecture
-        shell: bash
-        run: |
-          uname -a
-          python -c "import platform, sys; print('Python:', sys.version); print('Machine:', platform.machine()); print('Arch tuple:', platform.architecture())"
-          # Simple guard: expect x86_64
           py_machine=$(python -c "import platform; print(platform.machine())")
           [ "$py_machine" = "x86_64" ] || (echo "Unexpected Python machine: $py_machine" >&2; exit 1)
 
@@ -37,19 +5,29 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          python -m pip install --upgrade pip wheel
-          pip install -r requirements.txt
-          # Pin setuptools + pyinstaller to a combo verified to boot: newer setuptools
-          # removes pkg_resources entirely, so PyInstaller does NOT bundle its
-          # pkg_resources runtime hook (which crashes with "module 'pkg_resources'
-          # has no attribute 'NullProvider'" on the transitional stub versions).
-          pip install "setuptools==83.0.0" "pyinstaller==6.21.0" "PyQt6<6.8" "PyQt6-Qt6<6.8" "numpy==2.0.2"
-          pip show numpy setuptools
 
-          # Force compatible Google stack
-          pip install --upgrade google-cloud-storage google-cloud-core google-api-core google-auth
-          # Reassert setuptools pin in case the Google upgrade pulled a different one
-          pip install "setuptools==83.0.0"
+          # Constrain all installs without changing requirements.txt.
+          printf 'numpy==1.26.4\nopencv-python>=4.8,<4.12\n' > "$RUNNER_TEMP/sharkeye-constraints.txt"
+          export PIP_CONSTRAINT="$RUNNER_TEMP/sharkeye-constraints.txt"
+          echo "PIP_CONSTRAINT=$PIP_CONSTRAINT" >> "$GITHUB_ENV"
+
+          python -m pip install --upgrade pip wheel
+          python -m pip install -r requirements.txt
+
+          # Retain the previously verified packaging versions.
+          python -m pip install \
+            "setuptools==83.0.0" \
+            "pyinstaller==6.21.0" \
+            "PyQt6<6.8" \
+            "PyQt6-Qt6<6.8"
+
+          python -m pip install --upgrade \
+            google-cloud-storage google-cloud-core google-api-core google-auth
+          python -m pip install "setuptools==83.0.0"
+
+          # Fail early if PyTorch cannot use NumPy.
+          python -m pip check
+          python -c "import sys, numpy, cv2, torch; print('Python:', sys.executable); print('NumPy:', numpy.__version__); print('OpenCV:', cv2.__version__); print('PyTorch:', torch.__version__); print('Tensor:', torch.from_numpy(numpy.array([1, 2, 3])))"
 
       - name: Clean build outputs
         shell: bash
@@ -72,7 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          pyinstaller --clean --noconfirm SharkEye.spec
+          python -m PyInstaller --clean --noconfirm SharkEye.spec
 
       - name: List dist contents
         shell: bash
