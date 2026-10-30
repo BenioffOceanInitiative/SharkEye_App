@@ -1,3 +1,35 @@
+name: Build macOS Executable (PyInstaller Spec, Intel)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-macos-intel:
+    runs-on: macos-15-intel
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+          fetch-depth: 0
+          # submodules: recursive   # uncomment if weights live in submodules
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.4"
+          architecture: "x64" # ensure x86_64 on Intel runner
+
+      - name: Confirm runner and Python architecture
+        shell: bash
+        run: |
+          uname -a
+          python -c "import platform, sys; print('Python:', sys.version); print('Machine:', platform.machine()); print('Arch tuple:', platform.architecture())"
+          # Simple guard: expect x86_64
           py_machine=$(python -c "import platform; print(platform.machine())")
           [ "$py_machine" = "x86_64" ] || (echo "Unexpected Python machine: $py_machine" >&2; exit 1)
 
@@ -62,53 +94,3 @@
             du -sh dist/SharkEye.app || true
             ls -lah "dist/SharkEye.app/Contents/MacOS" || true
           elif [ -d "dist/SharkEye" ]; then
-            ls -lah dist/SharkEye || true
-          fi
-
-      - name: Ad-hoc codesign app
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # Ad-hoc signature (no paid cert). Avoids "app is damaged" errors. Does NOT
-          # remove the Gatekeeper "Allow" prompt — that requires Developer ID
-          # notarization (see plan Phase 3).
-          codesign --force --deep --sign - "dist/SharkEye.app"
-          codesign --verify --deep --strict "dist/SharkEye.app" || true
-
-      - name: Create Intel DMG (drag-to-Applications)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          brew install create-dmg
-          date=$(date +"%Y%m%d")
-          dmgName="SharkEye_macOS_Intel_$date.dmg"
-          create-dmg \
-            --volname "SharkEye" \
-            --app-drop-link 450 180 \
-            --icon "SharkEye.app" 150 180 \
-            --window-size 600 360 \
-            "$dmgName" "dist/SharkEye.app" \
-          || hdiutil create -volname "SharkEye" -srcfolder "dist/SharkEye.app" -ov -format UDZO "$dmgName"
-          echo "ZIP_NAME=$dmgName" >> "$GITHUB_ENV"
-          echo "Created $dmgName"
-
-      - name: Run build performance logging
-        env:
-          QT_QPA_PLATFORM: minimal
-        run: >
-          python src/build_logging.py
-          --build_name SharkEye_macOS_Intel$date
-          --commit_hash ${{ github.sha }}
-          --num_videos 6
-          --save_results
-
-      # - name: Upload ZIP to Google Drive
-      #   uses: willo32/google-drive-upload-action@v1
-      #   with:
-      #     target: ${{ env.ZIP_NAME }}
-      #     credentials: ${{ secrets.ACTIONS_SERVICE_ACCOUNT }}
-      #     parent_folder_id: ${{ secrets.ML_FOLDER_GDRIVE }}
-      #     name: ${{ env.ZIP_NAME }}
-
-      - name: Upload Intel build to Google Cloud Bucket
-        run: python update_build_in_bucket.py --build_path "${{ env.ZIP_NAME }}"
